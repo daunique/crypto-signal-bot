@@ -176,6 +176,13 @@ def job_resolve_outcomes():
                     sig.outcome = outcome
                     db.session.commit()
 
+                    # Record outcome in per-pair live tracker
+                    try:
+                        from signal_engine import record_outcome
+                        record_outcome(sig.symbol, outcome)
+                    except Exception:
+                        pass
+
                     # Update shadow balance
                     if sig.mode == "shadow":
                         shadow = ShadowBalance.query.first()

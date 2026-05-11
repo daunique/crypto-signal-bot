@@ -220,6 +220,28 @@ def create_app():
             "daily_stats":         [d.to_dict() for d in daily],
         })
 
+    # ─── API: Per-pair stats ──────────────────────────────────────────────────
+    @app.route("/api/stats/pairs")
+    def pair_stats():
+        from signal_engine import get_pair_stats
+        live = get_pair_stats()
+
+        # Enrich with DB win/loss counts per pair (all time)
+        from sqlalchemy import func
+        db_stats = {}
+        for sym in ["BTC-USDT","ETH-USDT","SOL-USDT","XRP-USDT","BNB-USDT","DOGE-USDT"]:
+            wins   = Signal.query.filter_by(symbol=sym, outcome="WIN").count()
+            losses = Signal.query.filter_by(symbol=sym, outcome="LOSS").count()
+            total  = wins + losses
+            db_stats[sym] = {
+                "wins":     wins,
+                "losses":   losses,
+                "total":    total,
+                "win_rate": round(wins / total * 100, 1) if total > 0 else None,
+                "threshold": live.get(sym, {}).get("threshold", 0.58),
+            }
+        return jsonify(db_stats)
+
     # ─── API: Live prices ─────────────────────────────────────────────────────
     @app.route("/api/prices")
     def live_prices():

@@ -564,6 +564,27 @@ input[type="number"]:focus { border-color: var(--accent); }
     </div>
   </div>
 
+    <!-- Per-Pair Performance -->
+    <div class="card" style="margin-top:16px;">
+      <div class="card-header">
+        <span class="card-title">📊 Per-Pair Performance</span>
+        <span style="font-size:0.72rem;color:var(--text2);">Live win rate by pair</span>
+      </div>
+      <div style="overflow-x:auto;">
+        <table class="signal-table" id="pair-table">
+          <thead>
+            <tr>
+              <th>Pair</th><th>Tier</th><th>Threshold</th>
+              <th>Wins</th><th>Losses</th><th>Win Rate</th><th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="pair-tbody">
+            <tr><td colspan="7" style="text-align:center;color:var(--text2);padding:16px;">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
   <!-- ── SIGNALS PAGE ── -->
   <div class="page" id="page-signals">
     <div class="page-header">
@@ -1317,12 +1338,49 @@ function showToast(msg, type = 'signal') {
   setTimeout(() => toast.remove(), 5000);
 }
 
+// ── Per-Pair Stats ────────────────────────────────────────────────────────
+async function loadPairStats() {
+  try {
+    const r = await fetch('/api/stats/pairs');
+    if (!r.ok) return;
+    const data = await r.json();
+
+    const TIER = {
+      'BTC-USDT': 'A', 'ETH-USDT': 'A',
+      'BNB-USDT': 'B', 'SOL-USDT': 'B',
+      'XRP-USDT': 'C', 'DOGE-USDT': 'C',
+    };
+    const TIER_COLOR = { 'A': 'var(--win)', 'B': 'var(--warn)', 'C': 'var(--text2)' };
+
+    const tbody = document.getElementById('pair-tbody');
+    if (!tbody) return;
+
+    const rows = Object.entries(data).map(([sym, d]) => {
+      const tier = TIER[sym] || '?';
+      const wr   = d.win_rate;
+      const wrColor = wr === null ? 'var(--text2)' : wr >= 60 ? 'var(--win)' : wr >= 50 ? 'var(--warn)' : 'var(--loss)';
+      const status = wr === null ? '—' : wr >= 60 ? '✅ Strong' : wr >= 55 ? '⚡ Good' : wr >= 50 ? '⚠️ Weak' : '❌ Poor';
+      return `<tr>
+        <td style="font-weight:700;">${sym}</td>
+        <td style="color:${TIER_COLOR[tier]};font-weight:700;">Tier ${tier}</td>
+        <td style="color:var(--accent2);">${(d.threshold*100).toFixed(0)}%</td>
+        <td style="color:var(--win);">${d.wins}</td>
+        <td style="color:var(--loss);">${d.losses}</td>
+        <td style="color:${wrColor};font-weight:700;">${wr !== null ? wr.toFixed(1)+'%' : 'No data'}</td>
+        <td style="font-size:0.8rem;">${status}</td>
+      </tr>`;
+    });
+    tbody.innerHTML = rows.join('');
+  } catch(e) { console.error('[Dashboard] loadPairStats error:', e); }
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────
 async function init() {
   console.log('[Dashboard] Initialising...');
   await loadSettings();
   await loadTodayStats();
   await loadTodaySignals();
+  await loadPairStats();
   await loadPrices();
   await loadPerfChart();
   console.log('[Dashboard] Init complete. Open /api/debug to inspect DB state.');
@@ -1332,11 +1390,13 @@ init();
 
 // Refresh prices every 30s
 setInterval(loadPrices, 30000);
-// Poll stats + signals every 15s as fallback when WebSocket misses a push
+// Poll stats + signals every 15s
 setInterval(() => {
   loadTodayStats();
   loadTodaySignals();
 }, 15000);
+// Refresh pair stats every 5 minutes
+setInterval(loadPairStats, 300000);
 </script>
 </body>
 </html>
