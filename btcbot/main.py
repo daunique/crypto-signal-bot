@@ -1,25 +1,34 @@
 """
-Fallback entrypoint — identical to wsgi.py.
-Render sometimes auto-detects main.py and tries uvicorn main:app.
-This file makes that work correctly with gunicorn too.
+Fallback entrypoint — same as wsgi.py.
+Eventlet monkey-patch MUST be first.
 """
+import eventlet
+eventlet.monkey_patch()
+
 import os, logging, threading
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 from app import app, socketio
-from scheduler import start_scheduler
-from signal_engine import retrain_all
 
-def _background_init():
+def _bg():
     with app.app_context():
         try:
-            logger.info("[INIT] Training ML models...")
+            from signal_engine import retrain_all
             retrain_all(limit=300)
+            logger.info("[INIT] Models ready")
         except Exception as e:
-            logger.error(f"[INIT] Error: {e}")
+            logger.error(f"[INIT] {e}")
 
-threading.Thread(target=_background_init, daemon=True).start()
-start_scheduler()
+def _sched():
+    try:
+        from scheduler import start_scheduler
+        start_scheduler()
+    except Exception as e:
+        logger.error(f"[INIT] Scheduler: {e}")
+
+threading.Thread(target=_bg, daemon=True).start()
+_sched()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
