@@ -924,6 +924,7 @@ updateClock();
 async function loadTodayStats() {
   try {
     const r = await fetch('/api/stats/today');
+    if (!r.ok) { console.error('[Dashboard] stats/today error:', r.status); return; }
     const d = await r.json();
     state.todayStats = d;
 
@@ -976,10 +977,16 @@ async function loadPrices() {
 
 // ── Today's Signal Feed ────────────────────────────────────────────────────
 async function loadTodaySignals() {
+  const feed = document.getElementById('signal-feed');
   try {
     const r = await fetch('/api/signals/today');
+    if (!r.ok) {
+      console.error('[Dashboard] /api/signals/today HTTP error:', r.status, r.statusText);
+      feed.innerHTML = `<div style="color:var(--down);text-align:center;padding:20px;font-size:0.8rem;">API error ${r.status} — check /api/debug</div>`;
+      return;
+    }
     const sigs = await r.json();
-    const feed = document.getElementById('signal-feed');
+    console.log('[Dashboard] signals/today returned', sigs.length, 'signals:', sigs);
 
     if (!sigs.length) {
       feed.innerHTML = '<div style="color:var(--text2);text-align:center;padding:32px;font-size:0.85rem;">Waiting for next candle signal...</div>';
@@ -988,25 +995,33 @@ async function loadTodaySignals() {
 
     feed.innerHTML = sigs.map(s => {
       const dir = s.signal_direction;
-      const out = s.outcome.toLowerCase();
+      const out = (s.outcome || 'pending').toLowerCase();
       const tier = s.tier || 'T2';
-      const time = new Date(s.candle_open_time + 'Z').toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', timeZone:'UTC'});
-      const closeTime = new Date(s.candle_close_time + 'Z').toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', timeZone:'UTC'});
+      // Handle both with and without trailing Z
+      const openTs  = s.candle_open_time  ? (s.candle_open_time.endsWith('Z')  ? s.candle_open_time  : s.candle_open_time  + 'Z') : null;
+      const closeTs = s.candle_close_time ? (s.candle_close_time.endsWith('Z') ? s.candle_close_time : s.candle_close_time + 'Z') : null;
+      const time      = openTs  ? new Date(openTs ).toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', timeZone:'UTC'}) : '—';
+      const closeTime = closeTs ? new Date(closeTs).toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', timeZone:'UTC'}) : '—';
+      const conf = s.ml_confidence != null ? Number(s.ml_confidence).toFixed(1) : '—';
+      const price = s.open_price != null ? Number(s.open_price).toFixed(4) : '—';
       return `
         <div class="signal-card ${out}">
-          <div class="sig-direction ${dir.toLowerCase()}">${dir === 'UP' ? '▲' : '▼'}</div>
+          <div class="sig-direction ${(dir||'').toLowerCase()}">${dir === 'UP' ? '▲' : '▼'}</div>
           <div class="sig-info">
-            <div class="sig-symbol">${s.symbol} <span class="tier-badge tier-${tier.toLowerCase()}">${tier}</span></div>
-            <div class="sig-meta">${time} → ${closeTime} UTC · Entry $${s.open_price?.toFixed(4) || '—'}</div>
+            <div class="sig-symbol">${s.symbol || '?'} <span class="tier-badge tier-${tier.toLowerCase()}">${tier}</span></div>
+            <div class="sig-meta">${time} → ${closeTime} UTC · Entry $${price}</div>
           </div>
           <div class="sig-conf">
-            <div class="conf-val stat-accent">${s.ml_confidence?.toFixed(1)}%</div>
+            <div class="conf-val stat-accent">${conf}%</div>
             <div style="font-size:0.7rem;color:var(--text2);">confidence</div>
           </div>
-          <span class="sig-outcome ${out}">${s.outcome}</span>
+          <span class="sig-outcome ${out}">${s.outcome || 'PENDING'}</span>
         </div>`;
     }).join('');
-  } catch (e) { console.error(e); }
+  } catch (e) {
+    console.error('[Dashboard] loadTodaySignals error:', e);
+    feed.innerHTML = `<div style="color:var(--down);text-align:center;padding:20px;font-size:0.8rem;">Load error: ${e.message}</div>`;
+  }
 }
 
 // ── Signals Table ──────────────────────────────────────────────────────────
@@ -1304,11 +1319,13 @@ function showToast(msg, type = 'signal') {
 
 // ── Init ───────────────────────────────────────────────────────────────────
 async function init() {
+  console.log('[Dashboard] Initialising...');
   await loadSettings();
   await loadTodayStats();
   await loadTodaySignals();
   await loadPrices();
   await loadPerfChart();
+  console.log('[Dashboard] Init complete. Open /api/debug to inspect DB state.');
 }
 
 init();

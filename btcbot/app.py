@@ -197,6 +197,34 @@ def create_app():
         job_resolve_outcomes()
         return jsonify({"success": True, "message": "Outcome resolution triggered"})
 
+    # ─── API: Debug — raw DB dump ─────────────────────────────────────────────
+    @app.route("/api/debug")
+    def debug():
+        from sqlalchemy import text
+        all_signals = Signal.query.order_by(Signal.id.desc()).limit(20).all()
+        settings    = Settings.query.first()
+        shadow      = ShadowBalance.query.first()
+        daily       = DailyStats.query.order_by(DailyStats.date.desc()).limit(7).all()
+        now_utc     = datetime.utcnow()
+        today       = date.today()
+        today_start = datetime.combine(today, datetime.min.time())
+
+        # Count directly
+        today_sigs = Signal.query.filter(Signal.created_at >= today_start).all()
+
+        return jsonify({
+            "server_time_utc": now_utc.isoformat(),
+            "today_date": str(today),
+            "today_start": today_start.isoformat(),
+            "total_signals_in_db": Signal.query.count(),
+            "today_signals_count": len(today_sigs),
+            "today_signals": [s.to_dict() for s in today_sigs],
+            "last_20_signals": [s.to_dict() for s in all_signals],
+            "settings": settings.to_dict() if settings else None,
+            "shadow_balance": shadow.to_dict() if shadow else None,
+            "daily_stats": [d.to_dict() for d in daily],
+        })
+
     # ─── API: Live prices ─────────────────────────────────────────────────────
     @app.route("/api/prices")
     def live_prices():
