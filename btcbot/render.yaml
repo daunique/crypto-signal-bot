@@ -4,7 +4,7 @@ services:
     env: python
     pythonVersion: "3.11.9"
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: gunicorn --worker-class eventlet -w 1 --bind 0.0.0.0:$PORT wsgi:app
+    startCommand: gunicorn --worker-class eventlet -w 1 --timeout 120 --bind 0.0.0.0:$PORT wsgi:app
     envVars:
       - key: SECRET_KEY
         generateValue: true
