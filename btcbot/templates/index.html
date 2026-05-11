@@ -324,10 +324,77 @@ input[type="number"]:focus { border-color: var(--accent); }
 @media (max-width: 1100px) {
   .grid-4 { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ── Mobile Bottom Nav ── */
+.mobile-nav {
+  display: none;
+  position: fixed; bottom: 0; left: 0; right: 0;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  z-index: 1000;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.mobile-nav-inner {
+  display: flex; justify-content: space-around;
+  padding: 6px 0 8px;
+}
+.mobile-nav-item {
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 6px 4px; cursor: pointer; border-radius: 10px;
+  color: var(--text2); font-size: 0.6rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.4px;
+  transition: color 0.15s; flex: 1;
+  border: none; background: none;
+}
+.mobile-nav-item .m-icon { font-size: 1.3rem; line-height: 1; }
+.mobile-nav-item.active { color: var(--accent); }
+.mobile-nav-item.active .m-icon { filter: drop-shadow(0 0 6px var(--accent)); }
+
+/* Mobile top header */
+.mobile-header {
+  display: none;
+  position: fixed; top: 0; left: 0; right: 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  z-index: 999;
+  padding: 10px 16px;
+  align-items: center; justify-content: space-between;
+}
+.mobile-header h1 { font-size: 0.95rem; font-weight: 700; color: var(--accent); }
+.mobile-header .m-clock { font-size: 0.78rem; color: var(--text2); font-variant-numeric: tabular-nums; }
+.mobile-header .m-mode {
+  font-size: 0.65rem; font-weight: 700; padding: 3px 8px;
+  border-radius: 6px; text-transform: uppercase; cursor: pointer;
+}
+.mobile-header .m-mode.shadow { background: rgba(124,106,255,0.2); color: var(--accent2); }
+.mobile-header .m-mode.live { background: rgba(255,77,109,0.2); color: var(--down); }
+
 @media (max-width: 768px) {
   .sidebar { display: none; }
-  .grid-4, .grid-3, .grid-2 { grid-template-columns: 1fr; }
+  .mobile-nav { display: block; }
+  .mobile-header { display: flex; }
+
+  .app { flex-direction: column; height: auto; min-height: 100vh; }
+  .main {
+    padding: 12px 12px 88px;
+    margin-top: 50px;
+    overflow-y: unset;
+  }
+
+  .grid-4 { grid-template-columns: repeat(2, 1fr); }
+  .grid-3 { grid-template-columns: 1fr 1fr; }
+  .grid-2 { grid-template-columns: 1fr; }
   .settings-grid { grid-template-columns: 1fr; }
+
+  .prices-bar { flex-wrap: wrap; gap: 6px; }
+  .price-chip { flex: 1; min-width: calc(50% - 4px); }
+
+  .signal-table th:nth-child(6), .signal-table td:nth-child(6),
+  .signal-table th:nth-child(7), .signal-table td:nth-child(7) { display: none; }
+
+  .page-header h2 { font-size: 1.1rem; }
+  .stat-value { font-size: 1.6rem; }
+  .card { padding: 14px; }
 }
 
 .candle-timer { font-size: 0.75rem; color: var(--text2); }
@@ -344,7 +411,35 @@ input[type="number"]:focus { border-color: var(--accent); }
 </style>
 </head>
 <body>
+<!-- ── Mobile Top Header ── -->
+<header class="mobile-header" id="mobile-header">
+  <h1>⚡ SignalBot</h1>
+  <div id="m-mode-badge" class="m-mode shadow" onclick="toggleModeQuick()">👻 SHADOW</div>
+  <div class="m-clock" id="m-clock">--:--:-- UTC</div>
+</header>
+
 <div class="app">
+
+<!-- ── Mobile Bottom Nav ── -->
+<nav class="mobile-nav">
+  <div class="mobile-nav-inner">
+    <button class="mobile-nav-item active" id="mnav-dashboard" onclick="showPage('dashboard', this, 'mnav-dashboard')">
+      <span class="m-icon">📊</span>Dashboard
+    </button>
+    <button class="mobile-nav-item" id="mnav-signals" onclick="showPage('signals', this, 'mnav-signals')">
+      <span class="m-icon">📡</span>Signals
+    </button>
+    <button class="mobile-nav-item" id="mnav-history" onclick="showPage('history', this, 'mnav-history')">
+      <span class="m-icon">📜</span>History
+    </button>
+    <button class="mobile-nav-item" id="mnav-shadow" onclick="showPage('shadow', this, 'mnav-shadow')">
+      <span class="m-icon">👻</span>Shadow
+    </button>
+    <button class="mobile-nav-item" id="mnav-settings" onclick="showPage('settings', this, 'mnav-settings')">
+      <span class="m-icon">⚙️</span>Settings
+    </button>
+  </div>
+</nav>
 
 <!-- ── Sidebar ── -->
 <aside class="sidebar">
@@ -760,11 +855,31 @@ socket.on('settings_updated', (s) => {
 });
 
 // ── Navigation ─────────────────────────────────────────────────────────────
-function showPage(name, el) {
+function showPage(name, el, mnavId) {
+  // Deactivate all pages
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  // Deactivate desktop nav
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  // Deactivate mobile nav
+  document.querySelectorAll('.mobile-nav-item').forEach(n => n.classList.remove('active'));
+
+  // Activate page
   document.getElementById('page-' + name).classList.add('active');
-  if (el) el.classList.add('active');
+
+  // Activate desktop nav item if clicked from sidebar
+  if (el && el.classList.contains('nav-item')) el.classList.add('active');
+
+  // Activate correct mobile nav item
+  const mId = mnavId || ('mnav-' + name);
+  const mEl = document.getElementById(mId);
+  if (mEl) mEl.classList.add('active');
+
+  // Also sync desktop sidebar highlight
+  const deskEl = document.querySelector(`.nav-item[data-page="${name}"]`);
+  if (deskEl) deskEl.classList.add('active');
+
+  // Scroll to top on mobile
+  window.scrollTo(0, 0);
 
   if (name === 'signals') loadSignals();
   if (name === 'history') loadHistory();
@@ -780,6 +895,8 @@ function updateClock() {
   const mm = String(utc.getMinutes()).padStart(2, '0');
   const ss = String(utc.getSeconds()).padStart(2, '0');
   document.getElementById('clock').textContent = `${hh}:${mm}:${ss}`;
+  const mClk = document.getElementById('m-clock');
+  if (mClk) mClk.textContent = `${hh}:${mm} UTC`;
 
   // Next 15-min boundary
   const mins = utc.getMinutes();
@@ -1100,6 +1217,13 @@ function applySettingsToUI() {
   const badge = document.getElementById('mode-badge');
   badge.className = `mode-badge ${s.mode}`;
   badge.textContent = s.mode === 'live' ? '🔴 LIVE MODE' : '👻 SHADOW MODE';
+
+  // Sync mobile header badge
+  const mBadge = document.getElementById('m-mode-badge');
+  if (mBadge) {
+    mBadge.className = `m-mode ${s.mode}`;
+    mBadge.textContent = s.mode === 'live' ? '🔴 LIVE' : '👻 SHADOW';
+  }
 }
 
 function toggleSetting(type) {
