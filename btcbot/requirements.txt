@@ -1,0 +1,16 @@
+flask==3.0.3
+flask-sqlalchemy==3.1.1
+flask-socketio==5.3.6
+apscheduler==3.10.4
+requests==2.32.3
+pandas==2.1.4
+numpy==1.26.4
+scikit-learn==1.4.2
+python-telegram-bot==21.3
+python-dotenv==1.0.1
+eth-account==0.11.3
+web3==6.20.0
+eventlet==0.36.1
+gunicorn==22.0.0
+pytz==2024.1
+sqlalchemy==2.0.31
