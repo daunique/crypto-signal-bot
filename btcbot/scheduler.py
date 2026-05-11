@@ -109,10 +109,12 @@ def job_generate_signal():
             db.session.commit()
 
             # Push to dashboard via WebSocket
+            # Use socketio.emit with to='/' for broadcast from background thread
             try:
-                socketio.emit("new_signal", signal.to_dict(), namespace="/")
-            except Exception:
-                pass
+                from extensions import socketio as sio
+                sio.emit("new_signal", signal.to_dict())
+            except Exception as ws_err:
+                logger.warning(f"[WS] emit failed (HTTP polling will compensate): {ws_err}")
 
             logger.info(f"[SCHEDULER] Signal saved: {best['symbol']} {best['direction']} "
                         f"conf={best['confidence']:.2f} tier={best['tier']}")
@@ -206,9 +208,10 @@ def job_resolve_outcomes():
 
                     # Push update to dashboard
                     try:
-                        socketio.emit("signal_resolved", sig.to_dict(), namespace="/")
-                    except Exception:
-                        pass
+                        from extensions import socketio as sio
+                        sio.emit("signal_resolved", sig.to_dict())
+                    except Exception as ws_err:
+                        logger.warning(f"[WS] resolve emit failed: {ws_err}")
 
                     logger.info(f"[RESOLVE] {sig.symbol} {sig.signal_direction} -> {outcome} "
                                 f"open={open_price:.4f} close={close_price:.4f}")

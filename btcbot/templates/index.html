@@ -833,12 +833,22 @@ let state = {
   signalsPage: 1,
   perfChart: null,
   historyChart: null,
+  lastSignalId: 0,  // track last seen signal for polling fallback
 };
 
-// ── Socket.IO ──────────────────────────────────────────────────────────────
-const socket = io();
+// ── Socket.IO with reconnect + HTTP fallback ───────────────────────────────
+const socket = io({ transports: ['websocket', 'polling'], reconnectionAttempts: 10, reconnectionDelay: 2000 });
+
+socket.on('connect', () => {
+  console.log('[WS] Connected');
+  // Reload on reconnect to catch any missed signals
+  loadTodaySignals();
+  loadTodayStats();
+});
+socket.on('disconnect', () => console.log('[WS] Disconnected — HTTP polling will keep dashboard live'));
+
 socket.on('new_signal', (sig) => {
-  showToast(`📡 ${sig.symbol} ${sig.signal_direction} @ ${sig.ml_confidence?.toFixed(1)}%`, 'signal');
+  showToast(`📡 ${sig.symbol} ${sig.signal_direction} @ ${(sig.ml_confidence||0).toFixed(1)}%`, 'signal');
   loadTodaySignals();
   loadTodayStats();
 });
@@ -1303,9 +1313,13 @@ async function init() {
 
 init();
 
-// Refresh prices every 30s, stats every 60s
+// Refresh prices every 30s
 setInterval(loadPrices, 30000);
-setInterval(() => { loadTodayStats(); loadTodaySignals(); }, 60000);
+// Poll stats + signals every 15s as fallback when WebSocket misses a push
+setInterval(() => {
+  loadTodayStats();
+  loadTodaySignals();
+}, 15000);
 </script>
 </body>
 </html>

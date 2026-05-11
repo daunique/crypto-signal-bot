@@ -54,22 +54,30 @@ def create_app():
     @app.route("/api/stats/today")
     def stats_today():
         today = date.today()
-        daily = DailyStats.query.filter_by(date=today).first()
-        pending = Signal.query.filter(
-            Signal.outcome == "PENDING",
-            Signal.candle_open_time >= datetime.combine(today, datetime.min.time())
-        ).count()
+        today_start = datetime.combine(today, datetime.min.time())
+
+        # Count directly from Signal table — DailyStats only updates after resolution
+        # so using it for live stats misses PENDING signals entirely
+        today_signals = Signal.query.filter(
+            Signal.candle_open_time >= today_start
+        ).all()
+
+        wins    = sum(1 for s in today_signals if s.outcome == "WIN")
+        losses  = sum(1 for s in today_signals if s.outcome == "LOSS")
+        pending = sum(1 for s in today_signals if s.outcome == "PENDING")
+        total   = len(today_signals)
+        win_rate = round(wins / (wins + losses) * 100, 1) if (wins + losses) > 0 else 0
 
         settings = Settings.query.first()
-        shadow = ShadowBalance.query.first()
+        shadow   = ShadowBalance.query.first()
 
         return jsonify({
             "date": str(today),
-            "wins": daily.wins if daily else 0,
-            "losses": daily.losses if daily else 0,
-            "total_signals": daily.total_signals if daily else 0,
+            "wins": wins,
+            "losses": losses,
+            "total_signals": total,
             "pending": pending,
-            "win_rate": round(daily.win_rate, 1) if daily else 0,
+            "win_rate": win_rate,
             "mode": settings.mode if settings else "shadow",
             "shadow_balance": shadow.to_dict() if shadow else {},
         })
@@ -113,8 +121,10 @@ def create_app():
     @app.route("/api/signals/today")
     def signals_today():
         today = date.today()
+        today_start = datetime.combine(today, datetime.min.time())
+        # Query by created_at as well as candle_open_time to catch all of today's signals
         signals = Signal.query.filter(
-            Signal.candle_open_time >= datetime.combine(today, datetime.min.time())
+            Signal.created_at >= today_start
         ).order_by(Signal.created_at.desc()).all()
         return jsonify([s.to_dict() for s in signals])
 
