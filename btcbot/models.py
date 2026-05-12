@@ -12,8 +12,7 @@ class Signal(db.Model):
     symbol = db.Column(db.String(20), nullable=False)        # e.g. BTC-USDT
     candle_open_time = db.Column(db.DateTime, nullable=False) # candle start
     candle_close_time = db.Column(db.DateTime, nullable=False) # candle end (resolution time)
-    signal_direction = db.Column(db.String(4), nullable=False) # ML prediction: UP or DOWN
-    trade_direction  = db.Column(db.String(4))                  # Actual trade placed (reversed): DOWN or UP
+    signal_direction = db.Column(db.String(4), nullable=False) # UP or DOWN
 
     # ML scores
     ml_confidence = db.Column(db.Float)
@@ -48,7 +47,6 @@ class Signal(db.Model):
             'candle_open_time': self.candle_open_time.isoformat(),
             'candle_close_time': self.candle_close_time.isoformat(),
             'signal_direction': self.signal_direction,
-            'trade_direction':  self.trade_direction,
             'ml_confidence': round(self.ml_confidence * 100, 1) if self.ml_confidence else None,
             'rsi_14': round(self.rsi_14, 2) if self.rsi_14 else None,
             'adx': round(self.adx, 2) if self.adx else None,
