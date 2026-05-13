@@ -201,13 +201,188 @@ def create_app():
         job_generate_signal()
         return jsonify({"success": True, "message": "Signal evaluation triggered"})
 
+    # ── Test order — fires a real/shadow order and returns full result ─────────
+    @app.route("/api/test-order", methods=["POST"])
+    def test_order():
+        """
+        Fire a test order directly. Use this to debug live execution.
+        POST body (optional JSON): {"symbol":"BTC-USDT","direction":"UP","size":1}
+        """
+        from limitless_executor import (
+            execute_order, resolve_slug, fetch_market, _hmac_headers
+        )
+        import traceback, requests as req
+
+        data      = request.json or {}
+        symbol    = data.get("symbol", "BTC-USDT")
+        direction = data.get("direction", "UP")
+        size      = float(data.get("size", 1.0))
+
+        settings  = Settings.query.first()
+        mode      = settings.mode if settings else "shadow"
+
+        steps = {}
+
+        # Step 1: resolve slug
+        try:
+            slug = resolve_slug(symbol)
+            steps["1_slug"] = {"ok": bool(slug), "slug": slug}
+        except Exception as e:
+            steps["1_slug"] = {"ok": False, "error": str(e)}
+            return jsonify({"steps": steps})
+
+        # Step 2: fetch market
+        try:
+            market = fetch_market(slug)
+            steps["2_market"] = {
+                "ok": bool(market),
+                "positionIds": market.get("positionIds") if market else None,
+                "venue_exchange": market.get("venue", {}).get("exchange") if market else None,
+            }
+        except Exception as e:
+            steps["2_market"] = {"ok": False, "error": str(e)}
+            return jsonify({"steps": steps})
+
+        # Step 3: check env vars
+        import os
+        steps["3_env"] = {
+            "LIMITLESS_TOKEN_ID":     bool(os.environ.get("LIMITLESS_TOKEN_ID")),
+            "LIMITLESS_TOKEN_SECRET": bool(os.environ.get("LIMITLESS_TOKEN_SECRET")),
+            "LIMITLESS_PRIVATE_KEY":  bool(os.environ.get("LIMITLESS_PRIVATE_KEY")),
+            "mode": mode,
+        }
+
+        # Step 4: test HMAC header generation
+        try:
+            hdrs = _hmac_headers("GET", "/test", "")
+            steps["4_hmac"] = {"ok": True, "headers_keys": list(hdrs.keys())}
+        except Exception as e:
+            steps["4_hmac"] = {"ok": False, "error": str(e)}
+            return jsonify({"steps": steps})
+
+        # Step 5: execute order
+        try:
+            result = execute_order(symbol, direction, mode, size, 0.50)
+            steps["5_order"] = result
+        except Exception as e:
+            steps["5_order"] = {"ok": False, "error": str(e), "trace": traceback.format_exc()}
+
+        return jsonify({"mode": mode, "symbol": symbol, "direction": direction, "steps": steps})
+
     @app.route("/api/resolve", methods=["POST"])
     def manual_resolve():
         from scheduler import job_resolve_outcomes
         job_resolve_outcomes()
         return jsonify({"success": True, "message": "Outcome resolution triggered"})
 
-    # ── Debug ─────────────────────────────────────────────────────────────────
+    # ── USDC Approval status ──────────────────────────────────────────────────
+    @app.route("/api/approval-status")
+    def approval_status():
+        """
+        Check if wallet has approved USDC for Limitless exchange contract.
+        REQUIRED before any live BUY order will succeed.
+        Visit this URL after deploying to verify setup.
+        """
+        from limitless_executor import (
+            resolve_slug, fetch_market, _extract_exchange, check_usdc_approval
+        )
+        results = {}
+        for symbol in ["BTC-USDT", "ETH-USDT"]:
+            try:
+                slug     = resolve_slug(symbol)
+                market   = fetch_market(slug) if slug else None
+                exchange = _extract_exchange(market) if market else None
+                if exchange:
+                    results[symbol] = check_usdc_approval(exchange)
+                    results[symbol]["exchange"] = exchange
+                else:
+                    results[symbol] = {"error": "Could not fetch exchange address"}
+            except Exception as e:
+                results[symbol] = {"error": str(e)}
+        return jsonify({
+            "approval_status": results,
+            "instructions": (
+                "If approved=false, your wallet needs a one-time USDC approval "
+                "for the Limitless exchange contract on Base mainnet. "
+                "Use MetaMask or a web3 script to call USDC.approve(exchange, max_uint256)."
+            )
+        })
+
+    # ── Test order ────────────────────────────────────────────────────────────
+    @app.route("/api/test-order", methods=["POST"])
+    def test_order():
+        """
+        Fire a test order and return step-by-step diagnostics.
+        POST: {"symbol":"BTC-USDT","direction":"UP","size":1}
+        Runs in current mode (shadow/live) unless overridden with "mode" key.
+        """
+        from limitless_executor import (
+            resolve_slug, fetch_market, _extract_exchange,
+            _extract_token_id, check_usdc_approval, execute_order
+        )
+        import traceback
+
+        data      = request.json or {}
+        symbol    = data.get("symbol", "BTC-USDT")
+        direction = data.get("direction", "UP")
+        size      = float(data.get("size", 1.0))
+        settings  = Settings.query.first()
+        mode      = data.get("mode", settings.mode if settings else "shadow")
+
+        steps = {}
+
+        # 1. Env vars
+        steps["1_env"] = {
+            "LIMITLESS_API_KEY":     bool(os.environ.get("LIMITLESS_API_KEY")),
+            "LIMITLESS_PRIVATE_KEY": bool(os.environ.get("LIMITLESS_PRIVATE_KEY")),
+            "mode": mode,
+        }
+
+        # 2. Slug
+        try:
+            slug = resolve_slug(symbol)
+            steps["2_slug"] = {"ok": bool(slug), "slug": slug}
+        except Exception as e:
+            steps["2_slug"] = {"ok": False, "error": str(e)}
+            return jsonify({"steps": steps})
+
+        # 3. Market
+        try:
+            market = fetch_market(slug)
+            exchange = _extract_exchange(market) if market else None
+            token_id = _extract_token_id(market, direction) if market else None
+            steps["3_market"] = {
+                "ok":       bool(market),
+                "exchange": exchange,
+                "token_id": token_id,
+                "tokens":   market.get("tokens") if market else None,
+                "positionIds": market.get("positionIds") if market else None,
+                "market_keys": list(market.keys()) if market else [],
+            }
+        except Exception as e:
+            steps["3_market"] = {"ok": False, "error": str(e)}
+            return jsonify({"steps": steps})
+
+        # 4. USDC approval (live only)
+        if mode == "live" and exchange:
+            steps["4_usdc_approval"] = check_usdc_approval(exchange)
+        else:
+            steps["4_usdc_approval"] = {"skipped": "shadow mode or no exchange"}
+
+        # 5. Execute
+        try:
+            result = execute_order(symbol, direction, mode, size, 0.50)
+            steps["5_order"] = result
+        except Exception as e:
+            steps["5_order"] = {"ok": False, "error": str(e), "trace": traceback.format_exc()}
+
+        return jsonify({
+            "mode": mode, "symbol": symbol,
+            "direction": direction, "size": size,
+            "steps": steps,
+        })
+
+    # ── Debug ─────────────────────────────────────────────────────────────────────
     @app.route("/api/debug")
     def debug():
         today       = date.today()

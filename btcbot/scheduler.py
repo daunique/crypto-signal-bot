@@ -37,6 +37,8 @@ def job_generate_signal():
             from signal_engine import pick_best_signal
             from limitless_executor import execute_order
             from telegram_bot import send_signal_alert
+            from datetime import datetime, timezone
+            import math
 
             settings = Settings.query.first()
             if not settings:
@@ -49,8 +51,35 @@ def job_generate_signal():
             max_cp        = settings.max_contract_price
             min_conf      = settings.min_confidence
 
-            logger.info(f"[SCHEDULER] Generating signal | mode={mode} | "
-                        f"size=${position_size} | min_conf={min_conf}")
+            # ── Duplicate guard ───────────────────────────────────────────────
+            # Calculate the current candle's exact open time (floor to 15-min boundary)
+            now_utc    = datetime.now(timezone.utc)
+            total_mins = now_utc.hour * 60 + now_utc.minute
+            boundary   = (total_mins // 15) * 15
+            candle_h   = boundary // 60
+            candle_m   = boundary % 60
+            candle_open = now_utc.replace(
+                hour=candle_h, minute=candle_m, second=0,
+                microsecond=0, tzinfo=None
+            )
+            candle_close = candle_open.replace(
+                hour=(candle_h + (candle_m + 15) // 60) % 24,
+                minute=(candle_m + 15) % 60
+            )
+
+            # Check if we already saved a signal for this exact candle window
+            existing = Signal.query.filter(
+                Signal.candle_open_time == candle_open,
+            ).first()
+            if existing:
+                logger.info(
+                    f"[SCHEDULER] Signal already exists for candle "
+                    f"{candle_open} → {candle_close} (id={existing.id}) — skipping duplicate"
+                )
+                return
+
+            logger.info(f"[SCHEDULER] Generating signal | candle={candle_open}→{candle_close} "
+                        f"| mode={mode} | min_conf={min_conf}")
 
             sig = pick_best_signal(min_confidence=min_conf)
             if not sig:
@@ -178,10 +207,15 @@ def job_resolve_outcomes():
                         close_price = float(match.iloc[0]['close'])
                         open_price  = sig.open_price
 
+                        # WIN/LOSS based on TRADE direction (opposite of ML signal)
+                        # signal UP → trade DOWN → WIN if price went DOWN
+                        # signal DOWN → trade UP → WIN if price went UP
                         if sig.signal_direction == "UP":
-                            outcome = "WIN" if close_price > open_price else "LOSS"
-                        else:
+                            # traded DOWN
                             outcome = "WIN" if close_price < open_price else "LOSS"
+                        else:
+                            # traded UP
+                            outcome = "WIN" if close_price > open_price else "LOSS"
 
                         sig.close_price = close_price
                         sig.outcome     = outcome
