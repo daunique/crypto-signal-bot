@@ -22,8 +22,6 @@ services:
         sync: false
       - key: LIMITLESS_PRIVATE_KEY
         sync: false
-      - key: LIMITLESS_OWNER_ID
-        sync: false
       - key: DEFAULT_MODE
         value: shadow
       - key: DEFAULT_POSITION_SIZE

@@ -1,7 +1,5 @@
 """
 Main Flask application
-Serves dashboard, API routes, and WebSocket events
-NOTE: eventlet.monkey_patch() is called in wsgi.py / main.py BEFORE this import
 """
 import os
 import logging
@@ -14,21 +12,17 @@ from flask import Flask, render_template, jsonify, request
 from extensions import db, socketio
 from models import Signal, DailyStats, Settings, ShadowBalance
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
 def create_app():
     app = Flask(__name__)
-
-    # Use /tmp for SQLite on Render (ephemeral but survives restarts within same instance)
-    # For persistence across deploys, set DATABASE_URL to a PostgreSQL URL in Render env vars
-    default_db = "sqlite:////tmp/signals.db"
-    app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-change-me-32chars")
-    app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL", default_db)
+    app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "change-me-32chars")
+    app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get(
+        "DATABASE_URL", "sqlite:////tmp/signals.db"
+    )
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
     db.init_app(app)
@@ -38,86 +32,106 @@ def create_app():
     with app.app_context():
         db.create_all()
         if not Settings.query.first():
-            s = Settings(
+            db.session.add(Settings(
                 mode=os.environ.get("DEFAULT_MODE", "shadow"),
                 position_size=float(os.environ.get("DEFAULT_POSITION_SIZE", "10")),
-            )
-            db.session.add(s)
+            ))
             db.session.commit()
             logger.info("[APP] Default settings seeded")
         if not ShadowBalance.query.first():
             db.session.add(ShadowBalance(balance=1000.0))
             db.session.commit()
 
-    # ─── Dashboard ────────────────────────────────────────────────────────────
+    # ── Dashboard ─────────────────────────────────────────────────────────────
     @app.route("/")
     def index():
         return render_template("index.html")
 
-    # ─── API: Health check ────────────────────────────────────────────────────
+    # ── Health ────────────────────────────────────────────────────────────────
     @app.route("/api/health")
     def health():
         return jsonify({"status": "ok", "time": datetime.utcnow().isoformat()})
 
-    # ─── API: Stats ───────────────────────────────────────────────────────────
+    # ── Stats: today ──────────────────────────────────────────────────────────
     @app.route("/api/stats/today")
     def stats_today():
-        today = date.today()
+        today       = date.today()
         today_start = datetime.combine(today, datetime.min.time())
+        sigs        = Signal.query.filter(Signal.created_at >= today_start).all()
 
-        today_signals = Signal.query.filter(
-            Signal.created_at >= today_start
-        ).all()
-
-        wins    = sum(1 for s in today_signals if s.outcome == "WIN")
-        losses  = sum(1 for s in today_signals if s.outcome == "LOSS")
-        pending = sum(1 for s in today_signals if s.outcome == "PENDING")
-        total   = len(today_signals)
-        win_rate = round(wins / (wins + losses) * 100, 1) if (wins + losses) > 0 else 0
+        wins    = sum(1 for s in sigs if s.outcome == "WIN")
+        losses  = sum(1 for s in sigs if s.outcome == "LOSS")
+        pending = sum(1 for s in sigs if s.outcome == "PENDING")
+        total   = len(sigs)
+        wr      = round(wins / (wins + losses) * 100, 1) if (wins + losses) > 0 else 0
 
         settings = Settings.query.first()
         shadow   = ShadowBalance.query.first()
-
         return jsonify({
             "date":          str(today),
             "wins":          wins,
             "losses":        losses,
             "total_signals": total,
             "pending":       pending,
-            "win_rate":      win_rate,
+            "win_rate":      wr,
             "mode":          settings.mode if settings else "shadow",
             "shadow_balance": shadow.to_dict() if shadow else {},
         })
 
+    # ── Stats: history ────────────────────────────────────────────────────────
     @app.route("/api/stats/history")
     def stats_history():
-        days   = int(request.args.get("days", 30))
-        cutoff = date.today() - timedelta(days=days)
+        days    = int(request.args.get("days", 30))
+        cutoff  = date.today() - timedelta(days=days)
         records = DailyStats.query.filter(
             DailyStats.date >= cutoff
         ).order_by(DailyStats.date.desc()).all()
         return jsonify([r.to_dict() for r in records])
 
-    # ─── API: Signals ─────────────────────────────────────────────────────────
+    # ── Stats: per-pair ───────────────────────────────────────────────────────
+    @app.route("/api/stats/pairs")
+    def pair_stats():
+        from signal_engine import get_pair_stats, get_pair_config
+        live   = get_pair_stats()
+        config = get_pair_config()
+
+        result = {}
+        for sym in ["BTC-USDT", "ETH-USDT", "SOL-USDT",
+                    "XRP-USDT", "BNB-USDT", "DOGE-USDT"]:
+            wins   = Signal.query.filter_by(symbol=sym, outcome="WIN").count()
+            losses = Signal.query.filter_by(symbol=sym, outcome="LOSS").count()
+            total  = wins + losses
+            cfg    = config.get(sym, {})
+            result[sym] = {
+                "wins":      wins,
+                "losses":    losses,
+                "total":     total,
+                "win_rate":  round(wins / total * 100, 1) if total > 0 else None,
+                "threshold": cfg.get("threshold", 0.58),
+                "tier":      cfg.get("tier", "B"),
+            }
+        return jsonify(result)
+
+    # ── Signals ───────────────────────────────────────────────────────────────
     @app.route("/api/signals")
     def get_signals():
-        page    = int(request.args.get("page", 1))
+        page     = int(request.args.get("page", 1))
         per_page = int(request.args.get("per_page", 50))
-        symbol  = request.args.get("symbol")
-        outcome = request.args.get("outcome")
-        mode    = request.args.get("mode")
+        symbol   = request.args.get("symbol")
+        outcome  = request.args.get("outcome")
+        mode     = request.args.get("mode")
 
         q = Signal.query
         if symbol:  q = q.filter(Signal.symbol == symbol)
         if outcome: q = q.filter(Signal.outcome == outcome)
         if mode:    q = q.filter(Signal.mode == mode)
         q = q.order_by(Signal.created_at.desc())
-        paginated = q.paginate(page=page, per_page=per_page, error_out=False)
+        pg = q.paginate(page=page, per_page=per_page, error_out=False)
 
         return jsonify({
-            "signals": [s.to_dict() for s in paginated.items],
-            "total":   paginated.total,
-            "pages":   paginated.pages,
+            "signals": [s.to_dict() for s in pg.items],
+            "total":   pg.total,
+            "pages":   pg.pages,
             "page":    page,
         })
 
@@ -125,13 +139,13 @@ def create_app():
     def signals_today():
         today       = date.today()
         today_start = datetime.combine(today, datetime.min.time())
-        signals = Signal.query.filter(
+        sigs = Signal.query.filter(
             Signal.created_at >= today_start
         ).order_by(Signal.created_at.desc()).all()
-        logger.info(f"[API] /signals/today → {len(signals)} signals for {today}")
-        return jsonify([s.to_dict() for s in signals])
+        logger.info(f"[API] /signals/today → {len(sigs)} signals")
+        return jsonify([s.to_dict() for s in sigs])
 
-    # ─── API: Settings ────────────────────────────────────────────────────────
+    # ── Settings ──────────────────────────────────────────────────────────────
     @app.route("/api/settings", methods=["GET"])
     def get_settings():
         s = Settings.query.first()
@@ -139,11 +153,10 @@ def create_app():
 
     @app.route("/api/settings", methods=["POST"])
     def update_settings():
-        data = request.json
+        data = request.json or {}
         s = Settings.query.first()
         if not s:
-            s = Settings()
-            db.session.add(s)
+            s = Settings(); db.session.add(s)
 
         if "mode" in data and data["mode"] in ("live", "shadow"):
             s.mode = data["mode"]
@@ -165,7 +178,7 @@ def create_app():
             pass
         return jsonify({"success": True, "settings": s.to_dict()})
 
-    # ─── API: Shadow Balance ──────────────────────────────────────────────────
+    # ── Shadow ────────────────────────────────────────────────────────────────
     @app.route("/api/shadow/balance")
     def shadow_balance():
         sb = ShadowBalance.query.first()
@@ -175,14 +188,13 @@ def create_app():
     def shadow_reset():
         sb = ShadowBalance.query.first()
         if not sb:
-            sb = ShadowBalance()
-            db.session.add(sb)
-        sb.balance          = 1000.0
+            sb = ShadowBalance(); db.session.add(sb)
+        sb.balance           = 1000.0
         sb.total_profit_loss = 0.0
         db.session.commit()
         return jsonify({"success": True, "balance": 1000.0})
 
-    # ─── API: Manual triggers (testing) ───────────────────────────────────────
+    # ── Manual triggers ───────────────────────────────────────────────────────
     @app.route("/api/trigger", methods=["POST"])
     def manual_trigger():
         from scheduler import job_generate_signal
@@ -195,54 +207,30 @@ def create_app():
         job_resolve_outcomes()
         return jsonify({"success": True, "message": "Outcome resolution triggered"})
 
-    # ─── API: Debug ───────────────────────────────────────────────────────────
+    # ── Debug ─────────────────────────────────────────────────────────────────
     @app.route("/api/debug")
     def debug():
         today       = date.today()
         today_start = datetime.combine(today, datetime.min.time())
-        all_signals  = Signal.query.order_by(Signal.id.desc()).limit(20).all()
-        today_sigs   = Signal.query.filter(Signal.created_at >= today_start).all()
-        settings     = Settings.query.first()
-        shadow       = ShadowBalance.query.first()
-        daily        = DailyStats.query.order_by(DailyStats.date.desc()).limit(7).all()
-
+        all_sigs    = Signal.query.order_by(Signal.id.desc()).limit(20).all()
+        today_sigs  = Signal.query.filter(Signal.created_at >= today_start).all()
+        settings    = Settings.query.first()
+        shadow      = ShadowBalance.query.first()
+        daily       = DailyStats.query.order_by(DailyStats.date.desc()).limit(7).all()
         return jsonify({
             "server_time_utc":     datetime.utcnow().isoformat(),
             "today_date":          str(today),
-            "today_start":         today_start.isoformat(),
-            "db_url":              app.config["SQLALCHEMY_DATABASE_URI"].split("@")[-1],  # hide creds
+            "db_path":             app.config["SQLALCHEMY_DATABASE_URI"],
             "total_signals_in_db": Signal.query.count(),
             "today_signals_count": len(today_sigs),
             "today_signals":       [s.to_dict() for s in today_sigs],
-            "last_20_signals":     [s.to_dict() for s in all_signals],
+            "last_20_signals":     [s.to_dict() for s in all_sigs],
             "settings":            settings.to_dict() if settings else None,
             "shadow_balance":      shadow.to_dict() if shadow else None,
             "daily_stats":         [d.to_dict() for d in daily],
         })
 
-    # ─── API: Per-pair stats ──────────────────────────────────────────────────
-    @app.route("/api/stats/pairs")
-    def pair_stats():
-        from signal_engine import get_pair_stats
-        live = get_pair_stats()
-
-        # Enrich with DB win/loss counts per pair (all time)
-        from sqlalchemy import func
-        db_stats = {}
-        for sym in ["BTC-USDT","ETH-USDT","SOL-USDT","XRP-USDT","BNB-USDT","DOGE-USDT"]:
-            wins   = Signal.query.filter_by(symbol=sym, outcome="WIN").count()
-            losses = Signal.query.filter_by(symbol=sym, outcome="LOSS").count()
-            total  = wins + losses
-            db_stats[sym] = {
-                "wins":     wins,
-                "losses":   losses,
-                "total":    total,
-                "win_rate": round(wins / total * 100, 1) if total > 0 else None,
-                "threshold": live.get(sym, {}).get("threshold", 0.58),
-            }
-        return jsonify(db_stats)
-
-    # ─── API: Live prices ─────────────────────────────────────────────────────
+    # ── Live prices ───────────────────────────────────────────────────────────
     @app.route("/api/prices")
     def live_prices():
         from signal_engine import fetch_okx_candles, SYMBOLS
@@ -252,7 +240,7 @@ def create_app():
                 df = fetch_okx_candles(sym, limit=2)
                 if not df.empty and len(df) >= 2:
                     prices[sym] = {
-                        "price": float(df.iloc[-1]["close"]),
+                        "price":      float(df.iloc[-1]["close"]),
                         "change_pct": round(
                             (df.iloc[-1]["close"] - df.iloc[-2]["close"])
                             / df.iloc[-2]["close"] * 100, 2
@@ -262,7 +250,7 @@ def create_app():
                 pass
         return jsonify(prices)
 
-    # ─── WebSocket events ──────────────────────────────────────────────────────
+    # ── WebSocket ─────────────────────────────────────────────────────────────
     @socketio.on("connect")
     def on_connect():
         logger.info("[WS] Client connected")

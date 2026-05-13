@@ -1,32 +1,33 @@
 """
-Limitless Exchange order executor
-─────────────────────────────────────────────────────────────────────────────
-TWO independent auth layers (both required):
+Limitless Exchange — Order Executor
+─────────────────────────────────────────────────────────────────────────
+Auth (from official docs):
+  GET /markets/:slug      → no auth needed (public)
+  GET /markets/active     → no auth needed (public)
+  POST /orders            → HMAC auth headers + EIP-712 signed order body
+  GET /positions          → HMAC auth headers
 
-  1. HMAC-SHA256 request authentication
-     Headers: lmts-api-key, lmts-timestamp, lmts-signature
-     Signs the HTTP request itself so the server trusts the caller.
-     Uses: LIMITLESS_TOKEN_ID + LIMITLESS_TOKEN_SECRET (base64)
+HMAC headers on authenticated requests:
+  lmts-api-key:   LIMITLESS_TOKEN_ID
+  lmts-timestamp: ISO-8601 UTC
+  lmts-signature: base64(HMAC-SHA256(base64decode(secret), message))
+  message format: "{timestamp}\n{METHOD}\n{path}\n{body}"
 
-  2. EIP-712 order signing
-     Field: order.signature inside the JSON body
-     Cryptographically proves the wallet owner authorised this specific order.
-     Uses: LIMITLESS_PRIVATE_KEY (wallet private key)
+EIP-712 signs the Order struct using venue.exchange as verifyingContract.
 
-Required env vars:
-  LIMITLESS_TOKEN_ID      → token ID returned by POST /auth/api-tokens/derive
-  LIMITLESS_TOKEN_SECRET  → base64 secret returned once at token creation
-  LIMITLESS_PRIVATE_KEY   → wallet private key (0x...) for EIP-712
-  LIMITLESS_OWNER_ID      → numeric profile ID from GET /profiles/{address}
-─────────────────────────────────────────────────────────────────────────────
+Order payload (POST /orders) — no ownerId:
+  { "order": {..., "signature": "0x..."}, "orderType": "GTC", "marketSlug": "..." }
+
+Signal UP   → buy YES token (positionIds[0]) — predicting price goes up
+Signal DOWN → buy NO  token (positionIds[1]) — predicting price goes down
 """
 import os
 import time
 import hmac
 import hashlib
 import base64
-import logging
 import json
+import logging
 import requests
 from datetime import datetime, timezone
 from web3 import Web3
@@ -36,7 +37,7 @@ from eth_account.messages import encode_typed_data
 logger = logging.getLogger(__name__)
 
 API_BASE  = "https://api.limitless.exchange"
-CHAIN_ID  = 8453  # Base mainnet
+CHAIN_ID  = 8453
 ZERO_ADDR = "0x0000000000000000000000000000000000000000"
 
 SYMBOL_TO_SLUG = {
@@ -51,58 +52,34 @@ SYMBOL_TO_SLUG = {
 _market_cache: dict = {}
 
 
-# ─── Layer 1: HMAC Request Signing ───────────────────────────────────────────
+# ── HMAC request signing ──────────────────────────────────────────────────────
 
 def _hmac_headers(method: str, path: str, body: str = "") -> dict:
-    """
-    Build the three HMAC auth headers required on every API request.
-
-    Canonical message format:
-        {ISO-8601 timestamp}\\n{HTTP METHOD}\\n{path+query}\\n{body}
-
-    Returns headers:
-        lmts-api-key       token ID
-        lmts-timestamp     ISO-8601 UTC timestamp (must be within 30s of server)
-        lmts-signature     base64(HMAC-SHA256(base64decode(secret), message))
-    """
     token_id   = os.environ.get("LIMITLESS_TOKEN_ID", "")
     secret_b64 = os.environ.get("LIMITLESS_TOKEN_SECRET", "")
-
     if not token_id or not secret_b64:
         raise ValueError(
-            "LIMITLESS_TOKEN_ID and LIMITLESS_TOKEN_SECRET must be set. "
-            "Derive them via POST /auth/api-tokens/derive on limitless.exchange."
+            "LIMITLESS_TOKEN_ID and LIMITLESS_TOKEN_SECRET must be set.\n"
+            "Derive via POST /auth/api-tokens/derive — secret shown ONCE, save immediately."
         )
-
     timestamp = datetime.now(timezone.utc).isoformat()
     message   = f"{timestamp}\n{method}\n{path}\n{body}"
-
-    secret_bytes = base64.b64decode(secret_b64)
-    signature = base64.b64encode(
-        hmac.new(secret_bytes, message.encode("utf-8"), hashlib.sha256).digest()
+    sig = base64.b64encode(
+        hmac.new(
+            base64.b64decode(secret_b64),
+            message.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
     ).decode("utf-8")
-
     return {
         "lmts-api-key":   token_id,
         "lmts-timestamp": timestamp,
-        "lmts-signature": signature,
+        "lmts-signature": sig,
         "Content-Type":   "application/json",
     }
 
 
-def _get(path: str, params: dict | None = None) -> requests.Response:
-    """Authenticated GET — HMAC-signed."""
-    query     = ("?" + "&".join(f"{k}={v}" for k, v in params.items())) if params else ""
-    full_path = path + query
-    return requests.get(
-        f"{API_BASE}{full_path}",
-        headers=_hmac_headers("GET", full_path, ""),
-        timeout=10,
-    )
-
-
 def _post(path: str, payload: dict) -> requests.Response:
-    """Authenticated POST — HMAC-signed."""
     body = json.dumps(payload, separators=(",", ":"))
     return requests.post(
         f"{API_BASE}{path}",
@@ -112,77 +89,76 @@ def _post(path: str, payload: dict) -> requests.Response:
     )
 
 
+def _get_auth(path: str) -> requests.Response:
+    return requests.get(
+        f"{API_BASE}{path}",
+        headers=_hmac_headers("GET", path, ""),
+        timeout=10,
+    )
 
-# ─── Layer 2: EIP-712 Order Signing ──────────────────────────────────────────
+
+# ── EIP-712 order signing ─────────────────────────────────────────────────────
 
 def _eip712_sign(order_data: dict, verifying_contract: str) -> str:
-    """
-    Sign the order struct with EIP-712 using the wallet private key.
-    This authenticates the ORDER PAYLOAD — separate from HMAC which
-    authenticates the HTTP REQUEST.
-    """
-    private_key = os.environ.get("LIMITLESS_PRIVATE_KEY", "")
-    if not private_key:
+    pk = os.environ.get("LIMITLESS_PRIVATE_KEY", "")
+    if not pk:
         raise ValueError("LIMITLESS_PRIVATE_KEY not set")
-
-    domain = {
-        "name": "Limitless CTF Exchange",
-        "version": "1",
-        "chainId": CHAIN_ID,
-        "verifyingContract": Web3.to_checksum_address(verifying_contract),
+    typed_data = {
+        "types": {
+            "EIP712Domain": [
+                {"name": "name",              "type": "string"},
+                {"name": "version",           "type": "string"},
+                {"name": "chainId",           "type": "uint256"},
+                {"name": "verifyingContract", "type": "address"},
+            ],
+            "Order": [
+                {"name": "salt",          "type": "uint256"},
+                {"name": "maker",         "type": "address"},
+                {"name": "signer",        "type": "address"},
+                {"name": "taker",         "type": "address"},
+                {"name": "tokenId",       "type": "uint256"},
+                {"name": "makerAmount",   "type": "uint256"},
+                {"name": "takerAmount",   "type": "uint256"},
+                {"name": "expiration",    "type": "uint256"},
+                {"name": "nonce",         "type": "uint256"},
+                {"name": "feeRateBps",    "type": "uint256"},
+                {"name": "side",          "type": "uint8"},
+                {"name": "signatureType", "type": "uint8"},
+            ],
+        },
+        "primaryType": "Order",
+        "domain": {
+            "name":              "Limitless CTF Exchange",
+            "version":           "1",
+            "chainId":           CHAIN_ID,
+            "verifyingContract": Web3.to_checksum_address(verifying_contract),
+        },
+        "message": {
+            "salt":          order_data["salt"],
+            "maker":         Web3.to_checksum_address(order_data["maker"]),
+            "signer":        Web3.to_checksum_address(order_data["signer"]),
+            "taker":         Web3.to_checksum_address(order_data["taker"]),
+            "tokenId":       int(order_data["tokenId"]),
+            "makerAmount":   order_data["makerAmount"],
+            "takerAmount":   order_data["takerAmount"],
+            "expiration":    order_data["expiration"],
+            "nonce":         order_data["nonce"],
+            "feeRateBps":    order_data["feeRateBps"],
+            "side":          order_data["side"],
+            "signatureType": order_data["signatureType"],
+        },
     }
-    types = {
-        "EIP712Domain": [
-            {"name": "name",              "type": "string"},
-            {"name": "version",           "type": "string"},
-            {"name": "chainId",           "type": "uint256"},
-            {"name": "verifyingContract", "type": "address"},
-        ],
-        "Order": [
-            {"name": "salt",          "type": "uint256"},
-            {"name": "maker",         "type": "address"},
-            {"name": "signer",        "type": "address"},
-            {"name": "taker",         "type": "address"},
-            {"name": "tokenId",       "type": "uint256"},
-            {"name": "makerAmount",   "type": "uint256"},
-            {"name": "takerAmount",   "type": "uint256"},
-            {"name": "expiration",    "type": "uint256"},
-            {"name": "nonce",         "type": "uint256"},
-            {"name": "feeRateBps",    "type": "uint256"},
-            {"name": "side",          "type": "uint8"},
-            {"name": "signatureType", "type": "uint8"},
-        ],
-    }
-    message = {
-        "salt":          order_data["salt"],
-        "maker":         Web3.to_checksum_address(order_data["maker"]),
-        "signer":        Web3.to_checksum_address(order_data["signer"]),
-        "taker":         Web3.to_checksum_address(order_data["taker"]),
-        "tokenId":       int(order_data["tokenId"]),
-        "makerAmount":   order_data["makerAmount"],
-        "takerAmount":   order_data["takerAmount"],
-        "expiration":    order_data["expiration"],
-        "nonce":         order_data["nonce"],
-        "feeRateBps":    order_data["feeRateBps"],
-        "side":          order_data["side"],
-        "signatureType": order_data["signatureType"],
-    }
-    encoded = encode_typed_data({
-        "types": types, "primaryType": "Order",
-        "domain": domain, "message": message,
-    })
-    signed = Account.from_key(private_key).sign_message(encoded)
-    return signed.signature.hex()
+    encoded = encode_typed_data(typed_data)
+    return Account.from_key(pk).sign_message(encoded).signature.hex()
 
 
-# ─── Market helpers ───────────────────────────────────────────────────────────
+# ── Market data (no auth) ─────────────────────────────────────────────────────
 
 def fetch_market(slug: str) -> dict | None:
-    """Fetch and cache market data from Limitless API."""
     if slug in _market_cache:
         return _market_cache[slug]
     try:
-        resp = _get(f"/markets/{slug}")
+        resp = requests.get(f"{API_BASE}/markets/{slug}", timeout=10)
         if resp.status_code == 404:
             logger.warning(f"Market not found: {slug}")
             return None
@@ -191,29 +167,19 @@ def fetch_market(slug: str) -> dict | None:
         _market_cache[slug] = data
         return data
     except Exception as e:
-        logger.error(f"fetch_market({slug}) failed: {e}")
+        logger.error(f"fetch_market({slug}): {e}")
         return None
 
 
-def fetch_active_markets() -> list:
+def resolve_slug(symbol: str) -> str | None:
     try:
-        resp = _get("/markets/active", {"category": "crypto"})
+        resp = requests.get(
+            f"{API_BASE}/markets/active",
+            params={"category": "crypto"},
+            timeout=10,
+        )
         resp.raise_for_status()
-        body = resp.json()
-        return body if isinstance(body, list) else body.get("markets", [])
-    except Exception as e:
-        logger.error(f"fetch_active_markets failed: {e}")
-        return []
-
-
-def resolve_market_slug(symbol: str) -> str | None:
-    """
-    Resolve the correct market slug by searching active markets first,
-    falling back to the static map.
-    """
-    static = SYMBOL_TO_SLUG.get(symbol)
-    try:
-        markets = fetch_active_markets()
+        markets = resp.json() if isinstance(resp.json(), list) else resp.json().get("markets", [])
         token = symbol.replace("-USDT", "").lower()
         for m in markets:
             slug  = m.get("slug", "")
@@ -222,61 +188,57 @@ def resolve_market_slug(symbol: str) -> str | None:
                 return slug
             if "15" in title and token in title and "min" in title:
                 return m.get("slug")
-    except Exception:
-        pass
-    return static
+    except Exception as e:
+        logger.warning(f"resolve_slug search failed: {e}")
+    return SYMBOL_TO_SLUG.get(symbol)
 
 
-def place_live_order(symbol: str, direction: str,
-                     position_size_usd: float,
-                     max_contract_price: float = 0.50) -> dict:
+# ── Live order placement ──────────────────────────────────────────────────────
+
+def place_live_order(
+    symbol: str,
+    signal_direction: str,
+    position_size_usd: float,
+    max_contract_price: float = 0.50,
+) -> dict:
     """
     Place a GTC limit BUY order on Limitless Exchange.
-
-    direction: 'UP'   → BUY YES token (positionIds[0])
-               'DOWN' → BUY NO  token (positionIds[1])
-
-    Auth flow:
-      Step A — _eip712_sign()  signs the order struct  (LIMITLESS_PRIVATE_KEY)
-      Step B — _post()         adds HMAC headers        (LIMITLESS_TOKEN_ID/SECRET)
-    Both are required. Missing either causes a 401/403 from the API.
+    signal UP   → buy YES token (positionIds[0])
+    signal DOWN → buy NO  token (positionIds[1])
     """
-    slug = resolve_market_slug(symbol)
+    logger.info(f"[{symbol}] Placing LIVE {signal_direction} order ${position_size_usd}")
+
+    slug = resolve_slug(symbol)
     if not slug:
         return {"success": False, "error": f"No market slug for {symbol}"}
 
     market = fetch_market(slug)
     if not market:
-        return {"success": False, "error": f"Market data unavailable for {slug}"}
+        return {"success": False, "error": f"Market unavailable: {slug}"}
 
-    private_key = os.environ.get("LIMITLESS_PRIVATE_KEY", "")
-    owner_id    = int(os.environ.get("LIMITLESS_OWNER_ID", "0"))
-
-    if not private_key:
-        return {"success": False, "error": "LIMITLESS_PRIVATE_KEY not configured"}
+    pk = os.environ.get("LIMITLESS_PRIVATE_KEY", "")
+    if not pk:
+        return {"success": False, "error": "LIMITLESS_PRIVATE_KEY not set"}
 
     try:
-        venue        = market.get("venue", {})
-        position_ids = market.get("positionIds", [])
-        if not position_ids:
-            return {"success": False, "error": "No positionIds in market data"}
-
+        venue         = market.get("venue", {})
+        position_ids  = market.get("positionIds", [])
         exchange_addr = venue.get("exchange", "")
+
+        if not position_ids:
+            return {"success": False, "error": "positionIds missing from market"}
         if not exchange_addr:
-            return {"success": False, "error": "No venue.exchange address in market data"}
+            return {"success": False, "error": "venue.exchange missing from market"}
 
-        # YES token = index 0 (UP), NO token = index 1 (DOWN)
-        token_id = position_ids[0] if direction == "UP" else position_ids[1]
+        # UP → YES token (index 0), DOWN → NO token (index 1)
+        token_id = position_ids[0] if signal_direction == "UP" else position_ids[1]
 
-        # Price hard-capped at $0.50 per contract
         price_per_contract = min(max_contract_price, 0.50)
-        num_contracts      = round(position_size_usd / price_per_contract, 4)
+        num_shares         = round(position_size_usd / price_per_contract, 4)
+        maker_amount       = int(price_per_contract * num_shares * 1_000_000)
+        taker_amount       = int(num_shares * 1_000_000)
 
-        # Amounts scaled by 1e6 (USDC has 6 decimals; shares also ×1e6)
-        maker_amount = int(price_per_contract * num_contracts * 1_000_000)
-        taker_amount = int(num_contracts * 1_000_000)
-
-        account    = Account.from_key(private_key)
+        account    = Account.from_key(pk)
         maker_addr = Web3.to_checksum_address(account.address)
         salt       = int(time.time() * 1000)
 
@@ -288,89 +250,88 @@ def place_live_order(symbol: str, direction: str,
             "tokenId":       token_id,
             "makerAmount":   maker_amount,
             "takerAmount":   taker_amount,
-            "expiration":    0,     # 0 = no expiry (GTC)
+            "expiration":    0,       # GTC — no expiry
             "nonce":         0,
             "feeRateBps":    0,
-            "side":          0,     # BUY
-            "signatureType": 0,     # EOA wallet signature
+            "side":          0,       # BUY
+            "signatureType": 0,       # EOA
         }
 
-        # ── Step A: EIP-712 sign the order payload (wallet private key) ────
         signature = _eip712_sign(order_data, exchange_addr)
 
         payload = {
             "order":      {**order_data, "signature": signature},
-            "ownerId":    owner_id,
             "orderType":  "GTC",
             "marketSlug": slug,
         }
 
-        # ── Step B: HMAC-signed POST (token ID + secret) ──────────────────
         resp = _post("/orders", payload)
+        logger.info(f"[{symbol}] POST /orders → {resp.status_code}: {resp.text[:400]}")
         resp.raise_for_status()
-        result = resp.json()
 
+        result   = resp.json()
         order_id = result.get("id") or result.get("orderId") or str(salt)
-        logger.info(
-            f"LIVE ORDER ✓ {symbol} {direction} | "
-            f"${position_size_usd} | {num_contracts} contracts "
-            f"@ ${price_per_contract} | id={order_id}"
-        )
+
+        logger.info(f"[{symbol}] ORDER ✓ {signal_direction} {num_shares} shares "
+                    f"@ ${price_per_contract} id={order_id}")
         return {
             "success":            True,
             "order_id":           str(order_id),
-            "contracts":          num_contracts,
+            "contracts":          num_shares,
             "price_per_contract": price_per_contract,
             "total_spent":        position_size_usd,
             "slug":               slug,
-            "direction":          direction,
+            "signal_direction":   signal_direction,
         }
 
     except requests.HTTPError as e:
         body = e.response.text if e.response else str(e)
-        logger.error(f"HTTP error placing order for {symbol}: {body}")
+        logger.error(f"[{symbol}] HTTPError: {body}")
         return {"success": False, "error": body}
     except Exception as e:
-        logger.error(f"Order error for {symbol}: {e}")
+        logger.error(f"[{symbol}] Exception: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
-def place_shadow_order(symbol: str, direction: str, position_size_usd: float,
-                       max_contract_price: float = 0.50) -> dict:
-    """
-    Shadow (demo) mode — mimics Limitless order structure without real execution.
-    Returns same structure as place_live_order for consistent tracking.
-    """
+# ── Shadow order ──────────────────────────────────────────────────────────────
+
+def place_shadow_order(
+    symbol: str,
+    signal_direction: str,
+    position_size_usd: float,
+    max_contract_price: float = 0.50,
+) -> dict:
     price_per_contract = min(max_contract_price, 0.50)
-    num_contracts = round(position_size_usd / price_per_contract, 4)
-    slug = SYMBOL_TO_SLUG.get(symbol, f"{symbol.lower().replace('-', '-')}-15-min")
-
-    logger.info(f"SHADOW ORDER: {symbol} {direction} | ${position_size_usd} | "
-                f"{num_contracts} contracts @ ${price_per_contract}")
-
+    num_shares         = round(position_size_usd / price_per_contract, 4)
+    logger.info(f"[{symbol}] SHADOW {signal_direction} {num_shares} shares "
+                f"@ ${price_per_contract}")
     return {
-        "success": True,
-        "order_id": f"shadow_{int(time.time())}",
-        "contracts": num_contracts,
+        "success":            True,
+        "order_id":           f"shadow_{int(time.time())}",
+        "contracts":          num_shares,
         "price_per_contract": price_per_contract,
-        "total_spent": position_size_usd,
-        "slug": slug,
-        "direction": direction,
-        "shadow": True,
+        "total_spent":        position_size_usd,
+        "slug":               SYMBOL_TO_SLUG.get(symbol, ""),
+        "signal_direction":   signal_direction,
+        "shadow":             True,
     }
 
 
-def execute_order(symbol: str, direction: str, mode: str,
-                  position_size_usd: float, max_contract_price: float = 0.50) -> dict:
-    """Unified order execution — routes to live or shadow based on mode."""
+# ── Unified entry ─────────────────────────────────────────────────────────────
+
+def execute_order(
+    symbol: str,
+    signal_direction: str,
+    mode: str,
+    position_size_usd: float,
+    max_contract_price: float = 0.50,
+) -> dict:
     if mode == "live":
-        return place_live_order(symbol, direction, position_size_usd, max_contract_price)
-    else:
-        return place_shadow_order(symbol, direction, position_size_usd, max_contract_price)
+        return place_live_order(symbol, signal_direction, position_size_usd, max_contract_price)
+    return place_shadow_order(symbol, signal_direction, position_size_usd, max_contract_price)
 
 
 def get_limitless_market_url(symbol: str) -> str:
     slug = SYMBOL_TO_SLUG.get(symbol, "")
-    if slug:
-        return f"https://limitless.exchange/markets/crypto/{slug}"
-    return "https://limitless.exchange/markets/crypto/15-min"
+    return (f"https://limitless.exchange/markets/crypto/{slug}"
+            if slug else "https://limitless.exchange/markets/crypto/15-min")
