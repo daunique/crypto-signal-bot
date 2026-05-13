@@ -1,12 +1,10 @@
-"""
-Fallback entrypoint — same as wsgi.py.
-Eventlet monkey-patch MUST be first.
-"""
+"""Fallback entrypoint — identical to wsgi.py."""
 import eventlet
 eventlet.monkey_patch()
 
 import os, logging, threading
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 from app import app, socketio
