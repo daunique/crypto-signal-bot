@@ -2,932 +2,1379 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>⚡ SignalBot — 15m Crypto Signals</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>CryptoSignal Bot — 15m Dashboard</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --bg:#080b12;--surface:#0f1320;--surface2:#151b2a;--border:#1c2438;
-  --accent:#00e5a0;--accent2:#7c6aff;
-  --up:#00e5a0;--down:#ff4d6d;--warn:#f5a623;
-  --text:#e2e8f0;--text2:#8892a4;--text3:#3a4258;
-  --win:#00e5a0;--loss:#ff4d6d;--pending:#f5a623;--r:12px;
+/* ── Reset & Base ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0a0c10;
+  --surface: #111318;
+  --surface2: #181c23;
+  --border: #1e2330;
+  --accent: #00e5a0;
+  --accent2: #7c6aff;
+  --up: #00e5a0;
+  --down: #ff4d6d;
+  --warn: #f5a623;
+  --text: #e2e8f0;
+  --text2: #8892a4;
+  --text3: #4a5568;
+  --win: #00e5a0;
+  --loss: #ff4d6d;
+  --pending: #f5a623;
+  --radius: 12px;
+  --shadow: 0 4px 24px rgba(0,0,0,0.4);
 }
-html{font-size:14px}
-body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Inter',sans-serif;min-height:100vh;overflow-x:hidden}
-
-/* ── Mobile top header ── */
-.topbar{
-  position:fixed;top:0;left:0;right:0;z-index:200;
-  background:var(--surface);border-bottom:1px solid var(--border);
-  display:flex;align-items:center;justify-content:space-between;
-  padding:10px 16px;height:50px;
+html { font-size: 14px; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  min-height: 100vh;
+  overflow-x: hidden;
 }
-.topbar-logo{font-size:0.95rem;font-weight:800;color:var(--accent)}
-.topbar-right{display:flex;align-items:center;gap:8px}
-.mode-pill{
-  font-size:0.62rem;font-weight:700;padding:3px 9px;border-radius:20px;
-  text-transform:uppercase;letter-spacing:0.8px;cursor:pointer;border:none;
-  transition:all 0.2s;
-}
-.mode-pill.shadow{background:rgba(124,106,255,0.2);color:var(--accent2);border:1px solid var(--accent2)}
-.mode-pill.live{background:rgba(255,77,109,0.2);color:var(--down);border:1px solid var(--down)}
-.topbar-clock{font-size:0.7rem;color:var(--text2);font-variant-numeric:tabular-nums}
-
-/* ── Bottom nav ── */
-.botnav{
-  display:none;position:fixed;bottom:0;left:0;right:0;z-index:200;
-  background:var(--surface);border-top:1px solid var(--border);
-  padding-bottom:env(safe-area-inset-bottom);
-}
-.botnav-inner{display:flex;padding:5px 0 7px}
-.bnav-item{
-  flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;
-  padding:4px;cursor:pointer;border:none;background:none;
-  color:var(--text2);font-size:0.57rem;font-weight:600;
-  text-transform:uppercase;letter-spacing:0.4px;transition:color 0.15s;
-}
-.bnav-item .bi{font-size:1.15rem;line-height:1}
-.bnav-item.active{color:var(--accent)}
-
-/* ── Desktop sidebar ── */
-.sidebar{
-  width:210px;min-width:210px;
-  background:var(--surface);border-right:1px solid var(--border);
-  display:flex;flex-direction:column;position:fixed;top:0;bottom:0;left:0;z-index:100;
-}
-.sidebar-logo{padding:16px 18px 14px;border-bottom:1px solid var(--border)}
-.sidebar-logo h1{font-size:0.95rem;font-weight:800;color:var(--accent)}
-.sidebar-logo span{font-size:0.68rem;color:var(--text2)}
-.nav{padding:10px 0;flex:1}
-.nav-item{
-  display:flex;align-items:center;gap:10px;
-  padding:10px 18px;cursor:pointer;color:var(--text2);
-  font-size:0.82rem;font-weight:500;border-left:3px solid transparent;
-  transition:all 0.15s;
-}
-.nav-item:hover{background:var(--surface2);color:var(--text)}
-.nav-item.active{background:var(--surface2);color:var(--accent);border-left-color:var(--accent)}
-.nav-item .icon{font-size:0.95rem;width:18px;text-align:center}
-.sidebar-mode{margin:10px 14px;padding:7px 10px;border-radius:8px;
-  font-size:0.7rem;font-weight:700;text-align:center;text-transform:uppercase;
-  letter-spacing:0.8px;cursor:pointer;transition:all 0.2s}
-.sidebar-mode.shadow{background:rgba(124,106,255,0.15);color:var(--accent2);border:1px solid var(--accent2)}
-.sidebar-mode.live{background:rgba(255,77,109,0.15);color:var(--down);border:1px solid var(--down)}
-.sidebar-clock{padding:10px 18px;border-top:1px solid var(--border);font-size:0.7rem;color:var(--text2);text-align:center}
-.sidebar-clock .time{font-size:1rem;color:var(--text);font-weight:700;font-variant-numeric:tabular-nums}
-.sidebar-clock .next{margin-top:3px}
-.sidebar-clock .next span{color:var(--accent);font-weight:700}
 
 /* ── Layout ── */
-.app{display:flex;height:100vh}
-.main{flex:1;overflow-y:auto;padding:24px;margin-left:210px}
+.app { display: flex; height: 100vh; }
+.sidebar {
+  width: 220px; min-width: 220px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  padding: 0;
+}
+.main { flex: 1; overflow-y: auto; padding: 24px; }
+
+/* ── Sidebar ── */
+.logo {
+  padding: 20px 20px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.logo h1 { font-size: 1rem; font-weight: 700; color: var(--accent); letter-spacing: 0.5px; }
+.logo span { font-size: 0.7rem; color: var(--text2); }
+
+.nav { padding: 12px 0; flex: 1; }
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 20px; cursor: pointer;
+  color: var(--text2); font-size: 0.85rem; font-weight: 500;
+  border-left: 3px solid transparent;
+  transition: all 0.15s;
+}
+.nav-item:hover { background: var(--surface2); color: var(--text); }
+.nav-item.active {
+  background: var(--surface2); color: var(--accent);
+  border-left-color: var(--accent);
+}
+.nav-item .icon { font-size: 1rem; width: 18px; text-align: center; }
+
+.mode-badge {
+  margin: 12px 16px;
+  padding: 8px 12px; border-radius: 8px;
+  font-size: 0.75rem; font-weight: 700; text-align: center;
+  text-transform: uppercase; letter-spacing: 1px;
+  cursor: pointer; transition: all 0.2s;
+}
+.mode-badge.shadow { background: rgba(124,106,255,0.15); color: var(--accent2); border: 1px solid var(--accent2); }
+.mode-badge.live { background: rgba(255,77,109,0.15); color: var(--down); border: 1px solid var(--down); }
+
+.sidebar-clock {
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+  font-size: 0.75rem; color: var(--text2); text-align: center;
+}
+.sidebar-clock .time { font-size: 1.1rem; color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
 
 /* ── Pages ── */
-.page{display:none}.page.active{display:block}
-.page-hdr{margin-bottom:20px}
-.page-hdr h2{font-size:1.3rem;font-weight:800}
-.page-hdr p{color:var(--text2);font-size:0.8rem;margin-top:3px}
+.page { display: none; }
+.page.active { display: block; }
 
-/* ── Cards ── */
-.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:18px;margin-bottom:14px}
-.card-sm{padding:14px}
-.card-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
-.card-title{font-size:0.72rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.7px}
+/* ── Page Header ── */
+.page-header { margin-bottom: 24px; }
+.page-header h2 { font-size: 1.4rem; font-weight: 700; }
+.page-header p { color: var(--text2); font-size: 0.85rem; margin-top: 4px; }
 
 /* ── Grid ── */
-.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}
-.g2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}
+.grid { display: grid; gap: 16px; }
+.grid-4 { grid-template-columns: repeat(4, 1fr); }
+.grid-3 { grid-template-columns: repeat(3, 1fr); }
+.grid-2 { grid-template-columns: 1fr 1fr; }
 
-/* ── Stat cards ── */
-.stat-v{font-size:1.9rem;font-weight:800;line-height:1}
-.stat-l{font-size:0.7rem;color:var(--text2);margin-top:5px;text-transform:uppercase;letter-spacing:0.5px}
-.stat-s{font-size:0.72rem;color:var(--text2);margin-top:3px}
-.c-accent{color:var(--accent)}.c-up{color:var(--up)}.c-down{color:var(--down)}.c-warn{color:var(--warn)}
-
-/* ── Win rate ring ── */
-.wr-wrap{display:flex;align-items:center;gap:16px}
-.wr-ring{position:relative;width:80px;height:80px;flex-shrink:0}
-.wr-ring svg{transform:rotate(-90deg)}
-.wr-ring .rb{fill:none;stroke:var(--border);stroke-width:8}
-.wr-ring .rf{fill:none;stroke-width:8;stroke-linecap:round;transition:stroke-dashoffset 0.6s ease}
-.wr-txt{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:1rem;font-weight:800}
-
-/* ── Prices bar ── */
-.prices-bar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
-.price-chip{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:7px 12px;display:flex;align-items:center;gap:8px}
-.pc-sym{font-size:0.7rem;font-weight:700;color:var(--text2)}
-.pc-val{font-size:0.85rem;font-weight:700}
-.pc-chg{font-size:0.68rem;font-weight:600}
-.pc-chg.pos{color:var(--up)}.pc-chg.neg{color:var(--down)}
-
-/* ── Candle timer ── */
-.candle-timer{display:flex;align-items:center;justify-content:space-between;
-  background:var(--surface2);border:1px solid var(--border);border-radius:8px;
-  padding:8px 14px;margin-bottom:14px;font-size:0.75rem}
-.candle-timer .label{color:var(--text2)}
-.candle-timer .cd{font-size:1.1rem;font-weight:800;color:var(--accent);font-variant-numeric:tabular-nums}
-.candle-timer .next{color:var(--text2);font-size:0.7rem}
-
-/* ── Signal feed ── */
-.signal-feed{display:flex;flex-direction:column;gap:7px;max-height:420px;overflow-y:auto}
-.signal-feed::-webkit-scrollbar{width:3px}
-.signal-feed::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
-.sig-card{
-  background:var(--surface2);border:1px solid var(--border);border-radius:10px;
-  padding:11px 13px;display:flex;align-items:center;gap:11px;
-  animation:slideIn 0.3s ease;transition:border-color 0.2s;
+/* ── Cards ── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
 }
-.sig-card:hover{border-color:var(--accent2)}
-.sig-card.win{border-left:3px solid var(--win)}
-.sig-card.loss{border-left:3px solid var(--loss)}
-.sig-card.pending{border-left:3px solid var(--pending)}
-@keyframes slideIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
-.sig-arrow{width:34px;height:34px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:1rem;font-weight:800;flex-shrink:0}
-.sig-arrow.up{background:rgba(0,229,160,0.12);color:var(--up)}
-.sig-arrow.down{background:rgba(255,77,109,0.12);color:var(--down)}
-.sig-info{flex:1}
-.sig-sym{font-weight:700;font-size:0.88rem}
-.sig-meta{font-size:0.68rem;color:var(--text2);margin-top:2px}
-.sig-right{text-align:right}
-.sig-conf{font-size:0.95rem;font-weight:800;color:var(--accent)}
-.sig-conf-lbl{font-size:0.62rem;color:var(--text2)}
-.outcome-badge{font-size:0.62rem;font-weight:800;padding:3px 8px;border-radius:20px;text-transform:uppercase;letter-spacing:0.5px;margin-left:8px;flex-shrink:0}
-.ob-win{background:rgba(0,229,160,0.15);color:var(--win)}
-.ob-loss{background:rgba(255,77,109,0.15);color:var(--loss)}
-.ob-pending{background:rgba(245,166,35,0.15);color:var(--pending)}
-.tier-badge{font-size:0.6rem;font-weight:700;padding:1px 5px;border-radius:4px;margin-left:5px}
-.tier-t1{background:rgba(245,166,35,0.2);color:var(--warn)}
-.tier-t2{background:rgba(124,106,255,0.2);color:var(--accent2)}
+.card-sm { padding: 16px; }
+.card-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 16px;
+}
+.card-title { font-size: 0.8rem; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.8px; }
+
+/* ── Stat Cards ── */
+.stat-value { font-size: 2rem; font-weight: 800; line-height: 1; }
+.stat-label { font-size: 0.75rem; color: var(--text2); margin-top: 6px; }
+.stat-sub { font-size: 0.75rem; color: var(--text2); margin-top: 4px; }
+.stat-up { color: var(--up); }
+.stat-down { color: var(--down); }
+.stat-warn { color: var(--warn); }
+.stat-accent { color: var(--accent); }
+.stat-purple { color: var(--accent2); }
+
+/* ── Win Rate Ring ── */
+.win-rate-container { display: flex; align-items: center; gap: 16px; }
+.win-rate-ring { position: relative; width: 80px; height: 80px; flex-shrink: 0; }
+.win-rate-ring svg { transform: rotate(-90deg); }
+.win-rate-ring .ring-bg { fill: none; stroke: var(--border); stroke-width: 8; }
+.win-rate-ring .ring-fg { fill: none; stroke-width: 8; stroke-linecap: round; transition: stroke-dashoffset 0.6s ease; }
+.win-rate-text {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1rem; font-weight: 800;
+}
+.win-rate-details .big { font-size: 1.1rem; font-weight: 700; }
+
+/* ── Signal Feed ── */
+.signal-feed { display: flex; flex-direction: column; gap: 8px; max-height: 400px; overflow-y: auto; }
+.signal-feed::-webkit-scrollbar { width: 4px; }
+.signal-feed::-webkit-scrollbar-track { background: transparent; }
+.signal-feed::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+.signal-card {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex; align-items: center; gap: 12px;
+  animation: slideIn 0.3s ease;
+  transition: border-color 0.2s;
+}
+.signal-card:hover { border-color: var(--accent2); }
+.signal-card.win { border-left: 3px solid var(--win); }
+.signal-card.loss { border-left: 3px solid var(--loss); }
+.signal-card.pending { border-left: 3px solid var(--pending); }
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.sig-direction {
+  width: 36px; height: 36px; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1rem; font-weight: 700; flex-shrink: 0;
+}
+.sig-direction.up { background: rgba(0,229,160,0.12); color: var(--up); }
+.sig-direction.down { background: rgba(255,77,109,0.12); color: var(--down); }
+
+.sig-info { flex: 1; }
+.sig-symbol { font-weight: 700; font-size: 0.9rem; }
+.sig-meta { font-size: 0.72rem; color: var(--text2); margin-top: 2px; }
+
+.sig-conf {
+  text-align: right;
+  font-size: 0.75rem;
+}
+.sig-conf .conf-val { font-size: 1rem; font-weight: 700; }
+
+.sig-outcome {
+  font-size: 0.7rem; font-weight: 700; padding: 3px 8px;
+  border-radius: 20px; text-transform: uppercase; letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+.sig-outcome.win { background: rgba(0,229,160,0.15); color: var(--win); }
+.sig-outcome.loss { background: rgba(255,77,109,0.15); color: var(--loss); }
+.sig-outcome.pending { background: rgba(245,166,35,0.15); color: var(--pending); }
+
+.tier-badge {
+  font-size: 0.65rem; font-weight: 700;
+  padding: 2px 6px; border-radius: 4px;
+  margin-left: 6px;
+}
+.tier-t1 { background: rgba(245,166,35,0.2); color: var(--warn); }
+.tier-t2 { background: rgba(126,106,255,0.2); color: var(--accent2); }
+
+/* ── Prices Bar ── */
+.prices-bar {
+  display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px;
+}
+.price-chip {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 14px;
+  display: flex; align-items: center; gap: 8px;
+}
+.price-chip .sym { font-size: 0.75rem; font-weight: 700; color: var(--text2); }
+.price-chip .val { font-size: 0.9rem; font-weight: 700; }
+.price-chip .chg { font-size: 0.72rem; font-weight: 600; }
+.price-chip .chg.pos { color: var(--up); }
+.price-chip .chg.neg { color: var(--down); }
+
+/* ── Chart container ── */
+.chart-wrap { position: relative; height: 200px; }
 
 /* ── Table ── */
-.tbl{width:100%;border-collapse:collapse;font-size:0.78rem}
-.tbl th{text-align:left;padding:7px 10px;color:var(--text2);font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid var(--border)}
-.tbl td{padding:8px 10px;border-bottom:1px solid rgba(28,36,56,0.5)}
-.tbl tr:hover td{background:var(--surface2)}
-.tbl .up{color:var(--up);font-weight:700}.tbl .down{color:var(--down);font-weight:700}
-
-/* ── Pair stats table ── */
-.pair-stat-tbl{width:100%;border-collapse:collapse;font-size:0.75rem}
-.pair-stat-tbl th{text-align:left;padding:6px 8px;color:var(--text2);font-size:0.67rem;font-weight:700;text-transform:uppercase;border-bottom:1px solid var(--border)}
-.pair-stat-tbl td{padding:8px;border-bottom:1px solid rgba(28,36,56,0.4)}
+.signal-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+.signal-table th {
+  text-align: left; padding: 8px 12px;
+  color: var(--text2); font-weight: 600; font-size: 0.72rem;
+  text-transform: uppercase; letter-spacing: 0.6px;
+  border-bottom: 1px solid var(--border);
+}
+.signal-table td { padding: 9px 12px; border-bottom: 1px solid rgba(30,35,48,0.6); }
+.signal-table tr:hover td { background: var(--surface2); }
+.signal-table .up { color: var(--up); font-weight: 700; }
+.signal-table .down { color: var(--down); font-weight: 700; }
 
 /* ── Settings ── */
-.settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.form-group{margin-bottom:16px}
-.form-lbl{display:block;font-size:0.72rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:7px}
-.form-hint{font-size:0.67rem;color:var(--text3);margin-top:4px}
-input[type=range]{width:100%;height:4px;border-radius:2px;background:var(--border);outline:none;cursor:pointer;-webkit-appearance:none}
-input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:var(--accent);cursor:pointer}
-input[type=number],input[type=text]{background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 12px;font-size:0.88rem;width:100%;outline:none}
-input[type=number]:focus{border-color:var(--accent)}
-.toggle-row{display:flex;align-items:center;justify-content:space-between;padding:11px 0;border-bottom:1px solid var(--border)}
-.toggle-row:last-child{border-bottom:none}
-.tgl-lbl{font-size:0.85rem;font-weight:500}
-.tgl-sub{font-size:0.72rem;color:var(--text2);margin-top:2px}
-.toggle{position:relative;width:46px;height:25px;background:var(--border);border-radius:13px;cursor:pointer;transition:background 0.2s;flex-shrink:0}
-.toggle.on{background:var(--accent)}.toggle.live-mode.on{background:var(--down)}
-.toggle::after{content:'';position:absolute;width:19px;height:19px;border-radius:50%;background:#fff;top:3px;left:3px;transition:transform 0.2s;box-shadow:0 1px 4px rgba(0,0,0,0.3)}
-.toggle.on::after{transform:translateX(21px)}
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.form-group { margin-bottom: 20px; }
+.form-label { display: block; font-size: 0.8rem; color: var(--text2); font-weight: 600; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.6px; }
+.form-hint { font-size: 0.72rem; color: var(--text3); margin-top: 4px; }
+
+input[type="range"] {
+  width: 100%; height: 4px; border-radius: 2px;
+  background: var(--border); outline: none; cursor: pointer;
+  -webkit-appearance: none; appearance: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--accent); cursor: pointer;
+}
+input[type="number"], input[type="text"] {
+  background: var(--surface2); border: 1px solid var(--border);
+  color: var(--text); border-radius: 8px; padding: 10px 12px;
+  font-size: 0.9rem; width: 100%; outline: none;
+}
+input[type="number"]:focus { border-color: var(--accent); }
+
+/* ── Toggle ── */
+.toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 14px 0; border-bottom: 1px solid var(--border); }
+.toggle-row:last-child { border-bottom: none; }
+.toggle-label { font-size: 0.85rem; font-weight: 500; }
+.toggle-sub { font-size: 0.75rem; color: var(--text2); margin-top: 2px; }
+.toggle {
+  position: relative; width: 48px; height: 26px;
+  background: var(--border); border-radius: 13px;
+  cursor: pointer; transition: background 0.2s;
+  flex-shrink: 0;
+}
+.toggle.on { background: var(--accent); }
+.toggle.live-mode.on { background: var(--down); }
+.toggle::after {
+  content: ''; position: absolute;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: white; top: 3px; left: 3px;
+  transition: transform 0.2s; box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+}
+.toggle.on::after { transform: translateX(22px); }
 
 /* ── Buttons ── */
-.btn{padding:10px 20px;border-radius:8px;border:none;font-size:0.83rem;font-weight:700;cursor:pointer;transition:opacity 0.15s}
-.btn-accent{background:var(--accent);color:#000}.btn-accent:hover{opacity:0.85}
-.btn-danger{background:rgba(255,77,109,0.15);color:var(--down);border:1px solid var(--down)}
-.btn-ghost{background:var(--surface2);color:var(--text);border:1px solid var(--border)}
-.btn-ghost:hover{border-color:var(--accent2)}
+.btn {
+  padding: 10px 20px; border-radius: 8px; border: none;
+  font-size: 0.85rem; font-weight: 600; cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-accent { background: var(--accent); color: #000; }
+.btn-accent:hover { opacity: 0.85; }
+.btn-danger { background: rgba(255,77,109,0.2); color: var(--down); border: 1px solid var(--down); }
+.btn-danger:hover { background: rgba(255,77,109,0.35); }
+.btn-ghost { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+.btn-ghost:hover { border-color: var(--accent2); }
 
-/* ── Shadow panel ── */
-.shadow-panel{background:linear-gradient(135deg,rgba(124,106,255,0.08),rgba(0,229,160,0.04));border:1px solid rgba(124,106,255,0.25);border-radius:var(--r);padding:18px;margin-bottom:14px}
-
-/* ── Toast ── */
-#toasts{position:fixed;bottom:20px;right:16px;display:flex;flex-direction:column;gap:7px;z-index:9999}
-.toast{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 16px;max-width:300px;box-shadow:0 4px 20px rgba(0,0,0,0.4);animation:tIn 0.3s ease;font-size:0.8rem}
-@keyframes tIn{from{opacity:0;transform:translateX(16px)}to{opacity:1;transform:translateX(0)}}
-.toast.win{border-left:3px solid var(--win)}.toast.loss{border-left:3px solid var(--loss)}.toast.signal{border-left:3px solid var(--accent)}
-
-/* ── Chart ── */
-.chart-wrap{position:relative;height:190px}
-
-/* ── Live dot ── */
-.live-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);display:inline-block;margin-right:5px;animation:pulse 2s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+/* ── Notifications toast ── */
+#toast-container {
+  position: fixed; bottom: 24px; right: 24px;
+  display: flex; flex-direction: column; gap: 8px; z-index: 9999;
+}
+.toast {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px 18px;
+  max-width: 320px; box-shadow: var(--shadow);
+  animation: toastIn 0.3s ease; display: flex; align-items: flex-start; gap: 12px;
+}
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.toast.win { border-left: 3px solid var(--win); }
+.toast.loss { border-left: 3px solid var(--loss); }
+.toast.signal { border-left: 3px solid var(--accent); }
 
 /* ── Pagination ── */
-.pg-btn{padding:5px 11px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text2);cursor:pointer;font-size:0.75rem}
-.pg-btn:hover{border-color:var(--accent);color:var(--accent)}
-.pg-btn.active{background:var(--accent);color:#000;border-color:var(--accent)}
+.pagination { display: flex; gap: 6px; align-items: center; margin-top: 16px; justify-content: center; }
+.page-btn { padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface2); color: var(--text2); cursor: pointer; font-size: 0.8rem; }
+.page-btn:hover { border-color: var(--accent); color: var(--accent); }
+.page-btn.active { background: var(--accent); color: #000; border-color: var(--accent); }
+
+/* ── Shadow mode panel ── */
+.shadow-panel {
+  background: linear-gradient(135deg, rgba(124,106,255,0.08), rgba(0,229,160,0.05));
+  border: 1px solid rgba(124,106,255,0.3);
+  border-radius: var(--radius); padding: 20px;
+}
 
 /* ── Responsive ── */
-@media(max-width:768px){
-  .sidebar{display:none}
-  .botnav{display:block}
-  .app{flex-direction:column;height:auto}
-  .main{margin-left:0;padding:10px 10px 82px;margin-top:50px;overflow-y:unset}
-  .g4{grid-template-columns:1fr 1fr}
-  .g2{grid-template-columns:1fr}
-  .settings-grid{grid-template-columns:1fr}
-  .prices-bar{flex-wrap:wrap}
-  .price-chip{flex:1;min-width:calc(50% - 5px)}
-  #toasts{bottom:74px;right:10px}
+@media (max-width: 1100px) {
+  .grid-4 { grid-template-columns: repeat(2, 1fr); }
 }
-@media(min-width:769px){
-  .topbar{display:none}
+
+/* ── Mobile Bottom Nav ── */
+.mobile-nav {
+  display: none;
+  position: fixed; bottom: 0; left: 0; right: 0;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  z-index: 1000;
+  padding-bottom: env(safe-area-inset-bottom);
 }
+.mobile-nav-inner {
+  display: flex; justify-content: space-around;
+  padding: 6px 0 8px;
+}
+.mobile-nav-item {
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 6px 4px; cursor: pointer; border-radius: 10px;
+  color: var(--text2); font-size: 0.6rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.4px;
+  transition: color 0.15s; flex: 1;
+  border: none; background: none;
+}
+.mobile-nav-item .m-icon { font-size: 1.3rem; line-height: 1; }
+.mobile-nav-item.active { color: var(--accent); }
+.mobile-nav-item.active .m-icon { filter: drop-shadow(0 0 6px var(--accent)); }
+
+/* Mobile top header */
+.mobile-header {
+  display: none;
+  position: fixed; top: 0; left: 0; right: 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  z-index: 999;
+  padding: 10px 16px;
+  align-items: center; justify-content: space-between;
+}
+.mobile-header h1 { font-size: 0.95rem; font-weight: 700; color: var(--accent); }
+.mobile-header .m-clock { font-size: 0.78rem; color: var(--text2); font-variant-numeric: tabular-nums; }
+.mobile-header .m-mode {
+  font-size: 0.65rem; font-weight: 700; padding: 3px 8px;
+  border-radius: 6px; text-transform: uppercase; cursor: pointer;
+}
+.mobile-header .m-mode.shadow { background: rgba(124,106,255,0.2); color: var(--accent2); }
+.mobile-header .m-mode.live { background: rgba(255,77,109,0.2); color: var(--down); }
+
+@media (max-width: 768px) {
+  .sidebar { display: none; }
+  .mobile-nav { display: block; }
+  .mobile-header { display: flex; }
+
+  .app { flex-direction: column; height: auto; min-height: 100vh; }
+  .main {
+    padding: 12px 12px 88px;
+    margin-top: 50px;
+    overflow-y: unset;
+  }
+
+  .grid-4 { grid-template-columns: repeat(2, 1fr); }
+  .grid-3 { grid-template-columns: 1fr 1fr; }
+  .grid-2 { grid-template-columns: 1fr; }
+  .settings-grid { grid-template-columns: 1fr; }
+
+  .prices-bar { flex-wrap: wrap; gap: 6px; }
+  .price-chip { flex: 1; min-width: calc(50% - 4px); }
+
+  .signal-table th:nth-child(6), .signal-table td:nth-child(6),
+  .signal-table th:nth-child(7), .signal-table td:nth-child(7) { display: none; }
+
+  .page-header h2 { font-size: 1.1rem; }
+  .stat-value { font-size: 1.6rem; }
+  .card { padding: 14px; }
+}
+
+.candle-timer { font-size: 0.75rem; color: var(--text2); }
+.candle-timer span { color: var(--accent); font-weight: 700; font-variant-numeric: tabular-nums; }
+
+.pulse { animation: pulse 2s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+.live-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent); display: inline-block; margin-right: 6px;
+}
+.live-dot.red { background: var(--down); }
 </style>
 </head>
 <body>
-
-<!-- Mobile top bar -->
-<header class="topbar">
-  <div class="topbar-logo">⚡ SignalBot</div>
-  <div class="topbar-right">
-    <div id="m-mode-pill" class="mode-pill shadow" onclick="quickToggleMode()">👻 SHADOW</div>
-    <div class="topbar-clock" id="m-clock">--:-- UTC</div>
-  </div>
+<!-- ── Mobile Top Header ── -->
+<header class="mobile-header" id="mobile-header">
+  <h1>⚡ SignalBot</h1>
+  <div id="m-mode-badge" class="m-mode shadow" onclick="toggleModeQuick()">👻 SHADOW</div>
+  <div class="m-clock" id="m-clock">--:--:-- UTC</div>
 </header>
 
-<!-- Mobile bottom nav -->
-<nav class="botnav">
-  <div class="botnav-inner">
-    <button class="bnav-item active" id="bn-dashboard" onclick="showPage('dashboard',this)"><span class="bi">📊</span>Dashboard</button>
-    <button class="bnav-item" id="bn-signals"   onclick="showPage('signals',this)">  <span class="bi">📡</span>Signals</button>
-    <button class="bnav-item" id="bn-history"   onclick="showPage('history',this)">  <span class="bi">📜</span>History</button>
-    <button class="bnav-item" id="bn-shadow"    onclick="showPage('shadow',this)">   <span class="bi">👻</span>Shadow</button>
-    <button class="bnav-item" id="bn-settings"  onclick="showPage('settings',this)"> <span class="bi">⚙️</span>Settings</button>
+<div class="app">
+
+<!-- ── Mobile Bottom Nav ── -->
+<nav class="mobile-nav">
+  <div class="mobile-nav-inner">
+    <button class="mobile-nav-item active" id="mnav-dashboard" onclick="showPage('dashboard', this, 'mnav-dashboard')">
+      <span class="m-icon">📊</span>Dashboard
+    </button>
+    <button class="mobile-nav-item" id="mnav-signals" onclick="showPage('signals', this, 'mnav-signals')">
+      <span class="m-icon">📡</span>Signals
+    </button>
+    <button class="mobile-nav-item" id="mnav-history" onclick="showPage('history', this, 'mnav-history')">
+      <span class="m-icon">📜</span>History
+    </button>
+    <button class="mobile-nav-item" id="mnav-shadow" onclick="showPage('shadow', this, 'mnav-shadow')">
+      <span class="m-icon">👻</span>Shadow
+    </button>
+    <button class="mobile-nav-item" id="mnav-settings" onclick="showPage('settings', this, 'mnav-settings')">
+      <span class="m-icon">⚙️</span>Settings
+    </button>
   </div>
 </nav>
 
-<div class="app">
-<!-- Desktop sidebar -->
+<!-- ── Sidebar ── -->
 <aside class="sidebar">
-  <div class="sidebar-logo"><h1>⚡ SignalBot</h1><span>15m Crypto Prediction</span></div>
-  <div id="d-mode" class="sidebar-mode shadow" onclick="quickToggleMode()">👻 SHADOW MODE</div>
+  <div class="logo">
+    <h1>⚡ SignalBot</h1>
+    <span>15m Crypto Prediction</span>
+  </div>
+
+  <div id="mode-badge" class="mode-badge shadow" onclick="toggleModeQuick()">
+    👻 SHADOW MODE
+  </div>
+
   <nav class="nav">
-    <div class="nav-item active" data-page="dashboard" onclick="showPage('dashboard',this)"><span class="icon">📊</span>Dashboard</div>
-    <div class="nav-item" data-page="signals"   onclick="showPage('signals',this)">  <span class="icon">📡</span>Signals</div>
-    <div class="nav-item" data-page="history"   onclick="showPage('history',this)">  <span class="icon">📜</span>History</div>
-    <div class="nav-item" data-page="shadow"    onclick="showPage('shadow',this)">   <span class="icon">👻</span>Shadow</div>
-    <div class="nav-item" data-page="settings"  onclick="showPage('settings',this)"> <span class="icon">⚙️</span>Settings</div>
+    <div class="nav-item active" data-page="dashboard" onclick="showPage('dashboard', this)">
+      <span class="icon">📊</span> Dashboard
+    </div>
+    <div class="nav-item" data-page="signals" onclick="showPage('signals', this)">
+      <span class="icon">📡</span> Signals
+    </div>
+    <div class="nav-item" data-page="history" onclick="showPage('history', this)">
+      <span class="icon">📜</span> History
+    </div>
+    <div class="nav-item" data-page="shadow" onclick="showPage('shadow', this)">
+      <span class="icon">👻</span> Shadow Account
+    </div>
+    <div class="nav-item" data-page="settings" onclick="showPage('settings', this)">
+      <span class="icon">⚙️</span> Settings
+    </div>
   </nav>
+
   <div class="sidebar-clock">
-    <div class="time" id="d-clock">--:--:--</div>
-    <div class="next">Next candle: <span id="d-next">--:--</span></div>
+    <div class="time" id="clock">--:--:--</div>
+    <div style="margin-top:4px;">UTC · Next candle: <span class="candle-timer"><span id="next-candle">--:--</span></span></div>
   </div>
 </aside>
 
-<!-- Main -->
+<!-- ── Main Content ── -->
 <main class="main">
 
-<!-- ══ DASHBOARD ══ -->
-<div class="page active" id="page-dashboard">
-  <div class="page-hdr"><h2>📊 Dashboard</h2><p>Single best signal per 15-min candle · OKX Spot · 6 pairs</p></div>
+  <!-- ── DASHBOARD PAGE ── -->
+  <div class="page active" id="page-dashboard">
+    <div class="page-header">
+      <h2>📊 Live Dashboard</h2>
+      <p>Real-time signals from 6 crypto pairs · 15-minute candles · OKX Spot</p>
+    </div>
 
-  <!-- Candle timer -->
-  <div class="candle-timer">
-    <div><div class="label">Next candle opens</div><div class="next" id="next-candle-label">--:-- UTC</div></div>
-    <div class="cd" id="candle-cd">--:--</div>
-  </div>
+    <!-- Prices Bar -->
+    <div class="prices-bar" id="prices-bar">
+      <div class="price-chip"><span class="sym">BTC-USDT</span><span class="val" id="p-BTC-USDT">—</span><span class="chg" id="c-BTC-USDT">—</span></div>
+      <div class="price-chip"><span class="sym">ETH-USDT</span><span class="val" id="p-ETH-USDT">—</span><span class="chg" id="c-ETH-USDT">—</span></div>
+      <div class="price-chip"><span class="sym">SOL-USDT</span><span class="val" id="p-SOL-USDT">—</span><span class="chg" id="c-SOL-USDT">—</span></div>
+      <div class="price-chip"><span class="sym">XRP-USDT</span><span class="val" id="p-XRP-USDT">—</span><span class="chg" id="c-XRP-USDT">—</span></div>
+      <div class="price-chip"><span class="sym">BNB-USDT</span><span class="val" id="p-BNB-USDT">—</span><span class="chg" id="c-BNB-USDT">—</span></div>
+      <div class="price-chip"><span class="sym">DOGE-USDT</span><span class="val" id="p-DOGE-USDT">—</span><span class="chg" id="c-DOGE-USDT">—</span></div>
+    </div>
 
-  <!-- Prices -->
-  <div class="prices-bar" id="prices-bar">
-    <div class="price-chip"><span class="pc-sym">BTC</span><span class="pc-val" id="p-BTC-USDT">—</span><span class="pc-chg" id="c-BTC-USDT">—</span></div>
-    <div class="price-chip"><span class="pc-sym">ETH</span><span class="pc-val" id="p-ETH-USDT">—</span><span class="pc-chg" id="c-ETH-USDT">—</span></div>
-    <div class="price-chip"><span class="pc-sym">SOL</span><span class="pc-val" id="p-SOL-USDT">—</span><span class="pc-chg" id="c-SOL-USDT">—</span></div>
-    <div class="price-chip"><span class="pc-sym">XRP</span><span class="pc-val" id="p-XRP-USDT">—</span><span class="pc-chg" id="c-XRP-USDT">—</span></div>
-    <div class="price-chip"><span class="pc-sym">BNB</span><span class="pc-val" id="p-BNB-USDT">—</span><span class="pc-chg" id="c-BNB-USDT">—</span></div>
-    <div class="price-chip"><span class="pc-sym">DOGE</span><span class="pc-val" id="p-DOGE-USDT">—</span><span class="pc-chg" id="c-DOGE-USDT">—</span></div>
-  </div>
-
-  <!-- Stats -->
-  <div class="g4">
-    <div class="card card-sm"><div class="card-title">Today's Signals</div><div class="stat-v c-accent" id="s-total">0</div><div class="stat-s"><span id="s-pending" class="c-warn">0</span> pending</div></div>
-    <div class="card card-sm"><div class="card-title">Wins</div><div class="stat-v c-up" id="s-wins">0</div></div>
-    <div class="card card-sm"><div class="card-title">Losses</div><div class="stat-v c-down" id="s-losses">0</div></div>
-    <div class="card card-sm"><div class="card-title">Win Rate</div><div class="stat-v c-accent" id="s-wr">—</div></div>
-  </div>
-
-  <!-- Win rate ring + chart -->
-  <div class="g2">
-    <div class="card">
-      <div class="card-hdr"><span class="card-title">Win Rate</span><span id="d-mode-badge" class="outcome-badge ob-pending">SHADOW</span></div>
-      <div class="wr-wrap">
-        <div class="wr-ring">
-          <svg viewBox="0 0 80 80" width="80" height="80">
-            <circle class="rb" cx="40" cy="40" r="34"/>
-            <circle class="rf" id="wr-ring" cx="40" cy="40" r="34" stroke="var(--accent)" stroke-dasharray="213.6" stroke-dashoffset="213.6"/>
-          </svg>
-          <div class="wr-txt" id="wr-txt">0%</div>
-        </div>
-        <div><div style="font-size:1.1rem;font-weight:700"><span id="wr-w">0</span>W / <span id="wr-l">0</span>L</div>
-          <div style="font-size:0.72rem;color:var(--text2);margin-top:5px"><span id="wr-tot">0</span> total signals today</div></div>
+    <!-- Stat Cards -->
+    <div class="grid grid-4" style="margin-bottom:16px;">
+      <div class="card card-sm">
+        <div class="card-title">Today's Signals</div>
+        <div class="stat-value stat-accent" id="stat-total">0</div>
+        <div class="stat-sub"><span id="stat-pending" class="stat-warn">0</span> pending</div>
+      </div>
+      <div class="card card-sm">
+        <div class="card-title">Wins</div>
+        <div class="stat-value stat-up" id="stat-wins">0</div>
+        <div class="stat-sub">today</div>
+      </div>
+      <div class="card card-sm">
+        <div class="card-title">Losses</div>
+        <div class="stat-value stat-down" id="stat-losses">0</div>
+        <div class="stat-sub">today</div>
+      </div>
+      <div class="card card-sm">
+        <div class="card-title">Win Rate</div>
+        <div class="stat-value stat-accent" id="stat-winrate">0%</div>
+        <div class="stat-sub">today</div>
       </div>
     </div>
-    <div class="card">
-      <div class="card-hdr"><span class="card-title">7-Day Performance</span></div>
-      <div class="chart-wrap"><canvas id="perf-chart"></canvas></div>
-    </div>
-  </div>
 
-  <!-- Live signal feed -->
-  <div class="card">
-    <div class="card-hdr">
-      <span class="card-title"><span class="live-dot"></span>Today's Signals</span>
-      <span style="font-size:0.7rem;color:var(--text2)">Resolves at candle close</span>
-    </div>
-    <div class="signal-feed" id="signal-feed">
-      <div style="color:var(--text2);text-align:center;padding:28px;font-size:0.82rem">Waiting for next candle signal...</div>
-    </div>
-  </div>
-
-  <!-- Per-pair performance -->
-  <div class="card">
-    <div class="card-hdr"><span class="card-title">Per-Pair Performance</span><span style="font-size:0.7rem;color:var(--text2)">All-time win rate</span></div>
-    <table class="pair-stat-tbl">
-      <thead><tr><th>Pair</th><th>Tier</th><th>Threshold</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Status</th></tr></thead>
-      <tbody id="pair-tbody"></tbody>
-    </table>
-  </div>
-</div>
-
-<!-- ══ SIGNALS ══ -->
-<div class="page" id="page-signals">
-  <div class="page-hdr"><h2>📡 Signal Log</h2><p>All signals · candle open→close timestamps (UTC)</p></div>
-  <div class="card">
-    <div class="card-hdr">
-      <span class="card-title">Signals</span>
-      <div style="display:flex;gap:7px">
-        <select id="f-sym" onchange="loadSignals()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 8px;font-size:0.75rem">
-          <option value="">All Pairs</option>
-          <option>BTC-USDT</option><option>ETH-USDT</option><option>SOL-USDT</option>
-          <option>XRP-USDT</option><option>BNB-USDT</option><option>DOGE-USDT</option>
-        </select>
-        <select id="f-out" onchange="loadSignals()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 8px;font-size:0.75rem">
-          <option value="">All Results</option>
-          <option value="WIN">Win</option><option value="LOSS">Loss</option><option value="PENDING">Pending</option>
-        </select>
-      </div>
-    </div>
-    <div style="overflow-x:auto">
-      <table class="tbl">
-        <thead><tr><th>Open</th><th>Close</th><th>Pair</th><th>Direction</th><th>Confidence</th><th>Tier</th><th>Entry</th><th>Close Price</th><th>Result</th></tr></thead>
-        <tbody id="signals-tbody"></tbody>
-      </table>
-    </div>
-    <div id="signals-pages" style="display:flex;gap:6px;justify-content:center;margin-top:12px"></div>
-  </div>
-</div>
-
-<!-- ══ HISTORY ══ -->
-<div class="page" id="page-history">
-  <div class="page-hdr"><h2>📜 History</h2><p>Daily performance breakdown</p></div>
-  <div class="g2">
-    <div class="card">
-      <div class="card-hdr"><span class="card-title">30-Day Win Rate</span></div>
-      <div class="chart-wrap" style="height:175px"><canvas id="hist-chart"></canvas></div>
-    </div>
-    <div class="card">
-      <div class="card-hdr"><span class="card-title">30-Day Totals</span></div>
-      <div style="display:flex;flex-direction:column;gap:11px;margin-top:4px">
-        <div style="display:flex;justify-content:space-between"><span style="color:var(--text2);font-size:0.83rem">Total Signals</span><span id="h-total" class="c-accent" style="font-weight:700">—</span></div>
-        <div style="display:flex;justify-content:space-between"><span style="color:var(--text2);font-size:0.83rem">Wins</span><span id="h-wins" style="color:var(--win);font-weight:700">—</span></div>
-        <div style="display:flex;justify-content:space-between"><span style="color:var(--text2);font-size:0.83rem">Losses</span><span id="h-losses" style="color:var(--loss);font-weight:700">—</span></div>
-        <div style="display:flex;justify-content:space-between"><span style="color:var(--text2);font-size:0.83rem">Avg Win Rate</span><span id="h-wr" style="color:var(--accent);font-weight:700">—</span></div>
-      </div>
-    </div>
-  </div>
-  <div class="card">
-    <div class="card-hdr"><span class="card-title">Daily Breakdown</span></div>
-    <div style="overflow-x:auto">
-      <table class="tbl">
-        <thead><tr><th>Date</th><th>Signals</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Mode</th></tr></thead>
-        <tbody id="hist-tbody"></tbody>
-      </table>
-    </div>
-  </div>
-</div>
-
-<!-- ══ SHADOW ══ -->
-<div class="page" id="page-shadow">
-  <div class="page-hdr"><h2>👻 Shadow Account</h2><p>Paper trading · mirrors Limitless GTC order structure</p></div>
-  <div class="shadow-panel">
-    <div class="g2" style="margin-bottom:0">
-      <div><div style="font-size:0.68rem;color:var(--text2);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:5px">Balance</div><div style="font-size:1.5rem;font-weight:800;color:var(--accent2)" id="sh-bal">$1,000.00</div></div>
-      <div><div style="font-size:0.68rem;color:var(--text2);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:5px">Total P&L</div><div style="font-size:1.5rem;font-weight:800" id="sh-pnl">$0.00</div></div>
-    </div>
-    <button class="btn btn-danger" style="margin-top:14px" onclick="resetShadow()">Reset to $1,000</button>
-  </div>
-  <div class="card">
-    <div class="card-hdr"><span class="card-title">Shadow Trade Log</span></div>
-    <div style="overflow-x:auto">
-      <table class="tbl">
-        <thead><tr><th>Time</th><th>Pair</th><th>Direction</th><th>Contracts</th><th>@ Price</th><th>Size</th><th>Result</th></tr></thead>
-        <tbody id="sh-tbody"></tbody>
-      </table>
-    </div>
-  </div>
-</div>
-
-<!-- ══ SETTINGS ══ -->
-<div class="page" id="page-settings">
-  <div class="page-hdr"><h2>⚙️ Settings</h2><p>Configure trading parameters</p></div>
-  <div class="settings-grid">
-    <div class="card">
-      <div class="card-hdr"><span class="card-title">Account Mode</span></div>
-      <div class="toggle-row">
-        <div><div class="tgl-lbl">Live Trading</div><div class="tgl-sub">Executes real GTC orders on Limitless</div></div>
-        <div class="toggle live-mode" id="tgl-live" onclick="toggleSetting('mode')"></div>
-      </div>
-      <div class="toggle-row">
-        <div><div class="tgl-lbl">Martingale</div><div class="tgl-sub">Double position size after each loss</div></div>
-        <div class="toggle" id="tgl-mart" onclick="toggleSetting('martingale')"></div>
-      </div>
-      <div class="form-group" style="margin-top:16px">
-        <label class="form-lbl">Martingale Multiplier</label>
-        <input type="number" id="inp-mult" value="2.0" min="1.1" max="5" step="0.1"/>
-        <div class="form-hint">×2.0 after each loss</div>
-      </div>
-    </div>
-    <div class="card">
-      <div class="card-hdr"><span class="card-title">Position Sizing</span></div>
-      <div class="form-group">
-        <label class="form-lbl">Position Size (USD)</label>
-        <input type="range" id="rng-pos" min="1" max="1000" step="0.5" value="10" oninput="syncPos(this.value)"/>
-        <div style="display:flex;justify-content:space-between;margin-top:5px">
-          <span style="font-size:0.7rem;color:var(--text2)">$1</span>
-          <span style="font-weight:800;color:var(--accent)" id="pos-disp">$10.00</span>
-          <span style="font-size:0.7rem;color:var(--text2)">$1,000</span>
+    <div class="grid grid-2" style="margin-bottom:16px;">
+      <!-- Win Rate Ring -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">Win Rate</span><span id="overall-mode" class="sig-outcome pending" style="padding:4px 10px;">—</span></div>
+        <div class="win-rate-container">
+          <div class="win-rate-ring">
+            <svg viewBox="0 0 80 80" width="80" height="80">
+              <circle class="ring-bg" cx="40" cy="40" r="34"/>
+              <circle class="ring-fg" id="win-ring" cx="40" cy="40" r="34" stroke="var(--accent)"
+                stroke-dasharray="213.6" stroke-dashoffset="213.6"/>
+            </svg>
+            <div class="win-rate-text" id="ring-text">0%</div>
+          </div>
+          <div class="win-rate-details">
+            <div class="big"><span id="wr-wins">0</span>W / <span id="wr-losses">0</span>L</div>
+            <div style="font-size:0.75rem;color:var(--text2);margin-top:6px;">Today's performance</div>
+            <div style="font-size:0.75rem;color:var(--text2);margin-top:4px;"><span id="wr-total">0</span> total signals</div>
+          </div>
         </div>
       </div>
-      <div class="form-group">
-        <label class="form-lbl">Exact Size ($)</label>
-        <input type="number" id="inp-pos" value="10" min="1" max="1000" step="0.5" oninput="syncPosInput(this.value)"/>
-        <div class="form-hint">Range: $1.00 – $1,000.00 (decimals supported)</div>
-      </div>
-      <div class="form-group">
-        <label class="form-lbl">Max Contract Price (≤ $0.50)</label>
-        <input type="number" id="inp-cp" value="0.50" min="0.01" max="0.50" step="0.01"/>
-        <div class="form-hint">Limitless max is $0.50 per contract</div>
-      </div>
-      <div class="form-group">
-        <label class="form-lbl">Min ML Confidence</label>
-        <input type="range" id="rng-conf" min="0.55" max="0.75" step="0.01" value="0.58" oninput="document.getElementById('conf-disp').textContent=Math.round(this.value*100)+'%'"/>
-        <div style="display:flex;justify-content:space-between;margin-top:5px">
-          <span style="font-size:0.7rem;color:var(--text2)">55%</span>
-          <span style="font-weight:800;color:var(--accent)" id="conf-disp">58%</span>
-          <span style="font-size:0.7rem;color:var(--text2)">75%</span>
+
+      <!-- Performance Chart -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">7-Day Win Rate</span></div>
+        <div class="chart-wrap">
+          <canvas id="perf-chart"></canvas>
         </div>
-        <div class="form-hint">Higher = fewer but stronger signals</div>
       </div>
     </div>
-  </div>
-  <div style="display:flex;gap:8px;margin-top:4px">
-    <button class="btn btn-accent" onclick="saveSettings()">💾 Save Settings</button>
-    <button class="btn btn-ghost" onclick="loadSettings()">↺ Reload</button>
+
+    <!-- Live Signal Feed -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title"><span class="live-dot pulse"></span>Today's Signals</span>
+        <span style="font-size:0.75rem;color:var(--text2);">Auto-updates on candle close</span>
+      </div>
+      <div class="signal-feed" id="signal-feed">
+        <div style="color:var(--text2);text-align:center;padding:32px;font-size:0.85rem;">
+          Waiting for next candle signal...
+        </div>
+      </div>
+    </div>
   </div>
 
-  <!-- System status -->
-  <div class="card" style="margin-top:16px">
-    <div class="card-hdr"><span class="card-title">System Status</span></div>
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
-      <div style="text-align:center;background:var(--surface2);border-radius:8px;padding:12px"><div style="font-size:1.2rem">📡</div><div style="font-size:0.72rem;color:var(--text2);margin-top:4px">OKX Feed</div><div style="font-size:0.7rem;color:var(--win);font-weight:700;margin-top:2px">LIVE</div></div>
-      <div style="text-align:center;background:var(--surface2);border-radius:8px;padding:12px"><div style="font-size:1.2rem">🤖</div><div style="font-size:0.72rem;color:var(--text2);margin-top:4px">ML Models</div><div style="font-size:0.7rem;color:var(--win);font-weight:700;margin-top:2px">6 PAIRS</div></div>
-      <div style="text-align:center;background:var(--surface2);border-radius:8px;padding:12px"><div style="font-size:1.2rem">📶</div><div style="font-size:0.72rem;color:var(--text2);margin-top:4px">Mode</div><div style="font-size:0.7rem;font-weight:700;margin-top:2px" id="status-mode-txt">SHADOW</div></div>
+    <!-- Per-Pair Performance -->
+    <div class="card" style="margin-top:16px;">
+      <div class="card-header">
+        <span class="card-title">📊 Per-Pair Performance</span>
+        <span style="font-size:0.72rem;color:var(--text2);">Live win rate by pair</span>
+      </div>
+      <div style="overflow-x:auto;">
+        <table class="signal-table" id="pair-table">
+          <thead>
+            <tr>
+              <th>Pair</th><th>Tier</th><th>Threshold</th>
+              <th>Wins</th><th>Losses</th><th>Win Rate</th><th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="pair-tbody">
+            <tr><td colspan="7" style="text-align:center;color:var(--text2);padding:16px;">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  <!-- ── SIGNALS PAGE ── -->
+  <div class="page" id="page-signals">
+    <div class="page-header">
+      <h2>📡 Active Signals</h2>
+      <p>Current and recent signals — resolves at candle close (XX:00, XX:15, XX:30, XX:45 UTC)</p>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Signal Log</span>
+        <div style="display:flex;gap:8px;">
+          <select id="filter-symbol" onchange="loadSignals()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font-size:0.8rem;">
+            <option value="">All Pairs</option>
+            <option>BTC-USDT</option><option>ETH-USDT</option><option>SOL-USDT</option>
+            <option>XRP-USDT</option><option>BNB-USDT</option><option>DOGE-USDT</option>
+          </select>
+          <select id="filter-outcome" onchange="loadSignals()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font-size:0.8rem;">
+            <option value="">All Outcomes</option>
+            <option value="WIN">Win</option>
+            <option value="LOSS">Loss</option>
+            <option value="PENDING">Pending</option>
+          </select>
+        </div>
+      </div>
+      <div style="overflow-x:auto;">
+        <table class="signal-table">
+          <thead>
+            <tr>
+              <th>Time</th><th>Pair</th><th>Direction</th><th>Confidence</th>
+              <th>Tier</th><th>RSI</th><th>ADX</th><th>Entry</th><th>Close</th><th>Result</th>
+            </tr>
+          </thead>
+          <tbody id="signals-tbody"></tbody>
+        </table>
+      </div>
+      <div class="pagination" id="signals-pagination"></div>
     </div>
   </div>
-</div>
+
+  <!-- ── HISTORY PAGE ── -->
+  <div class="page" id="page-history">
+    <div class="page-header">
+      <h2>📜 Signal History</h2>
+      <p>Daily performance breakdown</p>
+    </div>
+
+    <div class="grid grid-2" style="margin-bottom:16px;">
+      <div class="card">
+        <div class="card-header"><span class="card-title">30-Day Win Rate Trend</span></div>
+        <div class="chart-wrap" style="height:180px;">
+          <canvas id="history-chart"></canvas>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">30-Day Totals</span></div>
+        <div style="display:flex;flex-direction:column;gap:12px;margin-top:8px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <span style="color:var(--text2);font-size:0.85rem;">Total Signals</span>
+            <span id="hist-total" class="stat-accent" style="font-weight:700;font-size:1.1rem;">—</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <span style="color:var(--text2);font-size:0.85rem;">Total Wins</span>
+            <span id="hist-wins" style="color:var(--win);font-weight:700;font-size:1.1rem;">—</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <span style="color:var(--text2);font-size:0.85rem;">Total Losses</span>
+            <span id="hist-losses" style="color:var(--loss);font-weight:700;font-size:1.1rem;">—</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <span style="color:var(--text2);font-size:0.85rem;">Avg Win Rate</span>
+            <span id="hist-wr" style="color:var(--accent);font-weight:700;font-size:1.1rem;">—</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span class="card-title">Daily Breakdown</span></div>
+      <div style="overflow-x:auto;">
+        <table class="signal-table">
+          <thead>
+            <tr><th>Date</th><th>Total</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Mode</th></tr>
+          </thead>
+          <tbody id="history-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── SHADOW PAGE ── -->
+  <div class="page" id="page-shadow">
+    <div class="page-header">
+      <h2>👻 Shadow Account</h2>
+      <p>Demo mode — mimics Limitless order structure without real funds</p>
+    </div>
+
+    <div class="shadow-panel" style="margin-bottom:16px;">
+      <div class="grid grid-3">
+        <div>
+          <div class="card-title" style="margin-bottom:8px;">Shadow Balance</div>
+          <div class="stat-value stat-purple" id="shadow-balance">$1,000.00</div>
+        </div>
+        <div>
+          <div class="card-title" style="margin-bottom:8px;">Total P&L</div>
+          <div class="stat-value" id="shadow-pnl">$0.00</div>
+        </div>
+        <div style="display:flex;align-items:flex-end;">
+          <button class="btn btn-danger" onclick="resetShadow()">Reset Account</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-header"><span class="card-title">Shadow Trade Simulation</span></div>
+      <p style="color:var(--text2);font-size:0.82rem;line-height:1.7;">
+        Shadow mode mirrors the exact Limitless order structure — same contract pricing, same position sizing,
+        same GTC limit orders — without executing on-chain. Every signal generates a paper trade and
+        outcome is tracked identically to live mode. Use this to validate the strategy before switching live.
+      </p>
+      <div style="margin-top:16px;display:flex;gap:10px;flex-wrap:wrap;">
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 16px;flex:1;min-width:150px;">
+          <div class="card-title" style="margin-bottom:4px;">Contract Price Cap</div>
+          <div style="font-size:1.1rem;font-weight:700;color:var(--accent);">≤ $0.50</div>
+        </div>
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 16px;flex:1;min-width:150px;">
+          <div class="card-title" style="margin-bottom:4px;">Order Type</div>
+          <div style="font-size:1.1rem;font-weight:700;color:var(--accent2);">GTC Limit</div>
+        </div>
+        <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 16px;flex:1;min-width:150px;">
+          <div class="card-title" style="margin-bottom:4px;">Outcome Window</div>
+          <div style="font-size:1.1rem;font-weight:700;color:var(--warn);">15 Minutes</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Shadow Signal Table -->
+    <div class="card">
+      <div class="card-header"><span class="card-title">Shadow Trade Log</span></div>
+      <div style="overflow-x:auto;">
+        <table class="signal-table">
+          <thead>
+            <tr><th>Time</th><th>Pair</th><th>Direction</th><th>Contracts</th><th>@ Price</th><th>Size</th><th>Result</th></tr>
+          </thead>
+          <tbody id="shadow-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── SETTINGS PAGE ── -->
+  <div class="page" id="page-settings">
+    <div class="page-header">
+      <h2>⚙️ Settings</h2>
+      <p>Configure bot behaviour, position sizing, and account mode</p>
+    </div>
+
+    <div class="settings-grid">
+      <!-- Mode & Core -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">Account Mode</span></div>
+
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-label">Live Trading</div>
+            <div class="toggle-sub">Executes real orders on Limitless Exchange</div>
+          </div>
+          <div class="toggle live-mode" id="toggle-live" onclick="toggleSetting('mode')"></div>
+        </div>
+
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-label">Martingale Sizing</div>
+            <div class="toggle-sub">Double position after each loss</div>
+          </div>
+          <div class="toggle" id="toggle-martingale" onclick="toggleSetting('martingale')"></div>
+        </div>
+
+        <div class="form-group" style="margin-top:20px;">
+          <label class="form-label">Martingale Multiplier</label>
+          <input type="number" id="input-multiplier" value="2.0" min="1.1" max="5" step="0.1"
+                 oninput="updateMultiplierDisplay(this.value)"/>
+          <div class="form-hint" id="multiplier-hint">×2.0 after each loss</div>
+        </div>
+      </div>
+
+      <!-- Position Sizing -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">Position Sizing</span></div>
+
+        <div class="form-group">
+          <label class="form-label">Position Size (USD)</label>
+          <input type="range" id="range-position" min="1" max="1000" step="0.5"
+                 value="10" oninput="updatePositionDisplay(this.value)"/>
+          <div style="display:flex;justify-content:space-between;margin-top:6px;">
+            <span style="font-size:0.75rem;color:var(--text2);">$1</span>
+            <span class="stat-accent" style="font-weight:700;font-size:1rem;" id="position-display">$10.00</span>
+            <span style="font-size:0.75rem;color:var(--text2);">$1,000</span>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Exact Position Size ($)</label>
+          <input type="number" id="input-position" value="10" min="1" max="1000" step="0.5"
+                 oninput="syncPositionFromInput(this.value)"/>
+          <div class="form-hint">Range: $1.00 – $1,000.00 (decimal supported)</div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Max Contract Price</label>
+          <input type="number" id="input-contract-price" value="0.50" min="0.01" max="0.50" step="0.01"/>
+          <div class="form-hint">Max $0.50 per contract (Limitless requirement)</div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Min ML Confidence</label>
+          <input type="range" id="range-confidence" min="0.55" max="0.75" step="0.01"
+                 value="0.58" oninput="updateConfidenceDisplay(this.value)"/>
+          <div style="display:flex;justify-content:space-between;margin-top:6px;">
+            <span style="font-size:0.75rem;color:var(--text2);">55%</span>
+            <span class="stat-accent" style="font-weight:700;" id="conf-display">58%</span>
+            <span style="font-size:0.75rem;color:var(--text2);">75%</span>
+          </div>
+          <div class="form-hint">Higher = fewer but more accurate signals</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:4px;">
+      <button class="btn btn-accent" onclick="saveSettings()">💾 Save Settings</button>
+      <button class="btn btn-ghost" onclick="loadSettings()">↺ Reset</button>
+    </div>
+
+    <!-- API Status -->
+    <div class="card" style="margin-top:20px;">
+      <div class="card-header"><span class="card-title">System Status</span></div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;">
+        <div style="text-align:center;padding:12px;background:var(--surface2);border-radius:8px;">
+          <div style="font-size:1.2rem;">📡</div>
+          <div style="font-size:0.8rem;color:var(--text2);margin-top:4px;">OKX Feed</div>
+          <div style="font-size:0.75rem;color:var(--win);font-weight:700;margin-top:2px;">LIVE</div>
+        </div>
+        <div style="text-align:center;padding:12px;background:var(--surface2);border-radius:8px;">
+          <div style="font-size:1.2rem;">🤖</div>
+          <div style="font-size:0.8rem;color:var(--text2);margin-top:4px;">ML Engine</div>
+          <div style="font-size:0.75rem;color:var(--win);font-weight:700;margin-top:2px;">READY</div>
+        </div>
+        <div style="text-align:center;padding:12px;background:var(--surface2);border-radius:8px;">
+          <div style="font-size:1.2rem;">✈️</div>
+          <div style="font-size:0.8rem;color:var(--text2);margin-top:4px;">Telegram</div>
+          <div id="tg-status" style="font-size:0.75rem;font-weight:700;margin-top:2px;color:var(--warn);">CHECKING</div>
+        </div>
+      </div>
+    </div>
+  </div>
 
 </main>
 </div>
 
-<div id="toasts"></div>
+<!-- Toast container -->
+<div id="toast-container"></div>
 
 <script>
-// ═══════════════════════════════════
-// STATE
-// ═══════════════════════════════════
+// ── State ──────────────────────────────────────────────────────────────────
 let state = {
-  settings: {mode:'shadow',position_size:10,use_martingale:false,martingale_multiplier:2,max_contract_price:0.50,min_confidence:0.58},
+  settings: { mode: 'shadow', position_size: 10, use_martingale: false,
+              martingale_multiplier: 2, max_contract_price: 0.50, min_confidence: 0.58 },
+  todayStats: {},
   signalsPage: 1,
   perfChart: null,
-  histChart: null,
+  historyChart: null,
+  lastSignalId: 0,  // track last seen signal for polling fallback
 };
 
-// ═══════════════════════════════════
-// WEBSOCKET
-// ═══════════════════════════════════
-const socket = io({transports:['websocket','polling'],reconnectionAttempts:10,reconnectionDelay:2000});
-socket.on('connect', () => { loadTodayStats(); loadTodaySignals(); });
-socket.on('new_signal', sig => {
-  loadTodaySignals(); loadTodayStats();
-  toast(`📡 ${sig.symbol} ${sig.signal_direction} ${(sig.ml_confidence*100).toFixed(1)}%`, 'signal');
-});
-socket.on('signal_resolved', sig => {
-  loadTodaySignals(); loadTodayStats(); loadShadowBalance();
-  const t = sig.outcome==='WIN' ? 'win' : 'loss';
-  toast(`${sig.outcome==='WIN'?'✅':'❌'} ${sig.symbol} ${sig.signal_direction} → ${sig.outcome}`, t);
-});
-socket.on('settings_updated', s => { state.settings=s; applySettingsUI(); });
+// ── Socket.IO with reconnect + HTTP fallback ───────────────────────────────
+const socket = io({ transports: ['websocket', 'polling'], reconnectionAttempts: 10, reconnectionDelay: 2000 });
 
-// ═══════════════════════════════════
-// CLOCK
-// ═══════════════════════════════════
+socket.on('connect', () => {
+  console.log('[WS] Connected');
+  // Reload on reconnect to catch any missed signals
+  loadTodaySignals();
+  loadTodayStats();
+});
+socket.on('disconnect', () => console.log('[WS] Disconnected — HTTP polling will keep dashboard live'));
+
+socket.on('new_signal', (sig) => {
+  showToast(`📡 ${sig.symbol} ${sig.signal_direction} @ ${(sig.ml_confidence||0).toFixed(1)}%`, 'signal');
+  loadTodaySignals();
+  loadTodayStats();
+});
+socket.on('signal_resolved', (sig) => {
+  const cls = sig.outcome === 'WIN' ? 'win' : 'loss';
+  showToast(`${sig.outcome === 'WIN' ? '✅' : '❌'} ${sig.symbol} ${sig.signal_direction} → ${sig.outcome}`, cls);
+  loadTodaySignals();
+  loadTodayStats();
+  loadShadowBalance();
+});
+socket.on('settings_updated', (s) => {
+  state.settings = s;
+  applySettingsToUI();
+});
+
+// ── Navigation ─────────────────────────────────────────────────────────────
+function showPage(name, el, mnavId) {
+  // Deactivate all pages
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  // Deactivate desktop nav
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  // Deactivate mobile nav
+  document.querySelectorAll('.mobile-nav-item').forEach(n => n.classList.remove('active'));
+
+  // Activate page
+  document.getElementById('page-' + name).classList.add('active');
+
+  // Activate desktop nav item if clicked from sidebar
+  if (el && el.classList.contains('nav-item')) el.classList.add('active');
+
+  // Activate correct mobile nav item
+  const mId = mnavId || ('mnav-' + name);
+  const mEl = document.getElementById(mId);
+  if (mEl) mEl.classList.add('active');
+
+  // Also sync desktop sidebar highlight
+  const deskEl = document.querySelector(`.nav-item[data-page="${name}"]`);
+  if (deskEl) deskEl.classList.add('active');
+
+  // Scroll to top on mobile
+  window.scrollTo(0, 0);
+
+  if (name === 'signals') loadSignals();
+  if (name === 'history') loadHistory();
+  if (name === 'shadow') { loadShadowBalance(); loadShadowSignals(); }
+  if (name === 'settings') loadSettings();
+}
+
+// ── Clock & Candle Timer ───────────────────────────────────────────────────
 function updateClock() {
   const now = new Date();
-  const utc = new Date(now.getTime() + now.getTimezoneOffset()*60000);
-  const hh  = String(utc.getHours()).padStart(2,'0');
-  const mm  = String(utc.getMinutes()).padStart(2,'0');
-  const ss  = String(utc.getSeconds()).padStart(2,'0');
-  const ts  = `${hh}:${mm}:${ss}`;
-  const ts2 = `${hh}:${mm}`;
-  document.getElementById('d-clock').textContent = ts;
-  document.getElementById('m-clock').textContent = ts2+' UTC';
+  const utc = new Date(now.getTime() + now.getTimezoneOffset() * 60000);
+  const hh = String(utc.getHours()).padStart(2, '0');
+  const mm = String(utc.getMinutes()).padStart(2, '0');
+  const ss = String(utc.getSeconds()).padStart(2, '0');
+  document.getElementById('clock').textContent = `${hh}:${mm}:${ss}`;
+  const mClk = document.getElementById('m-clock');
+  if (mClk) mClk.textContent = `${hh}:${mm} UTC`;
 
-  // Next 15-min boundary countdown
-  const mins = utc.getMinutes(), secs = utc.getSeconds();
-  const nextBound  = (Math.floor(mins/15)+1)*15;
-  const mLeft      = (nextBound - mins - 1 + (secs===0?1:0)) % 60;
-  const sLeft      = secs===0 ? 0 : 60-secs;
-  const cdStr      = `${String(mLeft).padStart(2,'0')}:${String(sLeft).padStart(2,'0')}`;
-  document.getElementById('candle-cd').textContent = cdStr;
-  document.getElementById('d-next').textContent    = cdStr;
-
-  // Next candle open time
-  const nextH = Math.floor(nextBound/60);
-  const nextM = nextBound % 60;
-  const nextLabel = `${String((utc.getHours()+nextH)%24).padStart(2,'0')}:${String(nextM).padStart(2,'0')} UTC`;
-  document.getElementById('next-candle-label').textContent = nextLabel;
+  // Next 15-min boundary
+  const mins = utc.getMinutes();
+  const secs = utc.getSeconds();
+  const nextBoundary = (Math.floor(mins / 15) + 1) * 15;
+  const minsLeft = (nextBoundary - mins - 1 + (secs === 0 ? 1 : 0));
+  const secsLeft = secs === 0 ? 0 : 60 - secs;
+  document.getElementById('next-candle').textContent =
+    `${String(minsLeft % 60).padStart(2,'0')}:${String(secsLeft).padStart(2,'0')}`;
 }
 setInterval(updateClock, 1000);
 updateClock();
 
-// ═══════════════════════════════════
-// NAVIGATION
-// ═══════════════════════════════════
-function showPage(name, el) {
-  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  document.querySelectorAll('.bnav-item').forEach(b => b.classList.remove('active'));
-  document.getElementById('page-'+name).classList.add('active');
-  const dNav = document.querySelector(`.nav-item[data-page="${name}"]`);
-  if (dNav) dNav.classList.add('active');
-  const mNav = document.getElementById('bn-'+name);
-  if (mNav) mNav.classList.add('active');
-  window.scrollTo(0,0);
-  if (name==='signals')  loadSignals();
-  if (name==='history')  loadHistory();
-  if (name==='shadow')   { loadShadowBalance(); loadShadowSignals(); }
-  if (name==='settings') loadSettings();
-  if (name==='dashboard') loadPairStats();
-}
-
-// ═══════════════════════════════════
-// STATS
-// ═══════════════════════════════════
+// ── Stats ──────────────────────────────────────────────────────────────────
 async function loadTodayStats() {
   try {
     const r = await fetch('/api/stats/today');
-    if (!r.ok) return;
+    if (!r.ok) { console.error('[Dashboard] stats/today error:', r.status); return; }
     const d = await r.json();
-    document.getElementById('s-total').textContent   = d.total_signals;
-    document.getElementById('s-pending').textContent = d.pending;
-    document.getElementById('s-wins').textContent    = d.wins;
-    document.getElementById('s-losses').textContent  = d.losses;
-    document.getElementById('s-wr').textContent      = d.total_signals>0 ? d.win_rate.toFixed(1)+'%' : '—';
+    state.todayStats = d;
+
+    document.getElementById('stat-total').textContent = d.total_signals;
+    document.getElementById('stat-pending').textContent = d.pending;
+    document.getElementById('stat-wins').textContent = d.wins;
+    document.getElementById('stat-losses').textContent = d.losses;
+    document.getElementById('stat-winrate').textContent = d.win_rate.toFixed(1) + '%';
 
     // Win rate ring
-    const wr  = d.win_rate || 0;
-    const off = 213.6 - (wr/100)*213.6;
-    const ring = document.getElementById('wr-ring');
-    ring.style.strokeDashoffset = off;
-    ring.style.stroke = wr>=60?'var(--win)':wr>=50?'var(--warn)':'var(--loss)';
-    document.getElementById('wr-txt').textContent = wr.toFixed(0)+'%';
-    document.getElementById('wr-w').textContent   = d.wins;
-    document.getElementById('wr-l').textContent   = d.losses;
-    document.getElementById('wr-tot').textContent = d.total_signals;
+    const wr = d.win_rate;
+    const circumference = 213.6;
+    const offset = circumference - (wr / 100) * circumference;
+    const ring = document.getElementById('win-ring');
+    ring.style.strokeDashoffset = offset;
+    ring.style.stroke = wr >= 60 ? 'var(--win)' : wr >= 50 ? 'var(--warn)' : 'var(--loss)';
+    document.getElementById('ring-text').textContent = wr.toFixed(0) + '%';
+    document.getElementById('wr-wins').textContent = d.wins;
+    document.getElementById('wr-losses').textContent = d.losses;
+    document.getElementById('wr-total').textContent = d.total_signals;
 
-    // Mode badges
+    // Mode badge
+    const badge = document.getElementById('mode-badge');
     const mode = d.mode || 'shadow';
-    state.settings.mode = mode;
-    syncModeBadges(mode);
-  } catch(e) { console.error(e); }
+    badge.className = `mode-badge ${mode}`;
+    badge.textContent = mode === 'live' ? '🔴 LIVE MODE' : '👻 SHADOW MODE';
+
+    const overallMode = document.getElementById('overall-mode');
+    overallMode.textContent = mode.toUpperCase();
+    overallMode.className = `sig-outcome ${mode === 'live' ? 'loss' : 'pending'}`;
+  } catch (e) { console.error(e); }
 }
 
-function syncModeBadges(mode) {
-  const pill = document.getElementById('m-mode-pill');
-  const dMode = document.getElementById('d-mode');
-  const badge = document.getElementById('d-mode-badge');
-  const stMode = document.getElementById('status-mode-txt');
-  if (pill)  { pill.className=`mode-pill ${mode}`; pill.textContent=mode==='live'?'🔴 LIVE':'👻 SHADOW'; }
-  if (dMode) { dMode.className=`sidebar-mode ${mode}`; dMode.textContent=mode==='live'?'🔴 LIVE MODE':'👻 SHADOW MODE'; }
-  if (badge) { badge.className=`outcome-badge ${mode==='live'?'ob-loss':'ob-pending'}`; badge.textContent=mode.toUpperCase(); }
-  if (stMode){ stMode.textContent=mode.toUpperCase(); stMode.style.color=mode==='live'?'var(--loss)':'var(--win)'; }
-}
-
-// ═══════════════════════════════════
-// PRICES
-// ═══════════════════════════════════
+// ── Prices ─────────────────────────────────────────────────────────────────
 async function loadPrices() {
   try {
     const r = await fetch('/api/prices');
-    if (!r.ok) return;
-    const d = await r.json();
-    for (const [sym, p] of Object.entries(d)) {
-      const pEl = document.getElementById(`p-${sym}`);
-      const cEl = document.getElementById(`c-${sym}`);
-      if (pEl) pEl.textContent = p.price < 10 ? `$${p.price.toFixed(4)}` : `$${p.price.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
-      if (cEl) { cEl.textContent=`${p.change_pct>=0?'+':''}${p.change_pct.toFixed(2)}%`; cEl.className=`pc-chg ${p.change_pct>=0?'pos':'neg'}`; }
+    const prices = await r.json();
+    for (const [sym, data] of Object.entries(prices)) {
+      const el = document.getElementById(`p-${sym}`);
+      const chg = document.getElementById(`c-${sym}`);
+      if (el) el.textContent = data.price < 10 ? `$${data.price.toFixed(4)}` : `$${data.price.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}`;
+      if (chg) {
+        chg.textContent = `${data.change_pct > 0 ? '+' : ''}${data.change_pct.toFixed(2)}%`;
+        chg.className = `chg ${data.change_pct >= 0 ? 'pos' : 'neg'}`;
+      }
     }
-  } catch(e) {}
+  } catch (e) {}
 }
 
-// ═══════════════════════════════════
-// TODAY'S SIGNAL FEED
-// ═══════════════════════════════════
+// ── Today's Signal Feed ────────────────────────────────────────────────────
 async function loadTodaySignals() {
   const feed = document.getElementById('signal-feed');
   try {
     const r = await fetch('/api/signals/today');
-    if (!r.ok) return;
-    const sigs = await r.json();
-    console.log('[Dashboard] signals/today:', sigs.length, 'signals');
-    if (!sigs.length) {
-      feed.innerHTML = '<div style="color:var(--text2);text-align:center;padding:28px;font-size:0.82rem">Waiting for next candle signal...</div>';
+    if (!r.ok) {
+      console.error('[Dashboard] /api/signals/today HTTP error:', r.status, r.statusText);
+      feed.innerHTML = `<div style="color:var(--down);text-align:center;padding:20px;font-size:0.8rem;">API error ${r.status} — check /api/debug</div>`;
       return;
     }
+    const sigs = await r.json();
+    console.log('[Dashboard] signals/today returned', sigs.length, 'signals:', sigs);
+
+    if (!sigs.length) {
+      feed.innerHTML = '<div style="color:var(--text2);text-align:center;padding:32px;font-size:0.85rem;">Waiting for next candle signal...</div>';
+      return;
+    }
+
     feed.innerHTML = sigs.map(s => {
-      const dir  = s.signal_direction;
-      const out  = (s.outcome||'PENDING').toLowerCase();
-      const conf = s.ml_confidence!=null ? (Number(s.ml_confidence)*100).toFixed(1) : '—';
+      const dir = s.signal_direction;
+      const out = (s.outcome || 'pending').toLowerCase();
       const tier = s.tier || 'T2';
-      const ts   = s => s ? new Date((s.endsWith('Z')?s:s+'Z')).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',timeZone:'UTC'}) : '—';
-      const openT  = ts(s.candle_open_time);
-      const closeT = ts(s.candle_close_time);
-      const price  = s.open_price!=null ? `$${Number(s.open_price).toFixed(4)}` : '—';
-      const outBadge = out==='win' ? '<span class="outcome-badge ob-win">WIN</span>'
-                     : out==='loss'? '<span class="outcome-badge ob-loss">LOSS</span>'
-                     : '<span class="outcome-badge ob-pending">PENDING</span>';
-      return `<div class="sig-card ${out}">
-        <div class="sig-arrow ${dir.toLowerCase()}">${dir==='UP'?'▲':'▼'}</div>
-        <div class="sig-info">
-          <div class="sig-sym">${s.symbol}<span class="tier-badge ${tier==='T1'?'tier-t1':'tier-t2'}">${tier}</span></div>
-          <div class="sig-meta">${openT} → ${closeT} UTC · Entry ${price}</div>
-        </div>
-        <div class="sig-right">
-          <div class="sig-conf">${conf}%</div>
-          <div class="sig-conf-lbl">confidence</div>
-        </div>
-        ${outBadge}
-      </div>`;
+      // Handle both with and without trailing Z
+      const openTs  = s.candle_open_time  ? (s.candle_open_time.endsWith('Z')  ? s.candle_open_time  : s.candle_open_time  + 'Z') : null;
+      const closeTs = s.candle_close_time ? (s.candle_close_time.endsWith('Z') ? s.candle_close_time : s.candle_close_time + 'Z') : null;
+      const time      = openTs  ? new Date(openTs ).toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', timeZone:'UTC'}) : '—';
+      const closeTime = closeTs ? new Date(closeTs).toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', timeZone:'UTC'}) : '—';
+      const conf = s.ml_confidence != null ? Number(s.ml_confidence).toFixed(1) : '—';
+      const price = s.open_price != null ? Number(s.open_price).toFixed(4) : '—';
+      return `
+        <div class="signal-card ${out}">
+          <div class="sig-direction ${(dir||'').toLowerCase()}">${dir === 'UP' ? '▲' : '▼'}</div>
+          <div class="sig-info">
+            <div class="sig-symbol">${s.symbol || '?'} <span class="tier-badge tier-${tier.toLowerCase()}">${tier}</span></div>
+            <div class="sig-meta">${time} → ${closeTime} UTC · Entry $${price}</div>
+          </div>
+          <div class="sig-conf">
+            <div class="conf-val stat-accent">${conf}%</div>
+            <div style="font-size:0.7rem;color:var(--text2);">confidence</div>
+          </div>
+          <span class="sig-outcome ${out}">${s.outcome || 'PENDING'}</span>
+        </div>`;
     }).join('');
-  } catch(e) { console.error(e); feed.innerHTML=`<div style="color:var(--down);text-align:center;padding:20px">Error: ${e.message}</div>`; }
+  } catch (e) {
+    console.error('[Dashboard] loadTodaySignals error:', e);
+    feed.innerHTML = `<div style="color:var(--down);text-align:center;padding:20px;font-size:0.8rem;">Load error: ${e.message}</div>`;
+  }
 }
 
-// ═══════════════════════════════════
-// PAIR STATS
-// ═══════════════════════════════════
+// ── Signals Table ──────────────────────────────────────────────────────────
+async function loadSignals() {
+  const symbol = document.getElementById('filter-symbol').value;
+  const outcome = document.getElementById('filter-outcome').value;
+  const params = new URLSearchParams({ page: state.signalsPage, per_page: 25 });
+  if (symbol) params.append('symbol', symbol);
+  if (outcome) params.append('outcome', outcome);
+
+  try {
+    const r = await fetch('/api/signals?' + params);
+    const d = await r.json();
+    const tbody = document.getElementById('signals-tbody');
+
+    tbody.innerHTML = d.signals.map(s => {
+      const dir = s.signal_direction;
+      const out = s.outcome.toLowerCase();
+      const time = new Date(s.candle_open_time + 'Z').toLocaleString('en-US', {
+        month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', timeZone:'UTC'
+      });
+      return `<tr>
+        <td style="color:var(--text2);font-size:0.75rem;">${time}</td>
+        <td style="font-weight:700;">${s.symbol}</td>
+        <td class="${dir.toLowerCase()}">${dir === 'UP' ? '▲ UP' : '▼ DOWN'}</td>
+        <td style="color:var(--accent);">${s.ml_confidence?.toFixed(1)}%</td>
+        <td><span class="tier-badge tier-${(s.tier||'T2').toLowerCase()}">${s.tier || 'T2'}</span></td>
+        <td>${s.rsi_14?.toFixed(1) || '—'}</td>
+        <td>${s.adx?.toFixed(1) || '—'}</td>
+        <td>$${s.open_price?.toFixed(4) || '—'}</td>
+        <td>${s.close_price ? '$' + s.close_price.toFixed(4) : '—'}</td>
+        <td><span class="sig-outcome ${out}">${s.outcome}</span></td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="10" style="text-align:center;color:var(--text2);padding:24px;">No signals yet</td></tr>';
+
+    // Pagination
+    const pages = document.getElementById('signals-pagination');
+    pages.innerHTML = Array.from({length: Math.min(d.pages, 10)}, (_, i) =>
+      `<button class="page-btn ${i+1 === state.signalsPage ? 'active' : ''}" onclick="setPage(${i+1})">${i+1}</button>`
+    ).join('');
+  } catch (e) { console.error(e); }
+}
+
+function setPage(p) { state.signalsPage = p; loadSignals(); }
+
+// ── History ────────────────────────────────────────────────────────────────
+async function loadHistory() {
+  try {
+    const r = await fetch('/api/stats/history?days=30');
+    const data = await r.json();
+
+    const tbody = document.getElementById('history-tbody');
+    tbody.innerHTML = data.map(d => {
+      const wr = d.win_rate;
+      const wrColor = wr >= 60 ? 'var(--win)' : wr >= 50 ? 'var(--warn)' : 'var(--loss)';
+      return `<tr>
+        <td style="font-weight:600;">${d.date}</td>
+        <td>${d.total_signals}</td>
+        <td style="color:var(--win);">${d.wins}</td>
+        <td style="color:var(--loss);">${d.losses}</td>
+        <td style="color:${wrColor};font-weight:700;">${wr.toFixed(1)}%</td>
+        <td><span class="sig-outcome ${d.mode === 'live' ? 'loss' : 'pending'}" style="padding:2px 8px;">${d.mode}</span></td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--text2);padding:24px;">No history yet</td></tr>';
+
+    // Totals
+    const totals = data.reduce((acc, d) => ({
+      total: acc.total + d.total_signals,
+      wins: acc.wins + d.wins,
+      losses: acc.losses + d.losses,
+    }), { total: 0, wins: 0, losses: 0 });
+
+    document.getElementById('hist-total').textContent = totals.total;
+    document.getElementById('hist-wins').textContent = totals.wins;
+    document.getElementById('hist-losses').textContent = totals.losses;
+    const avgWr = totals.total > 0 ? (totals.wins / totals.total * 100) : 0;
+    document.getElementById('hist-wr').textContent = avgWr.toFixed(1) + '%';
+
+    // History chart
+    const labels = data.map(d => d.date.slice(5)).reverse();
+    const wrs = data.map(d => d.win_rate).reverse();
+    if (state.historyChart) state.historyChart.destroy();
+    state.historyChart = new Chart(document.getElementById('history-chart'), {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Win Rate %',
+          data: wrs,
+          borderColor: '#00e5a0',
+          backgroundColor: 'rgba(0,229,160,0.1)',
+          fill: true,
+          tension: 0.4,
+          pointRadius: 3,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#8892a4', font: { size: 10 } } },
+          y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#8892a4', font: { size: 10 } },
+               min: 0, max: 100 },
+        }
+      }
+    });
+  } catch (e) { console.error(e); }
+}
+
+// ── Performance Chart (7-day) ──────────────────────────────────────────────
+async function loadPerfChart() {
+  try {
+    const r = await fetch('/api/stats/history?days=7');
+    const data = await r.json();
+    const labels = data.map(d => d.date.slice(5)).reverse();
+    const wins = data.map(d => d.wins).reverse();
+    const losses = data.map(d => d.losses).reverse();
+    if (state.perfChart) state.perfChart.destroy();
+    state.perfChart = new Chart(document.getElementById('perf-chart'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Wins', data: wins, backgroundColor: 'rgba(0,229,160,0.7)', borderRadius: 4 },
+          { label: 'Losses', data: losses, backgroundColor: 'rgba(255,77,109,0.7)', borderRadius: 4 },
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#8892a4', font: { size: 10 } } } },
+        scales: {
+          x: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#8892a4', font: { size: 10 } } },
+          y: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#8892a4', font: { size: 10 } } },
+        }
+      }
+    });
+  } catch (e) {}
+}
+
+// ── Shadow ─────────────────────────────────────────────────────────────────
+async function loadShadowBalance() {
+  try {
+    const r = await fetch('/api/shadow/balance');
+    const d = await r.json();
+    document.getElementById('shadow-balance').textContent = `$${d.balance.toFixed(2)}`;
+    const pnl = d.total_profit_loss;
+    const el = document.getElementById('shadow-pnl');
+    el.textContent = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
+    el.className = `stat-value ${pnl >= 0 ? 'stat-up' : 'stat-down'}`;
+  } catch (e) {}
+}
+
+async function loadShadowSignals() {
+  try {
+    const r = await fetch('/api/signals?mode=shadow&per_page=25');
+    const d = await r.json();
+    const tbody = document.getElementById('shadow-tbody');
+    tbody.innerHTML = d.signals.map(s => {
+      const out = s.outcome.toLowerCase();
+      const time = new Date(s.candle_open_time + 'Z').toLocaleString('en-US', {
+        month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', timeZone:'UTC'
+      });
+      return `<tr>
+        <td style="color:var(--text2);font-size:0.75rem;">${time}</td>
+        <td style="font-weight:700;">${s.symbol}</td>
+        <td class="${s.signal_direction.toLowerCase()}">${s.signal_direction === 'UP' ? '▲ UP' : '▼ DOWN'}</td>
+        <td>${s.contracts_bought?.toFixed(2) || '—'}</td>
+        <td>$${s.contract_price?.toFixed(2) || '—'}</td>
+        <td>$${s.position_size?.toFixed(2) || '—'}</td>
+        <td><span class="sig-outcome ${out}">${s.outcome}</span></td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="7" style="text-align:center;color:var(--text2);padding:24px;">No shadow trades yet</td></tr>';
+  } catch (e) {}
+}
+
+async function resetShadow() {
+  if (!confirm('Reset shadow account to $1,000?')) return;
+  await fetch('/api/shadow/reset', { method: 'POST' });
+  loadShadowBalance();
+  showToast('Shadow account reset to $1,000', 'signal');
+}
+
+// ── Settings ───────────────────────────────────────────────────────────────
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/settings');
+    state.settings = await r.json();
+    applySettingsToUI();
+  } catch (e) {}
+}
+
+function applySettingsToUI() {
+  const s = state.settings;
+  const liveToggle = document.getElementById('toggle-live');
+  const martToggle = document.getElementById('toggle-martingale');
+
+  if (s.mode === 'live') liveToggle.classList.add('on');
+  else liveToggle.classList.remove('on');
+
+  if (s.use_martingale) martToggle.classList.add('on');
+  else martToggle.classList.remove('on');
+
+  const ps = s.position_size || 10;
+  document.getElementById('range-position').value = ps;
+  document.getElementById('input-position').value = ps;
+  document.getElementById('position-display').textContent = `$${parseFloat(ps).toFixed(2)}`;
+
+  document.getElementById('input-multiplier').value = s.martingale_multiplier || 2;
+  document.getElementById('multiplier-hint').textContent = `×${s.martingale_multiplier || 2} after each loss`;
+
+  document.getElementById('input-contract-price').value = s.max_contract_price || 0.50;
+
+  const conf = s.min_confidence || 0.58;
+  document.getElementById('range-confidence').value = conf;
+  document.getElementById('conf-display').textContent = Math.round(conf * 100) + '%';
+
+  // Mode badge
+  const badge = document.getElementById('mode-badge');
+  badge.className = `mode-badge ${s.mode}`;
+  badge.textContent = s.mode === 'live' ? '🔴 LIVE MODE' : '👻 SHADOW MODE';
+
+  // Sync mobile header badge
+  const mBadge = document.getElementById('m-mode-badge');
+  if (mBadge) {
+    mBadge.className = `m-mode ${s.mode}`;
+    mBadge.textContent = s.mode === 'live' ? '🔴 LIVE' : '👻 SHADOW';
+  }
+}
+
+function toggleSetting(type) {
+  if (type === 'mode') {
+    state.settings.mode = state.settings.mode === 'live' ? 'shadow' : 'live';
+  } else if (type === 'martingale') {
+    state.settings.use_martingale = !state.settings.use_martingale;
+  }
+  applySettingsToUI();
+}
+
+function toggleModeQuick() {
+  state.settings.mode = state.settings.mode === 'live' ? 'shadow' : 'live';
+  applySettingsToUI();
+  saveSettings();
+}
+
+function updatePositionDisplay(v) {
+  document.getElementById('position-display').textContent = `$${parseFloat(v).toFixed(2)}`;
+  document.getElementById('input-position').value = v;
+  state.settings.position_size = parseFloat(v);
+}
+
+function syncPositionFromInput(v) {
+  const clamped = Math.max(1, Math.min(1000, parseFloat(v) || 10));
+  document.getElementById('range-position').value = clamped;
+  document.getElementById('position-display').textContent = `$${clamped.toFixed(2)}`;
+  state.settings.position_size = clamped;
+}
+
+function updateMultiplierDisplay(v) {
+  document.getElementById('multiplier-hint').textContent = `×${v} after each loss`;
+}
+
+function updateConfidenceDisplay(v) {
+  document.getElementById('conf-display').textContent = Math.round(v * 100) + '%';
+}
+
+async function saveSettings() {
+  const payload = {
+    mode: state.settings.mode,
+    position_size: parseFloat(document.getElementById('input-position').value),
+    use_martingale: state.settings.use_martingale,
+    martingale_multiplier: parseFloat(document.getElementById('input-multiplier').value),
+    max_contract_price: parseFloat(document.getElementById('input-contract-price').value),
+    min_confidence: parseFloat(document.getElementById('range-confidence').value),
+  };
+  try {
+    const r = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const d = await r.json();
+    if (d.success) {
+      state.settings = d.settings;
+      applySettingsToUI();
+      showToast('✅ Settings saved', 'signal');
+    }
+  } catch (e) { showToast('❌ Save failed', 'loss'); }
+}
+
+// ── Toast Notifications ────────────────────────────────────────────────────
+function showToast(msg, type = 'signal') {
+  const container = document.getElementById('toast-container');
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.innerHTML = `<span>${msg}</span>`;
+  container.appendChild(toast);
+  setTimeout(() => toast.remove(), 5000);
+}
+
+// ── Per-Pair Stats ────────────────────────────────────────────────────────
 async function loadPairStats() {
   try {
     const r = await fetch('/api/stats/pairs');
     if (!r.ok) return;
-    const d = await r.json();
+    const data = await r.json();
+
+    const TIER = {
+      'BTC-USDT': 'A', 'ETH-USDT': 'A',
+      'BNB-USDT': 'B', 'SOL-USDT': 'B',
+      'XRP-USDT': 'C', 'DOGE-USDT': 'C',
+    };
+    const TIER_COLOR = { 'A': 'var(--win)', 'B': 'var(--warn)', 'C': 'var(--text2)' };
+
     const tbody = document.getElementById('pair-tbody');
     if (!tbody) return;
-    const TIER_C = {A:'var(--win)',B:'var(--warn)',C:'var(--text2)'};
-    tbody.innerHTML = Object.entries(d).map(([sym,s]) => {
-      const wr = s.win_rate;
-      const wrC = wr===null?'var(--accent)':wr>=60?'var(--win)':wr>=50?'var(--warn)':'var(--loss)';
-      const status = wr===null?'—':wr>=60?'✅ Strong':wr>=55?'⚡ Good':wr>=50?'⚠️ Weak':'❌ Poor';
-      return `<tr>
-        <td style="font-weight:700">${sym}</td>
-        <td style="color:${TIER_C[s.tier]||'var(--text2)'};font-weight:700">Tier ${s.tier}</td>
-        <td style="color:var(--accent2)">${(s.threshold*100).toFixed(0)}%</td>
-        <td style="color:var(--win)">${s.wins}</td>
-        <td style="color:var(--loss)">${s.losses}</td>
-        <td style="color:${wrC};font-weight:700">${wr!==null?wr.toFixed(1)+'%':'No data'}</td>
-        <td style="font-size:0.75rem">${status}</td>
-      </tr>`;
-    }).join('');
-  } catch(e) {}
-}
 
-// ═══════════════════════════════════
-// 7-DAY PERF CHART
-// ═══════════════════════════════════
-async function loadPerfChart() {
-  try {
-    const r = await fetch('/api/stats/history?days=7');
-    if (!r.ok) return;
-    const data = await r.json();
-    const labels = data.map(d=>d.date.slice(5)).reverse();
-    const wins   = data.map(d=>d.wins).reverse();
-    const losses = data.map(d=>d.losses).reverse();
-    if (state.perfChart) state.perfChart.destroy();
-    const ctx = document.getElementById('perf-chart');
-    if (!ctx) return;
-    state.perfChart = new Chart(ctx, {
-      type:'bar',
-      data:{labels,datasets:[
-        {label:'Wins',data:wins,backgroundColor:'rgba(0,229,160,0.7)',borderRadius:4},
-        {label:'Losses',data:losses,backgroundColor:'rgba(255,77,109,0.7)',borderRadius:4},
-      ]},
-      options:{responsive:true,maintainAspectRatio:false,
-        plugins:{legend:{labels:{color:'#8892a4',font:{size:10}}}},
-        scales:{x:{grid:{color:'rgba(255,255,255,0.03)'},ticks:{color:'#8892a4',font:{size:10}}},
-                y:{grid:{color:'rgba(255,255,255,0.03)'},ticks:{color:'#8892a4',font:{size:10}}}}}
+    const rows = Object.entries(data).map(([sym, d]) => {
+      const tier = TIER[sym] || '?';
+      const wr   = d.win_rate;
+      const wrColor = wr === null ? 'var(--text2)' : wr >= 60 ? 'var(--win)' : wr >= 50 ? 'var(--warn)' : 'var(--loss)';
+      const status = wr === null ? '—' : wr >= 60 ? '✅ Strong' : wr >= 55 ? '⚡ Good' : wr >= 50 ? '⚠️ Weak' : '❌ Poor';
+      return `<tr>
+        <td style="font-weight:700;">${sym}</td>
+        <td style="color:${TIER_COLOR[tier]};font-weight:700;">Tier ${tier}</td>
+        <td style="color:var(--accent2);">${(d.threshold*100).toFixed(0)}%</td>
+        <td style="color:var(--win);">${d.wins}</td>
+        <td style="color:var(--loss);">${d.losses}</td>
+        <td style="color:${wrColor};font-weight:700;">${wr !== null ? wr.toFixed(1)+'%' : 'No data'}</td>
+        <td style="font-size:0.8rem;">${status}</td>
+      </tr>`;
     });
-  } catch(e) {}
+    tbody.innerHTML = rows.join('');
+  } catch(e) { console.error('[Dashboard] loadPairStats error:', e); }
 }
 
-// ═══════════════════════════════════
-// SIGNALS PAGE
-// ═══════════════════════════════════
-async function loadSignals() {
-  const sym = document.getElementById('f-sym').value;
-  const out = document.getElementById('f-out').value;
-  const p   = new URLSearchParams({page:state.signalsPage,per_page:25});
-  if (sym) p.append('symbol',sym);
-  if (out) p.append('outcome',out);
-  try {
-    const r = await fetch('/api/signals?'+p);
-    if (!r.ok) return;
-    const d = await r.json();
-    const ts = s => s ? new Date((s.endsWith('Z')?s:s+'Z')).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'UTC'}) : '—';
-    document.getElementById('signals-tbody').innerHTML = d.signals.map(s => {
-      const dir  = s.signal_direction;
-      const out  = (s.outcome||'PENDING').toLowerCase();
-      const conf = s.ml_confidence!=null ? (Number(s.ml_confidence)*100).toFixed(1) : '—';
-      return `<tr>
-        <td style="font-size:0.7rem;color:var(--text2)">${ts(s.candle_open_time)}</td>
-        <td style="font-size:0.7rem;color:var(--text2)">${ts(s.candle_close_time)}</td>
-        <td style="font-weight:700">${s.symbol}</td>
-        <td class="${dir.toLowerCase()}">${dir==='UP'?'▲ UP':'▼ DOWN'}</td>
-        <td style="color:var(--accent2)">${conf}%</td>
-        <td><span class="tier-badge ${(s.tier||'T2')==='T1'?'tier-t1':'tier-t2'}">${s.tier||'T2'}</span></td>
-        <td>$${s.open_price!=null?Number(s.open_price).toFixed(4):'—'}</td>
-        <td>${s.close_price!=null?'$'+Number(s.close_price).toFixed(4):'—'}</td>
-        <td><span class="outcome-badge ${out==='win'?'ob-win':out==='loss'?'ob-loss':'ob-pending'}">${s.outcome||'PENDING'}</span></td>
-      </tr>`;
-    }).join('') || '<tr><td colspan="9" style="text-align:center;color:var(--text2);padding:20px">No signals yet</td></tr>';
-    const pages = document.getElementById('signals-pages');
-    pages.innerHTML = Array.from({length:Math.min(d.pages,8)},(_,i)=>
-      `<button class="pg-btn ${i+1===state.signalsPage?'active':''}" onclick="setSigPage(${i+1})">${i+1}</button>`
-    ).join('');
-  } catch(e) { console.error(e); }
-}
-function setSigPage(p) { state.signalsPage=p; loadSignals(); }
-
-// ═══════════════════════════════════
-// HISTORY PAGE
-// ═══════════════════════════════════
-async function loadHistory() {
-  try {
-    const r = await fetch('/api/stats/history?days=30');
-    if (!r.ok) return;
-    const data = await r.json();
-    const totals = data.reduce((a,d)=>({total:a.total+d.total_signals,wins:a.wins+d.wins,losses:a.losses+d.losses}),{total:0,wins:0,losses:0});
-    document.getElementById('h-total').textContent  = totals.total;
-    document.getElementById('h-wins').textContent   = totals.wins;
-    document.getElementById('h-losses').textContent = totals.losses;
-    const avgWr = totals.total>0 ? (totals.wins/totals.total*100) : 0;
-    document.getElementById('h-wr').textContent = avgWr.toFixed(1)+'%';
-    document.getElementById('hist-tbody').innerHTML = data.map(d => {
-      const wr = d.win_rate;
-      const c  = wr>=60?'var(--win)':wr>=50?'var(--warn)':'var(--loss)';
-      return `<tr>
-        <td style="font-weight:600">${d.date}</td>
-        <td>${d.total_signals}</td>
-        <td style="color:var(--win)">${d.wins}</td>
-        <td style="color:var(--loss)">${d.losses}</td>
-        <td style="color:${c};font-weight:700">${wr.toFixed(1)}%</td>
-        <td><span class="outcome-badge ${d.mode==='live'?'ob-loss':'ob-pending'}" style="padding:2px 8px">${d.mode}</span></td>
-      </tr>`;
-    }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--text2);padding:20px">No history yet</td></tr>';
-    // Chart
-    const labels = data.map(d=>d.date.slice(5)).reverse();
-    const wrs    = data.map(d=>d.win_rate).reverse();
-    if (state.histChart) state.histChart.destroy();
-    const ctx = document.getElementById('hist-chart');
-    if (!ctx) return;
-    state.histChart = new Chart(ctx, {
-      type:'line',
-      data:{labels,datasets:[{label:'Win Rate %',data:wrs,borderColor:'#00e5a0',backgroundColor:'rgba(0,229,160,0.08)',fill:true,tension:0.4,pointRadius:3}]},
-      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
-        scales:{x:{grid:{color:'rgba(255,255,255,0.03)'},ticks:{color:'#8892a4',font:{size:10}}},
-                y:{min:0,max:100,grid:{color:'rgba(255,255,255,0.03)'},ticks:{color:'#8892a4',font:{size:10}}}}}
-    });
-  } catch(e) {}
-}
-
-// ═══════════════════════════════════
-// SHADOW
-// ═══════════════════════════════════
-async function loadShadowBalance() {
-  try {
-    const r = await fetch('/api/shadow/balance');
-    if (!r.ok) return;
-    const d = await r.json();
-    document.getElementById('sh-bal').textContent = `$${(d.balance||0).toFixed(2)}`;
-    const pnl = d.total_profit_loss||0;
-    const el  = document.getElementById('sh-pnl');
-    el.textContent  = `${pnl>=0?'+':''}$${pnl.toFixed(2)}`;
-    el.style.color  = pnl>=0?'var(--win)':'var(--loss)';
-  } catch(e) {}
-}
-async function loadShadowSignals() {
-  try {
-    const r = await fetch('/api/signals?mode=shadow&per_page=25');
-    if (!r.ok) return;
-    const d = await r.json();
-    document.getElementById('sh-tbody').innerHTML = d.signals.map(s => {
-      const out = (s.outcome||'PENDING').toLowerCase();
-      const t   = s.created_at ? new Date((s.created_at.endsWith('Z')?s.created_at:s.created_at+'Z')).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'UTC'}) : '—';
-      return `<tr>
-        <td style="font-size:0.7rem;color:var(--text2)">${t}</td>
-        <td style="font-weight:700">${s.symbol}</td>
-        <td class="${(s.signal_direction||'').toLowerCase()}">${s.signal_direction==='UP'?'▲ UP':'▼ DOWN'}</td>
-        <td>${s.contracts_bought!=null?Number(s.contracts_bought).toFixed(2):'—'}</td>
-        <td>$${s.contract_price!=null?Number(s.contract_price).toFixed(2):'—'}</td>
-        <td>$${s.position_size!=null?Number(s.position_size).toFixed(2):'—'}</td>
-        <td><span class="outcome-badge ${out==='win'?'ob-win':out==='loss'?'ob-loss':'ob-pending'}">${s.outcome||'PENDING'}</span></td>
-      </tr>`;
-    }).join('') || '<tr><td colspan="7" style="text-align:center;color:var(--text2);padding:20px">No shadow trades yet</td></tr>';
-  } catch(e) {}
-}
-async function resetShadow() {
-  if (!confirm('Reset shadow account to $1,000?')) return;
-  await fetch('/api/shadow/reset',{method:'POST'});
-  loadShadowBalance();
-  toast('Shadow account reset to $1,000','signal');
-}
-
-// ═══════════════════════════════════
-// SETTINGS
-// ═══════════════════════════════════
-async function loadSettings() {
-  try {
-    const r = await fetch('/api/settings');
-    if (!r.ok) return;
-    state.settings = await r.json();
-    applySettingsUI();
-  } catch(e) {}
-}
-function applySettingsUI() {
-  const s = state.settings;
-  document.getElementById('tgl-live').classList.toggle('on', s.mode==='live');
-  document.getElementById('tgl-mart').classList.toggle('on', !!s.use_martingale);
-  const ps = s.position_size||10;
-  document.getElementById('rng-pos').value  = ps;
-  document.getElementById('inp-pos').value  = ps;
-  document.getElementById('pos-disp').textContent = `$${parseFloat(ps).toFixed(2)}`;
-  document.getElementById('inp-mult').value = s.martingale_multiplier||2;
-  document.getElementById('inp-cp').value   = s.max_contract_price||0.50;
-  const conf = s.min_confidence||0.58;
-  document.getElementById('rng-conf').value = conf;
-  document.getElementById('conf-disp').textContent = Math.round(conf*100)+'%';
-  syncModeBadges(s.mode);
-}
-function toggleSetting(type) {
-  if (type==='mode')       state.settings.mode = state.settings.mode==='live'?'shadow':'live';
-  if (type==='martingale') state.settings.use_martingale = !state.settings.use_martingale;
-  applySettingsUI();
-}
-function quickToggleMode() { toggleSetting('mode'); saveSettings(); }
-function syncPos(v)       { document.getElementById('pos-disp').textContent=`$${parseFloat(v).toFixed(2)}`; document.getElementById('inp-pos').value=v; }
-function syncPosInput(v)  { const c=Math.max(1,Math.min(1000,parseFloat(v)||10)); document.getElementById('rng-pos').value=c; syncPos(c); }
-async function saveSettings() {
-  const payload = {
-    mode:                  state.settings.mode,
-    position_size:         parseFloat(document.getElementById('inp-pos').value),
-    use_martingale:        state.settings.use_martingale,
-    martingale_multiplier: parseFloat(document.getElementById('inp-mult').value),
-    max_contract_price:    parseFloat(document.getElementById('inp-cp').value),
-    min_confidence:        parseFloat(document.getElementById('rng-conf').value),
-  };
-  try {
-    const r = await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-    const d = await r.json();
-    if (d.success) { state.settings=d.settings; applySettingsUI(); toast('✅ Settings saved','signal'); }
-  } catch(e) { toast('❌ Save failed','loss'); }
-}
-
-// ═══════════════════════════════════
-// TOAST
-// ═══════════════════════════════════
-function toast(msg, type='signal') {
-  const c  = document.getElementById('toasts');
-  const el = document.createElement('div');
-  el.className = `toast ${type}`;
-  el.textContent = msg;
-  c.appendChild(el);
-  setTimeout(()=>el.remove(), 5000);
-}
-
-// ═══════════════════════════════════
-// INIT
-// ═══════════════════════════════════
+// ── Init ───────────────────────────────────────────────────────────────────
 async function init() {
   console.log('[Dashboard] Initialising...');
   await loadSettings();
@@ -936,12 +1383,19 @@ async function init() {
   await loadPairStats();
   await loadPrices();
   await loadPerfChart();
-  console.log('[Dashboard] Ready. Debug: /api/debug');
+  console.log('[Dashboard] Init complete. Open /api/debug to inspect DB state.');
 }
 
 init();
-setInterval(loadPrices,    30000);
-setInterval(()=>{ loadTodayStats(); loadTodaySignals(); }, 15000);
+
+// Refresh prices every 30s
+setInterval(loadPrices, 30000);
+// Poll stats + signals every 15s
+setInterval(() => {
+  loadTodayStats();
+  loadTodaySignals();
+}, 15000);
+// Refresh pair stats every 5 minutes
 setInterval(loadPairStats, 300000);
 </script>
 </body>
