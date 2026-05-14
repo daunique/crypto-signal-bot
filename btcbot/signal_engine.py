@@ -280,7 +280,7 @@ def get_signal_for_symbol(symbol: str) -> dict | None:
         'macd_hist':         float(row['macd_hist']),
         'adx':               float(row['adx']),
         'vol_ratio':         float(row['vol_ratio']),
-        'open_price':        float(latest['close']),
+        'open_price':        float(latest['close']),  # preview only; resolver overwrites with tracked candle's actual open
         'candle_open_time':  candle_open.to_pydatetime().replace(tzinfo=None),
         'candle_close_time': candle_close.to_pydatetime().replace(tzinfo=None),
     }

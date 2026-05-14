@@ -236,8 +236,11 @@ def job_resolve_outcomes():
                             )
                             continue
 
+                        # Use the actual open of the tracked candle as entry price.
+                        # sig.open_price was the pre-signal price stored at generate
+                        # time; now that the candle has closed we have the real open.
+                        open_price  = float(match.iloc[0]['open'])
                         close_price = float(match.iloc[0]['close'])
-                        open_price  = sig.open_price
 
                         # WIN/LOSS based on ML signal direction (no reversal)
                         if sig.signal_direction == "UP":
@@ -245,6 +248,7 @@ def job_resolve_outcomes():
                         else:
                             outcome = "WIN" if close_price < open_price else "LOSS"
 
+                        sig.open_price  = open_price   # correct the stored entry price
                         sig.close_price = close_price
                         sig.outcome     = outcome
                         db.session.flush()

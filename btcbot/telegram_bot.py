@@ -61,7 +61,7 @@ def send_signal_alert(signal: dict, mode: str, position_size: float,
         f"{tier_emoji} <b>Tier:</b> {tier} {'| 🔥 Volume Spike' if signal.get('vol_spike') else ''}\n"
         f"\n"
         f"⏰ <b>Candle:</b> {candle_open} → {candle_close}\n"
-        f"💰 <b>Entry Price:</b> ${signal['open_price']:,.4f}\n"
+        f"💰 <b>Est. Entry:</b> ~${signal['open_price']:,.4f} <i>(next candle open)</i>\n"
         f"\n"
         f"📈 <b>Indicators</b>\n"
         f"   RSI(14): {signal['rsi_14']:.1f}\n"
