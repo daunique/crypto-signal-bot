@@ -3,16 +3,20 @@ Scheduler — Signal timing
 ──────────────────────────────────────────────────────────────────────────
 CORRECT 15-minute candle lifecycle:
 
-  :00/:15/:30/:45  → candle OPENS  → generate signal, place order
-  :15/:30/:45/:00  → candle CLOSES → next candle opens simultaneously
-
-  Resolve runs at :02/:17/:32/:47 (2 min after close) to ensure OKX
-  has finalized the closed candle before we read the close price.
-  At :01 the candle just closed — OKX may not have it yet.
+  :00/:15/:30/:45  → candle OPENS
+  :13/:28/:43/:58  → signal fires (2 min before current candle closes)
+                     → signal references the NEXT candle as the tracked period
+                       e.g. signal at :13 tracks candle :15→:30
+  :15/:30/:45/:00  → current candle CLOSES / next candle OPENS
+                     → resolve fires 2 seconds after close
 
   So the schedule is:
-    generate  → :00, :15, :30, :45
-    resolve   → :02, :17, :32, :47   ← 2 min after close, not 1
+    generate  → :13, :28, :43, :58   ← 2 min before candle close
+    resolve   → :15, :30, :45, :00   ← exactly at candle close (+2 s buffer)
+
+  The signal_engine computes candle_open_time / candle_close_time as the
+  NEXT 15-min boundary from the moment generate fires, so win/loss is
+  correctly measured over the candle that starts after the signal drops.
 
 Duplicate guard:
   Uses the candle_open_time FROM signal_engine directly as the unique key.
@@ -40,7 +44,9 @@ def _ctx():
 
 def job_generate_signal():
     """
-    Fires at :00, :15, :30, :45 UTC — candle OPEN.
+    Fires at :13, :28, :43, :58 UTC — 2 minutes before the current candle closes.
+    The signal references the NEXT candle (the one that opens at the upcoming
+    :00/:15/:30/:45 boundary) as the tracked win/loss period.
     Generates ONE signal, places order, saves to DB.
     Duplicate guard: skips if a signal for this candle_open_time already exists.
     """
@@ -169,9 +175,9 @@ def job_generate_signal():
 
 def job_resolve_outcomes():
     """
-    Fires at :02, :17, :32, :47 UTC — 2 minutes after candle close.
-    Resolves PENDING signals whose candle_close_time <= (now - 1 min).
-    The extra 1 min buffer ensures OKX has finalized the closed candle.
+    Fires at :00, :15, :30, :45 UTC — exactly at candle close.
+    Resolves PENDING signals whose candle_close_time <= (now - 2 seconds).
+    The 2-second buffer is enough for OKX to finalize the closed candle.
 
     WIN/LOSS uses ML signal direction directly:
       signal UP   + close > open → WIN
@@ -185,9 +191,9 @@ def job_resolve_outcomes():
             from telegram_bot import send_result_alert
             import pandas as pd
 
-            # Only resolve candles that closed at least 1 minute ago
+            # Only resolve candles that closed at least 2 seconds ago
             now        = datetime.now(timezone.utc).replace(tzinfo=None)
-            cutoff     = now - timedelta(minutes=1)
+            cutoff     = now - timedelta(seconds=2)
 
             pending = Signal.query.filter(
                 Signal.outcome == "PENDING",
@@ -334,21 +340,22 @@ def job_retrain():
 
 
 def start_scheduler():
-    # Signal generation — at candle OPEN (:00, :15, :30, :45)
+    # Signal generation — 2 min before candle CLOSE (:13, :28, :43, :58)
+    # The signal_engine will return candle_open/close for the NEXT boundary.
     scheduler.add_job(
         job_generate_signal,
-        CronTrigger(minute="0,15,30,45"),
+        CronTrigger(minute="13,28,43,58"),
         id="generate",
         replace_existing=True,
         misfire_grace_time=30,
         max_instances=1,       # never run two generate jobs simultaneously
     )
 
-    # Outcome resolution — 2 min after candle CLOSE (:02, :17, :32, :47)
-    # This gives OKX time to finalize the closed candle data
+    # Outcome resolution — exactly at candle CLOSE (:00, :15, :30, :45)
+    # 2-second cutoff buffer is enough; candle data is available immediately at close.
     scheduler.add_job(
         job_resolve_outcomes,
-        CronTrigger(minute="2,17,32,47"),
+        CronTrigger(minute="0,15,30,45"),
         id="resolve",
         replace_existing=True,
         misfire_grace_time=30,
@@ -374,7 +381,7 @@ def start_scheduler():
     scheduler.start()
     logger.info(
         "[SCHEDULER] Started | "
-        "generate@:00/:15/:30/:45 | "
-        "resolve@:02/:17/:32/:47 | "
+        "generate@:13/:28/:43/:58 | "
+        "resolve@:00/:15/:30/:45 | "
         "daily@23:59 | retrain@sun-02:00"
     )

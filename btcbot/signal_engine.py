@@ -252,16 +252,21 @@ def get_signal_for_symbol(symbol: str) -> dict | None:
     tier      = "T1" if vol_spike else "T2"
 
     # ── Exact 15-min candle boundary timing ──────────────────────────────────
-    # Use the LATEST candle's timestamp to derive the NEXT clean boundary.
-    # OKX timestamps are candle OPEN times. The current live candle opens at
-    # the most recent boundary and closes exactly 15 min later.
+    # Signal fires 2 minutes BEFORE the current candle closes (e.g. at :13).
+    # We track the NEXT candle (the one that opens at the upcoming boundary)
+    # so win/loss is measured over the period that starts after the signal drops.
+    #
+    # Example: signal fires at 00:13
+    #   current candle:  00:00 → 00:15  (closing in 2 min — not tracked)
+    #   tracked candle:  00:15 → 00:30  ← this is what we record as open/close
     ts = latest['timestamp']  # tz-aware UTC Timestamp
 
-    # Strip to the floor 15-min boundary (current candle open)
-    minutes     = ts.minute
-    boundary    = (minutes // 15) * 15
-    candle_open = ts.replace(minute=boundary, second=0, microsecond=0)
-    candle_close= candle_open + pd.Timedelta(minutes=15)
+    # Floor to current 15-min boundary, then advance one period to get NEXT candle
+    minutes      = ts.minute
+    boundary     = (minutes // 15) * 15
+    current_open = ts.replace(minute=boundary, second=0, microsecond=0)
+    candle_open  = current_open + pd.Timedelta(minutes=15)   # next candle open
+    candle_close = candle_open  + pd.Timedelta(minutes=15)   # next candle close
 
     return {
         'symbol':            symbol,
