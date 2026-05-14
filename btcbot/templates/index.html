@@ -372,7 +372,7 @@ input[type=number]:focus{border-color:var(--accent)}
     </div>
     <div style="overflow-x:auto">
       <table class="tbl">
-        <thead><tr><th>Open</th><th>Close</th><th>Pair</th><th>Direction</th><th>Confidence</th><th>Tier</th><th>Entry</th><th>Close Price</th><th>Result</th></tr></thead>
+        <thead><tr><th>Signal Time</th><th>Entry Time</th><th>Close Time</th><th>Pair</th><th>Direction</th><th>Confidence</th><th>Tier</th><th>Entry Price</th><th>Close Price</th><th>Result</th></tr></thead>
         <tbody id="signals-tbody"></tbody>
       </table>
     </div>
@@ -673,9 +673,11 @@ async function loadTodaySignals() {
       const conf = s.ml_confidence!=null ? (Number(s.ml_confidence)*100).toFixed(1) : '—';
       const tier = s.tier || 'T2';
       const ts   = s => s ? new Date((s.endsWith('Z')?s:s+'Z')).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',timeZone:'UTC'}) : '—';
-      const openT  = ts(s.candle_open_time);
-      const closeT = ts(s.candle_close_time);
-      const price  = s.open_price!=null ? `$${Number(s.open_price).toFixed(4)}` : '—';
+      const sigT    = ts(s.signal_time   || s.created_at);
+      const entryT  = ts(s.entry_time   || s.candle_open_time);
+      const closeT  = ts(s.close_time   || s.candle_close_time);
+      const entryP  = s.entry_price  != null ? `$${Number(s.entry_price).toFixed(4)}`  : (s.open_price  != null ? `$${Number(s.open_price).toFixed(4)}`  : '—');
+      const closeP  = s.close_price  != null ? `$${Number(s.close_price).toFixed(4)}`  : '—';
       const outBadge = out==='win' ? '<span class="outcome-badge ob-win">WIN</span>'
                      : out==='loss'? '<span class="outcome-badge ob-loss">LOSS</span>'
                      : '<span class="outcome-badge ob-pending">PENDING</span>';
@@ -683,7 +685,9 @@ async function loadTodaySignals() {
         <div class="sig-arrow ${dir.toLowerCase()}">${dir==='UP'?'▲':'▼'}</div>
         <div class="sig-info">
           <div class="sig-sym">${s.symbol}<span class="tier-badge ${tier==='T1'?'tier-t1':'tier-t2'}">${tier}</span></div>
-          <div class="sig-meta">${openT} → ${closeT} UTC · Entry ${price}</div>
+          <div class="sig-meta">📡 Signal: ${sigT} UTC</div>
+          <div class="sig-meta">🟢 Entry: ${entryT} UTC · ${entryP}</div>
+          <div class="sig-meta">🔴 Close: ${closeT} UTC · ${closeP}</div>
         </div>
         <div class="sig-right">
           <div class="sig-conf">${conf}%</div>
@@ -770,13 +774,14 @@ async function loadSignals() {
       const out  = (s.outcome||'PENDING').toLowerCase();
       const conf = s.ml_confidence!=null ? (Number(s.ml_confidence)*100).toFixed(1) : '—';
       return `<tr>
-        <td style="font-size:0.7rem;color:var(--text2)">${ts(s.candle_open_time)}</td>
-        <td style="font-size:0.7rem;color:var(--text2)">${ts(s.candle_close_time)}</td>
+        <td style="font-size:0.7rem;color:var(--text2)">${ts(s.signal_time || s.created_at)}</td>
+        <td style="font-size:0.7rem;color:var(--text2)">${ts(s.entry_time  || s.candle_open_time)}</td>
+        <td style="font-size:0.7rem;color:var(--text2)">${ts(s.close_time  || s.candle_close_time)}</td>
         <td style="font-weight:700">${s.symbol}</td>
         <td class="${dir.toLowerCase()}">${dir==='UP'?'▲ UP':'▼ DOWN'}</td>
         <td style="color:var(--accent2)">${conf}%</td>
         <td><span class="tier-badge ${(s.tier||'T2')==='T1'?'tier-t1':'tier-t2'}">${s.tier||'T2'}</span></td>
-        <td>$${s.open_price!=null?Number(s.open_price).toFixed(4):'—'}</td>
+        <td>${(s.entry_price??s.open_price)!=null?'$'+Number(s.entry_price??s.open_price).toFixed(4):'—'}</td>
         <td>${s.close_price!=null?'$'+Number(s.close_price).toFixed(4):'—'}</td>
         <td><span class="outcome-badge ${out==='win'?'ob-win':out==='loss'?'ob-loss':'ob-pending'}">${s.outcome||'PENDING'}</span></td>
       </tr>`;
@@ -853,7 +858,7 @@ async function loadShadowSignals() {
     const d = await r.json();
     document.getElementById('sh-tbody').innerHTML = d.signals.map(s => {
       const out = (s.outcome||'PENDING').toLowerCase();
-      const t   = s.created_at ? new Date((s.created_at.endsWith('Z')?s.created_at:s.created_at+'Z')).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'UTC'}) : '—';
+      const t   = s.signal_time ? new Date((s.signal_time.endsWith('Z')?s.signal_time:s.signal_time+'Z')).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'UTC'}) : (s.created_at ? new Date((s.created_at.endsWith('Z')?s.created_at:s.created_at+'Z')).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'UTC'}) : '—');
       return `<tr>
         <td style="font-size:0.7rem;color:var(--text2)">${t}</td>
         <td style="font-weight:700">${s.symbol}</td>
