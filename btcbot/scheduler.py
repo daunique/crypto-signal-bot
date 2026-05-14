@@ -1,16 +1,31 @@
 """
-Scheduler
-─────────────────────────────────────────────────────────────────────────
-Signal timing — exact 15-min candle boundaries (UTC):
-  Generate:  :00, :15, :30, :45  — one signal fired per candle
-  Resolve:   :01, :16, :31, :46  — after candle fully closes
-  Daily:     23:59 UTC
-  Retrain:   Sunday 02:00 UTC
+Scheduler — Signal timing
+──────────────────────────────────────────────────────────────────────────
+CORRECT 15-minute candle lifecycle:
 
-ONE signal per candle enforced by pick_best_signal() in signal_engine.
+  :00/:15/:30/:45  → candle OPENS  → generate signal, place order
+  :15/:30/:45/:00  → candle CLOSES → next candle opens simultaneously
+
+  Resolve runs at :02/:17/:32/:47 (2 min after close) to ensure OKX
+  has finalized the closed candle before we read the close price.
+  At :01 the candle just closed — OKX may not have it yet.
+
+  So the schedule is:
+    generate  → :00, :15, :30, :45
+    resolve   → :02, :17, :32, :47   ← 2 min after close, not 1
+
+Duplicate guard:
+  Uses the candle_open_time FROM signal_engine directly as the unique key.
+  A signal for candle 14:15→14:30 will never be saved twice because we
+  check Signal.candle_open_time == sig['candle_open_time'] before saving.
+
+Direction:
+  Uses ML signal direction directly (no reversal).
+  WIN: signal UP + close > open, or signal DOWN + close < open.
 """
 import logging
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, timedelta, date
+
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -25,10 +40,9 @@ def _ctx():
 
 def job_generate_signal():
     """
-    Runs at exactly :00, :15, :30, :45 UTC.
-    Picks the single best signal across all 6 pairs.
-    Places order immediately (live or shadow).
-    Sends Telegram notification.
+    Fires at :00, :15, :30, :45 UTC — candle OPEN.
+    Generates ONE signal, places order, saves to DB.
+    Duplicate guard: skips if a signal for this candle_open_time already exists.
     """
     with _ctx():
         try:
@@ -37,8 +51,6 @@ def job_generate_signal():
             from signal_engine import pick_best_signal
             from limitless_executor import execute_order
             from telegram_bot import send_signal_alert
-            from datetime import datetime, timezone
-            import math
 
             settings = Settings.query.first()
             if not settings:
@@ -51,42 +63,31 @@ def job_generate_signal():
             max_cp        = settings.max_contract_price
             min_conf      = settings.min_confidence
 
-            # ── Duplicate guard ───────────────────────────────────────────────
-            # Calculate the current candle's exact open time (floor to 15-min boundary)
-            now_utc    = datetime.now(timezone.utc)
-            total_mins = now_utc.hour * 60 + now_utc.minute
-            boundary   = (total_mins // 15) * 15
-            candle_h   = boundary // 60
-            candle_m   = boundary % 60
-            candle_open = now_utc.replace(
-                hour=candle_h, minute=candle_m, second=0,
-                microsecond=0, tzinfo=None
-            )
-            candle_close = candle_open.replace(
-                hour=(candle_h + (candle_m + 15) // 60) % 24,
-                minute=(candle_m + 15) % 60
-            )
+            logger.info(f"[GENERATE] Starting | mode={mode} min_conf={min_conf}")
 
-            # Check if we already saved a signal for this exact candle window
+            # Get signal from engine first — it computes the correct candle boundary
+            sig = pick_best_signal(min_confidence=min_conf)
+            if not sig:
+                logger.info("[GENERATE] No qualifying signal this candle")
+                return
+
+            candle_open  = sig['candle_open_time']
+            candle_close = sig['candle_close_time']
+
+            # ── Duplicate guard using signal_engine's candle_open_time ──────────
+            # This is the authoritative boundary — derived from floor(now / 15min)
             existing = Signal.query.filter(
-                Signal.candle_open_time == candle_open,
+                Signal.candle_open_time == candle_open
             ).first()
             if existing:
                 logger.info(
-                    f"[SCHEDULER] Signal already exists for candle "
-                    f"{candle_open} → {candle_close} (id={existing.id}) — skipping duplicate"
+                    f"[GENERATE] Duplicate blocked — signal already exists for "
+                    f"candle {candle_open}→{candle_close} "
+                    f"(existing id={existing.id} symbol={existing.symbol})"
                 )
                 return
 
-            logger.info(f"[SCHEDULER] Generating signal | candle={candle_open}→{candle_close} "
-                        f"| mode={mode} | min_conf={min_conf}")
-
-            sig = pick_best_signal(min_confidence=min_conf)
-            if not sig:
-                logger.info("[SCHEDULER] No signal this candle — nothing sent")
-                return
-
-            # Place order
+            # ── Place order ──────────────────────────────────────────────────────
             order          = execute_order(sig['symbol'], sig['direction'], mode,
                                            position_size, max_cp)
             contracts      = order.get("contracts", 0)
@@ -95,21 +96,21 @@ def job_generate_signal():
 
             if order.get("success"):
                 logger.info(
-                    f"[SCHEDULER] Order placed ✓ | mode={mode} | "
-                    f"symbol={sig['symbol']} | ml_signal={sig['direction']} | "
-                    f"trade={'DOWN' if sig['direction']=='UP' else 'UP'} (reversed) | "
-                    f"size=${position_size} | order_id={order_id}"
+                    f"[GENERATE] Order ✓ | {sig['symbol']} {sig['direction']} "
+                    f"${position_size} | {contracts} contracts @ ${contract_price} "
+                    f"| id={order_id}"
                 )
             else:
                 logger.error(
-                    f"[SCHEDULER] Order FAILED | mode={mode} | "
-                    f"symbol={sig['symbol']} | error={order.get('error','unknown')}"
+                    f"[GENERATE] Order FAILED | {sig['symbol']} | "
+                    f"error={order.get('error','unknown')}"
                 )
 
+            # ── Save signal ──────────────────────────────────────────────────────
             signal_obj = Signal(
                 symbol            = sig['symbol'],
-                candle_open_time  = sig['candle_open_time'],
-                candle_close_time = sig['candle_close_time'],
+                candle_open_time  = candle_open,
+                candle_close_time = candle_close,
                 signal_direction  = sig['direction'],
                 ml_confidence     = sig['confidence'],
                 rsi_14            = sig['rsi_14'],
@@ -129,43 +130,52 @@ def job_generate_signal():
             db.session.add(signal_obj)
             db.session.commit()
 
-            # Shadow balance deduction
+            # ── Shadow balance deduction ─────────────────────────────────────────
             if mode == "shadow":
                 shadow = ShadowBalance.query.first()
                 if shadow:
                     shadow.balance = max(0, shadow.balance - position_size)
                     db.session.commit()
 
-            # Telegram
-            sent = send_signal_alert(
-                signal     = sig,
-                mode       = mode,
-                position_size   = position_size,
-                contracts  = contracts,
-                contract_price  = contract_price,
-            )
-            signal_obj.telegram_sent = sent
-            db.session.commit()
+            # ── Telegram ─────────────────────────────────────────────────────────
+            try:
+                sent = send_signal_alert(
+                    signal        = sig,
+                    mode          = mode,
+                    position_size = position_size,
+                    contracts     = contracts,
+                    contract_price= contract_price,
+                )
+                signal_obj.telegram_sent = sent
+                db.session.commit()
+            except Exception as e:
+                logger.warning(f"[GENERATE] Telegram failed: {e}")
 
-            # WebSocket push
+            # ── WebSocket push ───────────────────────────────────────────────────
             try:
                 socketio.emit("new_signal", signal_obj.to_dict())
             except Exception as e:
-                logger.warning(f"[WS] emit: {e}")
+                logger.warning(f"[GENERATE] WS emit: {e}")
 
-            logger.info(f"[SCHEDULER] Signal saved: {sig['symbol']} "
-                        f"{sig['direction']} conf={sig['confidence']:.3f} "
-                        f"candle={sig['candle_open_time']}→{sig['candle_close_time']}")
+            logger.info(
+                f"[GENERATE] Saved signal id={signal_obj.id} | "
+                f"{sig['symbol']} {sig['direction']} conf={sig['confidence']:.3f} | "
+                f"candle {candle_open}→{candle_close}"
+            )
 
         except Exception as e:
-            logger.error(f"[SCHEDULER] generate error: {e}", exc_info=True)
+            logger.error(f"[GENERATE] Unhandled error: {e}", exc_info=True)
 
 
 def job_resolve_outcomes():
     """
-    Runs at :01, :16, :31, :46 UTC — 1 minute after candle close.
-    Resolves all PENDING signals whose candle_close_time <= now.
-    WIN/LOSS determined strictly by candle close price vs entry price.
+    Fires at :02, :17, :32, :47 UTC — 2 minutes after candle close.
+    Resolves PENDING signals whose candle_close_time <= (now - 1 min).
+    The extra 1 min buffer ensures OKX has finalized the closed candle.
+
+    WIN/LOSS uses ML signal direction directly:
+      signal UP   + close > open → WIN
+      signal DOWN + close < open → WIN
     """
     with _ctx():
         try:
@@ -175,18 +185,22 @@ def job_resolve_outcomes():
             from telegram_bot import send_result_alert
             import pandas as pd
 
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            # Only resolve candles that closed at least 1 minute ago
+            now        = datetime.now(timezone.utc).replace(tzinfo=None)
+            cutoff     = now - timedelta(minutes=1)
 
             pending = Signal.query.filter(
                 Signal.outcome == "PENDING",
-                Signal.candle_close_time <= now,
+                Signal.candle_close_time <= cutoff,
             ).all()
 
             if not pending:
-                logger.debug("[RESOLVE] No pending signals to resolve")
+                logger.debug("[RESOLVE] No pending signals ready to resolve")
                 return
 
-            # Group by symbol to minimise API calls
+            logger.info(f"[RESOLVE] Resolving {len(pending)} pending signal(s)")
+
+            # Group by symbol to minimise OKX API calls
             by_sym = {}
             for s in pending:
                 by_sym.setdefault(s.symbol, []).append(s)
@@ -194,38 +208,36 @@ def job_resolve_outcomes():
             for sym, sigs in by_sym.items():
                 df = fetch_okx_candles(sym, limit=10)
                 if df.empty:
+                    logger.warning(f"[RESOLVE] No OKX data for {sym}")
                     continue
 
                 for sig in sigs:
                     try:
-                        # Find the candle that corresponds to this signal's window
-                        close_ts = pd.Timestamp(sig.candle_close_time, tz="UTC")
                         open_ts  = pd.Timestamp(sig.candle_open_time,  tz="UTC")
+                        close_ts = pd.Timestamp(sig.candle_close_time, tz="UTC")
 
-                        # Match candle whose open timestamp == signal candle_open_time
+                        # Find the candle that opened at signal's candle_open_time
                         match = df[
                             (df['timestamp'] >= open_ts) &
                             (df['timestamp'] <  close_ts)
                         ]
                         if match.empty:
-                            # fallback: use first candle after open
                             match = df[df['timestamp'] >= open_ts]
                         if match.empty:
-                            logger.warning(f"[RESOLVE] No candle match for {sym} {sig.candle_open_time}")
+                            logger.warning(
+                                f"[RESOLVE] No matching candle for {sym} "
+                                f"{sig.candle_open_time} — will retry next cycle"
+                            )
                             continue
 
                         close_price = float(match.iloc[0]['close'])
                         open_price  = sig.open_price
 
-                        # WIN/LOSS based on TRADE direction (opposite of ML signal)
-                        # signal UP → trade DOWN → WIN if price went DOWN
-                        # signal DOWN → trade UP → WIN if price went UP
+                        # WIN/LOSS based on ML signal direction (no reversal)
                         if sig.signal_direction == "UP":
-                            # traded DOWN
-                            outcome = "WIN" if close_price < open_price else "LOSS"
-                        else:
-                            # traded UP
                             outcome = "WIN" if close_price > open_price else "LOSS"
+                        else:
+                            outcome = "WIN" if close_price < open_price else "LOSS"
 
                         sig.close_price = close_price
                         sig.outcome     = outcome
@@ -237,7 +249,7 @@ def job_resolve_outcomes():
                         except Exception:
                             pass
 
-                        # Shadow P&L
+                        # Shadow P&L (prediction market pays ~1.8x on win)
                         if sig.mode == "shadow":
                             shadow = ShadowBalance.query.first()
                             if shadow and sig.position_size:
@@ -255,35 +267,38 @@ def job_resolve_outcomes():
                             daily = DailyStats(date=sig_date, mode=sig.mode)
                             db.session.add(daily)
                         daily.total_signals += 1
-                        daily.wins   += 1 if outcome == "WIN"  else 0
-                        daily.losses += 1 if outcome == "LOSS" else 0
-                        daily.win_rate = daily.wins / daily.total_signals * 100
+                        daily.wins          += 1 if outcome == "WIN"  else 0
+                        daily.losses        += 1 if outcome == "LOSS" else 0
+                        daily.win_rate       = daily.wins / daily.total_signals * 100
 
                         # Telegram result
                         try:
-                            send_result_alert(sig.to_dict(), outcome, open_price, close_price)
+                            send_result_alert(sig.to_dict(), outcome,
+                                              open_price, close_price)
                         except Exception:
                             pass
 
-                        logger.info(f"[RESOLVE] {sym} {sig.signal_direction} "
-                                    f"open={open_price:.4f} close={close_price:.4f} → {outcome}")
+                        logger.info(
+                            f"[RESOLVE] {sym} {sig.signal_direction} | "
+                            f"entry={open_price:.4f} close={close_price:.4f} → {outcome}"
+                        )
 
                     except Exception as e:
-                        logger.error(f"[RESOLVE] signal {sig.id}: {e}")
+                        logger.error(f"[RESOLVE] Error on signal id={sig.id}: {e}")
 
             db.session.commit()
 
-            # WebSocket push
+            # WebSocket push resolved signals
             try:
                 for sigs in by_sym.values():
                     for s in sigs:
                         if s.outcome != "PENDING":
                             socketio.emit("signal_resolved", s.to_dict())
             except Exception as e:
-                logger.warning(f"[WS] resolve emit: {e}")
+                logger.warning(f"[RESOLVE] WS emit: {e}")
 
         except Exception as e:
-            logger.error(f"[SCHEDULER] resolve error: {e}", exc_info=True)
+            logger.error(f"[RESOLVE] Unhandled error: {e}", exc_info=True)
 
 
 def job_daily_summary():
@@ -304,7 +319,7 @@ def job_daily_summary():
                     mode     = mode,
                 )
         except Exception as e:
-            logger.error(f"[SCHEDULER] daily summary: {e}")
+            logger.error(f"[DAILY] {e}")
 
 
 def job_retrain():
@@ -319,29 +334,47 @@ def job_retrain():
 
 
 def start_scheduler():
-    # Signal generation — exact 15-min candle open boundaries
+    # Signal generation — at candle OPEN (:00, :15, :30, :45)
     scheduler.add_job(
         job_generate_signal,
         CronTrigger(minute="0,15,30,45"),
-        id="generate", replace_existing=True, misfire_grace_time=20,
+        id="generate",
+        replace_existing=True,
+        misfire_grace_time=30,
+        max_instances=1,       # never run two generate jobs simultaneously
     )
-    # Outcome resolution — 1 min after candle close
+
+    # Outcome resolution — 2 min after candle CLOSE (:02, :17, :32, :47)
+    # This gives OKX time to finalize the closed candle data
     scheduler.add_job(
         job_resolve_outcomes,
-        CronTrigger(minute="1,16,31,46"),
-        id="resolve", replace_existing=True, misfire_grace_time=20,
+        CronTrigger(minute="2,17,32,47"),
+        id="resolve",
+        replace_existing=True,
+        misfire_grace_time=30,
+        max_instances=1,
     )
-    # Daily summary
+
+    # Daily summary at 23:59 UTC
     scheduler.add_job(
         job_daily_summary,
         CronTrigger(hour=23, minute=59),
-        id="daily", replace_existing=True,
+        id="daily",
+        replace_existing=True,
     )
-    # Weekly retrain
+
+    # Weekly model retrain — Sunday 02:00 UTC
     scheduler.add_job(
         job_retrain,
         CronTrigger(day_of_week="sun", hour=2, minute=0),
-        id="retrain", replace_existing=True,
+        id="retrain",
+        replace_existing=True,
     )
+
     scheduler.start()
-    logger.info("[SCHEDULER] Started — signals@:00/:15/:30/:45, resolve@:01/:16/:31/:46")
+    logger.info(
+        "[SCHEDULER] Started | "
+        "generate@:00/:15/:30/:45 | "
+        "resolve@:02/:17/:32/:47 | "
+        "daily@23:59 | retrain@sun-02:00"
+    )

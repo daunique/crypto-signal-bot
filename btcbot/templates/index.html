@@ -372,7 +372,7 @@ input[type=number]:focus{border-color:var(--accent)}
     </div>
     <div style="overflow-x:auto">
       <table class="tbl">
-        <thead><tr><th>Open</th><th>Close</th><th>Pair</th><th>ML Signal</th><th>Trade</th><th>Conf</th><th>Tier</th><th>Entry</th><th>Close</th><th>Result</th></tr></thead>
+        <thead><tr><th>Open</th><th>Close</th><th>Pair</th><th>Direction</th><th>Confidence</th><th>Tier</th><th>Entry</th><th>Close Price</th><th>Result</th></tr></thead>
         <tbody id="signals-tbody"></tbody>
       </table>
     </div>
@@ -679,20 +679,11 @@ async function loadTodaySignals() {
       const outBadge = out==='win' ? '<span class="outcome-badge ob-win">WIN</span>'
                      : out==='loss'? '<span class="outcome-badge ob-loss">LOSS</span>'
                      : '<span class="outcome-badge ob-pending">PENDING</span>';
-      // Trade direction is always inverse of ML signal
-      const tradeDir = dir === 'UP' ? 'DOWN' : 'UP';
-      const tradeColor = tradeDir === 'UP' ? 'var(--up)' : 'var(--down)';
-      const mlColor    = dir === 'UP' ? 'var(--up)' : 'var(--down)';
       return `<div class="sig-card ${out}">
-        <div class="sig-arrow ${tradeDir.toLowerCase()}">${tradeDir==='UP'?'▲':'▼'}</div>
+        <div class="sig-arrow ${dir.toLowerCase()}">${dir==='UP'?'▲':'▼'}</div>
         <div class="sig-info">
           <div class="sig-sym">${s.symbol}<span class="tier-badge ${tier==='T1'?'tier-t1':'tier-t2'}">${tier}</span></div>
-          <div class="sig-meta" style="margin-top:3px">
-            <span style="font-size:0.65rem;color:var(--text2)">ML: </span><span style="font-size:0.65rem;color:${mlColor}">${dir==='UP'?'▲':'▼'} ${dir}</span>
-            <span style="margin:0 4px;color:var(--text3)">→</span>
-            <strong style="font-size:0.75rem;color:${tradeColor}">${tradeDir==='UP'?'▲':'▼'} TRADE ${tradeDir}</strong>
-          </div>
-          <div class="sig-meta" style="margin-top:2px">${openT} → ${closeT} UTC · ${price}</div>
+          <div class="sig-meta">${openT} → ${closeT} UTC · Entry ${price}</div>
         </div>
         <div class="sig-right">
           <div class="sig-conf">${conf}%</div>
@@ -778,13 +769,11 @@ async function loadSignals() {
       const dir  = s.signal_direction;
       const out  = (s.outcome||'PENDING').toLowerCase();
       const conf = s.ml_confidence!=null ? (Number(s.ml_confidence)*100).toFixed(1) : '—';
-      const tradeDir2 = dir === 'UP' ? 'DOWN' : 'UP';
       return `<tr>
-        <td style="font-size:0.67rem;color:var(--text2)">${ts(s.candle_open_time)}</td>
-        <td style="font-size:0.67rem;color:var(--text2)">${ts(s.candle_close_time)}</td>
+        <td style="font-size:0.7rem;color:var(--text2)">${ts(s.candle_open_time)}</td>
+        <td style="font-size:0.7rem;color:var(--text2)">${ts(s.candle_close_time)}</td>
         <td style="font-weight:700">${s.symbol}</td>
-        <td style="font-size:0.72rem;color:var(--text2)">${dir==='UP'?'▲':'▼'} ${dir}</td>
-        <td class="${tradeDir2.toLowerCase()}"><strong>${tradeDir2==='UP'?'▲ UP':'▼ DOWN'}</strong></td>
+        <td class="${dir.toLowerCase()}">${dir==='UP'?'▲ UP':'▼ DOWN'}</td>
         <td style="color:var(--accent2)">${conf}%</td>
         <td><span class="tier-badge ${(s.tier||'T2')==='T1'?'tier-t1':'tier-t2'}">${s.tier||'T2'}</span></td>
         <td>$${s.open_price!=null?Number(s.open_price).toFixed(4):'—'}</td>

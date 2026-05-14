@@ -1,29 +1,27 @@
 """
 Limitless Exchange — Order Executor
-═══════════════════════════════════════════════════════════════════════
-SOURCE: Official Limitless Python SDK README (github.com/limitless-labs-group/limitless-sdk)
+════════════════════════════════════════════════════════════════════════
+CONFIRMED from official docs (docs.limitless.exchange/developers):
 
-Auth:
-  Header: X-API-Key: <your key>    ← all requests (public + authed)
-  EIP-712 signature in order body  ← signs the order struct
+Market fetch:
+  GET /markets/{slug}   → NO auth needed (public endpoint)
+  Returns: market.tokens.yes, market.tokens.no, market.venue.exchange
+  The slug for 15-min markets must be discovered via GET /markets
+  (active markets list) — NOT assumed as "btc-usdt-15-min"
 
-Market data:
-  GET /markets/:slug → returns:
-    market.tokens.yes  → YES token ID (string)
-    market.tokens.no   → NO  token ID (string)
-    market.venue.exchange → verifyingContract for EIP-712
+Order placement:
+  POST /orders          → X-API-Key header required
+  Body: { order: {..., signature}, orderType: "GTC", marketSlug: "..." }
+  The order struct is EIP-712 signed with venue.exchange as verifyingContract
 
-Order placement (POST /orders):
-  GTC order uses: price + size (NOT makerAmount/takerAmount)
-    price = per-share price in USDC (0.01 – 0.99)
-    size  = number of shares to buy
-  Payload: { order: {..., signature}, orderType: "GTC", marketSlug: "..." }
-  No ownerId in the payload.
+Env vars required:
+  LIMITLESS_API_KEY     → from limitless.exchange Profile → API Keys
+  LIMITLESS_PRIVATE_KEY → wallet private key for EIP-712 signing
 
-IMPORTANT — USDC approval required before first live order:
-  Your wallet must approve USDC spend for venue.exchange on Base mainnet.
-  Run /api/check-approval after deploying to verify.
-  One-time setup — does NOT need repeating.
+Direction:
+  Uses ML signal directly — no reversal.
+  ML signal UP   → buy YES token (tokens.yes) = betting price goes UP
+  ML signal DOWN → buy NO  token (tokens.no)  = betting price goes DOWN
 """
 import os
 import time
@@ -40,42 +38,141 @@ API_BASE  = "https://api.limitless.exchange"
 CHAIN_ID  = 8453
 ZERO_ADDR = "0x0000000000000000000000000000000000000000"
 
-# Base mainnet USDC contract
-USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-
-SYMBOL_TO_SLUG = {
-    "BTC-USDT":  "btc-usdt-15-min",
-    "ETH-USDT":  "eth-usdt-15-min",
-    "SOL-USDT":  "sol-usdt-15-min",
-    "XRP-USDT":  "xrp-usdt-15-min",
-    "BNB-USDT":  "bnb-usdt-15-min",
-    "DOGE-USDT": "doge-usdt-15-min",
-}
-
+# Cache: symbol → resolved slug, market data
+_slug_cache:   dict = {}
 _market_cache: dict = {}
 
 
-# ── Auth header ───────────────────────────────────────────────────────────────
+# ── Auth ──────────────────────────────────────────────────────────────────────
 
-def _headers() -> dict:
-    """X-API-Key — confirmed correct per official SDK and README."""
+def _auth_headers() -> dict:
+    """X-API-Key header for authenticated endpoints (POST /orders)."""
     key = os.environ.get("LIMITLESS_API_KEY", "")
     if not key:
-        raise ValueError(
-            "LIMITLESS_API_KEY not set.\n"
-            "Get it from limitless.exchange → Profile → API Keys.\n"
-            "Set LIMITLESS_API_KEY in Render environment variables."
-        )
-    return {
-        "X-API-Key":    key,
-        "Content-Type": "application/json",
-    }
+        raise ValueError("LIMITLESS_API_KEY not set in environment variables")
+    return {"X-API-Key": key, "Content-Type": "application/json"}
+
+
+# ── Market discovery (NO auth required) ──────────────────────────────────────
+
+def discover_slug(symbol: str) -> str | None:
+    """
+    Search all active markets for the current 15-min market for this symbol.
+    Markets rotate every 15 minutes — we must find the CURRENT active one.
+    Returns the slug of the currently active market.
+    """
+    if symbol in _slug_cache:
+        cached = _slug_cache[symbol]
+        logger.debug(f"[{symbol}] Using cached slug: {cached}")
+
+    token = symbol.replace("-USDT", "").lower()  # e.g. "btc", "eth"
+    page = 1
+
+    while page <= 5:  # search up to 5 pages
+        try:
+            resp = requests.get(
+                f"{API_BASE}/markets",
+                params={"page": page, "limit": 50, "sortBy": "createdAt"},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            body    = resp.json()
+            markets = body.get("data", body) if isinstance(body, dict) else body
+
+            if not markets:
+                break
+
+            for m in markets:
+                slug  = m.get("slug", "")
+                title = m.get("title", "").lower()
+                # Match: contains token name AND "15" (for 15-min) AND is active
+                if (token in slug.lower() or token in title) and "15" in (slug + title):
+                    logger.info(f"[{symbol}] Found market: slug={slug} title={m.get('title')}")
+                    _slug_cache[symbol] = slug
+                    return slug
+
+            page += 1
+        except Exception as e:
+            logger.error(f"[{symbol}] Market discovery page {page}: {e}")
+            break
+
+    logger.warning(f"[{symbol}] No active 15-min market found")
+    return None
+
+
+def fetch_market(slug: str) -> dict | None:
+    """
+    GET /markets/{slug} — public, no auth.
+    Returns full market object with tokens.yes, tokens.no, venue.exchange.
+    """
+    if slug in _market_cache:
+        return _market_cache[slug]
+    try:
+        resp = requests.get(f"{API_BASE}/markets/{slug}", timeout=10)
+        logger.info(f"GET /markets/{slug} → {resp.status_code}")
+        if resp.status_code == 404:
+            logger.warning(f"Market not found: {slug}")
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        logger.info(f"Market {slug} fields: {list(data.keys())}")
+        _market_cache[slug] = data
+        return data
+    except Exception as e:
+        logger.error(f"fetch_market({slug}): {e}")
+        return None
+
+
+def get_token_id(market: dict, direction: str) -> str | None:
+    """
+    Extract token ID from market data.
+    direction UP   → tokens.yes (YES token)
+    direction DOWN → tokens.no  (NO token)
+    Falls back to positionIds[] if tokens dict missing.
+    """
+    tokens = market.get("tokens") or {}
+    if isinstance(tokens, dict):
+        if direction == "UP":
+            tid = tokens.get("yes") or tokens.get("YES")
+        else:
+            tid = tokens.get("no") or tokens.get("NO")
+        if tid:
+            return str(tid)
+
+    # Fallback: positionIds[0]=YES, positionIds[1]=NO
+    pos_ids = market.get("positionIds") or market.get("position_ids") or []
+    if pos_ids:
+        if direction == "UP":
+            return str(pos_ids[0])
+        elif len(pos_ids) > 1:
+            return str(pos_ids[1])
+
+    logger.error(f"Cannot extract token ID for {direction}. "
+                 f"market.tokens={tokens} positionIds={pos_ids}")
+    return None
+
+
+def get_exchange_addr(market: dict) -> str | None:
+    """Extract venue.exchange — used as EIP-712 verifyingContract."""
+    venue = market.get("venue") or {}
+    if isinstance(venue, dict):
+        addr = venue.get("exchange") or venue.get("condExchange")
+        if addr:
+            return addr
+    # Some responses have it at top level
+    return market.get("exchange") or market.get("condExchange")
+
+
+# ── Direction (no reversal — uses ML signal directly) ────────────────────────
+
+def _trade_dir(signal_direction: str) -> str:
+    """Returns ML direction unchanged — no reversal."""
+    return signal_direction
 
 
 # ── EIP-712 order signing ─────────────────────────────────────────────────────
 
-def _eip712_sign(order_data: dict, verifying_contract: str) -> str:
-    """Sign the order struct. verifyingContract = market.venue.exchange."""
+def _sign_order(order_data: dict, verifying_contract: str) -> str:
     pk = os.environ.get("LIMITLESS_PRIVATE_KEY", "")
     if not pk:
         raise ValueError("LIMITLESS_PRIVATE_KEY not set")
@@ -129,134 +226,7 @@ def _eip712_sign(order_data: dict, verifying_contract: str) -> str:
     return Account.from_key(pk).sign_message(encoded).signature.hex()
 
 
-# ── Market data ───────────────────────────────────────────────────────────────
-
-def fetch_market(slug: str) -> dict | None:
-    """GET /markets/:slug — returns tokens.yes, tokens.no, venue.exchange."""
-    if slug in _market_cache:
-        return _market_cache[slug]
-    try:
-        resp = requests.get(
-            f"{API_BASE}/markets/{slug}",
-            headers=_headers(),
-            timeout=10,
-        )
-        if resp.status_code == 404:
-            logger.warning(f"Market not found: {slug}")
-            return None
-        resp.raise_for_status()
-        data = resp.json()
-        logger.info(f"Market {slug} keys: {list(data.keys())}")
-        _market_cache[slug] = data
-        return data
-    except Exception as e:
-        logger.error(f"fetch_market({slug}): {e}")
-        return None
-
-
-def resolve_slug(symbol: str) -> str | None:
-    """Search active markets, fall back to static map."""
-    try:
-        resp = requests.get(
-            f"{API_BASE}/markets/active",
-            headers=_headers(),
-            params={"category": "crypto"},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        body    = resp.json()
-        markets = body if isinstance(body, list) else body.get("markets", body.get("data", []))
-        token   = symbol.replace("-USDT", "").lower()
-        for m in markets:
-            slug  = m.get("slug", "")
-            title = m.get("title", "").lower()
-            if "15" in slug and token in slug:
-                return slug
-            if "15" in title and token in title and "min" in title:
-                return m.get("slug")
-    except Exception as e:
-        logger.warning(f"resolve_slug search failed: {e}")
-    return SYMBOL_TO_SLUG.get(symbol)
-
-
-def _extract_token_id(market: dict, direction: str) -> str | None:
-    """
-    Extract YES or NO token ID from market data.
-    SDK uses market.tokens.yes / market.tokens.no
-    Also handles positionIds[] fallback.
-    """
-    tokens = market.get("tokens", {})
-
-    if direction == "UP":
-        # UP → YES token
-        tid = tokens.get("yes") or tokens.get("YES")
-        if not tid and market.get("positionIds"):
-            tid = market["positionIds"][0]
-    else:
-        # DOWN → NO token
-        tid = tokens.get("no") or tokens.get("NO")
-        if not tid and market.get("positionIds"):
-            pid = market["positionIds"]
-            tid = pid[1] if len(pid) > 1 else pid[0]
-
-    return str(tid) if tid else None
-
-
-def _extract_exchange(market: dict) -> str | None:
-    """Extract venue.exchange address (verifyingContract for EIP-712)."""
-    venue = market.get("venue", {})
-    return (
-        venue.get("exchange")
-        or venue.get("condExchange")
-        or market.get("exchange")
-    )
-
-
-# ── USDC approval check ───────────────────────────────────────────────────────
-
-def check_usdc_approval(exchange_addr: str) -> dict:
-    """
-    Check if wallet has approved USDC for exchange contract.
-    Required ONE TIME before any live BUY order can execute.
-    """
-    pk = os.environ.get("LIMITLESS_PRIVATE_KEY", "")
-    if not pk:
-        return {"approved": False, "error": "No private key"}
-    try:
-        w3 = Web3(Web3.HTTPProvider("https://mainnet.base.org"))
-        account = Account.from_key(pk)
-        wallet  = Web3.to_checksum_address(account.address)
-        exch    = Web3.to_checksum_address(exchange_addr)
-
-        # ERC-20 allowance ABI (minimal)
-        abi = [{"inputs":[{"name":"owner","type":"address"},{"name":"spender","type":"address"}],
-                "name":"allowance","outputs":[{"name":"","type":"uint256"}],"type":"function"}]
-
-        usdc     = w3.eth.contract(address=Web3.to_checksum_address(USDC_ADDRESS), abi=abi)
-        allowance= usdc.functions.allowance(wallet, exch).call()
-        approved = allowance > 0
-        return {
-            "approved":  approved,
-            "allowance": str(allowance),
-            "wallet":    wallet,
-            "exchange":  exch,
-            "message":   "OK" if approved else "USDC approval required — run setup_approval()"
-        }
-    except Exception as e:
-        return {"approved": False, "error": str(e)}
-
-
-# ── Live order placement ──────────────────────────────────────────────────────
-
-def _reverse(direction: str) -> str:
-    """
-    Contrarian direction reversal.
-    ML signal UP   → place trade DOWN (buy NO  token = positionIds[1])
-    ML signal DOWN → place trade UP   (buy YES token = positionIds[0])
-    The signal_direction saved in the DB remains the original ML prediction.
-    """
-    return "DOWN" if direction == "UP" else "UP"
-
+# ── Live order ────────────────────────────────────────────────────────────────
 
 def place_live_order(
     symbol: str,
@@ -266,99 +236,112 @@ def place_live_order(
 ) -> dict:
     """
     Place a GTC limit BUY order on Limitless Exchange.
-    Direction is REVERSED from the ML signal (contrarian strategy):
-    signal UP   → buy NO  token (trade DOWN)
-    signal DOWN → buy YES token (trade UP)
-
-    GTC order struct:
-      price = per-share price (capped at $0.50)
-      size  = number of shares = position_size_usd / price
-      makerAmount = USDC to spend = price * size * 1e6
-      takerAmount = shares to receive = size * 1e6
+    Uses ML signal direction directly:
+      ML UP   → buy YES token (tokens.yes) = betting UP
+      ML DOWN → buy NO  token (tokens.no)  = betting DOWN
     """
-    logger.info(f"[{symbol}] LIVE order {signal_direction} ${position_size_usd}")
+    trade_dir = _trade_dir(signal_direction)
+    logger.info(f"[{symbol}] LIVE order: {signal_direction} ${position_size_usd}")
 
-    slug = resolve_slug(symbol)
+    # Step 1: discover current active market slug
+    slug = discover_slug(symbol)
     if not slug:
-        return {"success": False, "error": f"No market slug for {symbol}"}
+        return {"success": False, "error": f"No active 15-min market found for {symbol}"}
 
+    # Step 2: fetch market data (no auth)
+    # Clear cache to get fresh market for current candle
+    _market_cache.pop(slug, None)
     market = fetch_market(slug)
     if not market:
-        return {"success": False, "error": f"Market unavailable: {slug}"}
+        return {"success": False, "error": f"Could not fetch market data for slug={slug}"}
 
+    # Step 3: extract required fields
+    exchange_addr = get_exchange_addr(market)
+    if not exchange_addr:
+        return {
+            "success": False,
+            "error": f"venue.exchange missing. Market keys: {list(market.keys())}",
+        }
+
+    token_id = get_token_id(market, trade_dir)
+    if not token_id:
+        return {
+            "success": False,
+            "error": f"Token ID missing for direction={trade_dir}. tokens={market.get('tokens')}",
+        }
+
+    # Step 4: check API key
     pk = os.environ.get("LIMITLESS_PRIVATE_KEY", "")
     if not pk:
         return {"success": False, "error": "LIMITLESS_PRIVATE_KEY not set"}
-
     try:
-        exchange_addr = _extract_exchange(market)
-        if not exchange_addr:
-            return {"success": False, "error": f"venue.exchange missing. Market keys: {list(market.keys())}"}
+        _auth_headers()  # validates LIMITLESS_API_KEY is set
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
 
-        # Reverse direction: ML UP → buy NO (trade DOWN), ML DOWN → buy YES (trade UP)
-        trade_direction = _reverse(signal_direction)
-        token_id = _extract_token_id(market, trade_direction)
-        if not token_id:
-            return {"success": False, "error": f"Token ID missing. market.tokens: {market.get('tokens')} positionIds: {market.get('positionIds')}"}
-        logger.info(f"[{symbol}] ML signal={signal_direction} → trade={trade_direction} (contrarian)")
+    # Step 5: build order
+    price = min(max_contract_price, 0.50)
+    size  = round(position_size_usd / price, 4)
 
-        # Check USDC approval (non-blocking — just warn)
-        approval = check_usdc_approval(exchange_addr)
-        if not approval.get("approved"):
-            logger.warning(f"[{symbol}] USDC not approved for {exchange_addr}. "
-                           "Visit /api/approval-status. Orders may be rejected.")
+    # makerAmount = USDC to spend (6 decimals)
+    # takerAmount = shares to receive (6 decimals)
+    maker_amount = int(price * size * 1_000_000)
+    taker_amount = int(size * 1_000_000)
 
-        price = min(max_contract_price, 0.50)
-        size  = round(position_size_usd / price, 4)
+    account    = Account.from_key(pk)
+    maker_addr = Web3.to_checksum_address(account.address)
+    salt       = int(time.time() * 1000)
 
-        # Scale to 1e6 (USDC 6 decimals)
-        maker_amount = int(price * size * 1_000_000)
-        taker_amount = int(size * 1_000_000)
+    order_data = {
+        "salt":          salt,
+        "maker":         maker_addr,
+        "signer":        maker_addr,
+        "taker":         ZERO_ADDR,
+        "tokenId":       int(token_id),
+        "makerAmount":   maker_amount,
+        "takerAmount":   taker_amount,
+        "expiration":    0,      # 0 = GTC (no expiry)
+        "nonce":         0,
+        "feeRateBps":    0,
+        "side":          0,      # BUY
+        "signatureType": 0,      # EOA
+    }
 
-        account    = Account.from_key(pk)
-        maker_addr = Web3.to_checksum_address(account.address)
-        salt       = int(time.time() * 1000)
+    # Step 6: EIP-712 sign
+    try:
+        signature = _sign_order(order_data, exchange_addr)
+    except Exception as e:
+        return {"success": False, "error": f"EIP-712 signing failed: {e}"}
 
-        order_data = {
-            "salt":          salt,
-            "maker":         maker_addr,
-            "signer":        maker_addr,
-            "taker":         ZERO_ADDR,
-            "tokenId":       int(token_id),
-            "makerAmount":   maker_amount,
-            "takerAmount":   taker_amount,
-            "expiration":    0,       # GTC = no expiry
-            "nonce":         0,
-            "feeRateBps":    0,
-            "side":          0,       # BUY
-            "signatureType": 0,       # EOA
-        }
+    payload = {
+        "order":      {**order_data, "signature": signature},
+        "orderType":  "GTC",
+        "marketSlug": slug,
+    }
 
-        signature = _eip712_sign(order_data, exchange_addr)
-
-        payload = {
-            "order":      {**order_data, "signature": signature},
-            "orderType":  "GTC",
-            "marketSlug": slug,
-        }
-
+    # Step 7: POST /orders with X-API-Key
+    try:
         resp = requests.post(
             f"{API_BASE}/orders",
-            headers=_headers(),
+            headers=_auth_headers(),
             json=payload,
             timeout=15,
         )
-        logger.info(f"[{symbol}] POST /orders {resp.status_code}: {resp.text[:500]}")
+        logger.info(f"[{symbol}] POST /orders → {resp.status_code}: {resp.text[:500]}")
         resp.raise_for_status()
 
         result   = resp.json()
-        order_id = (result.get("order", {}).get("id")
-                    or result.get("id")
-                    or result.get("orderId")
-                    or str(salt))
+        order_id = (
+            result.get("order", {}).get("id")
+            or result.get("id")
+            or result.get("orderId")
+            or str(salt)
+        )
 
-        logger.info(f"[{symbol}] ORDER ✓ {signal_direction} {size} shares "
-                    f"@ ${price} id={order_id}")
+        logger.info(
+            f"[{symbol}] ORDER ✓ signal={signal_direction} trade={trade_dir} "
+            f"{size} shares @ ${price} id={order_id} slug={slug}"
+        )
         return {
             "success":            True,
             "order_id":           str(order_id),
@@ -367,15 +350,15 @@ def place_live_order(
             "total_spent":        position_size_usd,
             "slug":               slug,
             "signal_direction":   signal_direction,
-            "usdc_approved":      approval.get("approved"),
+            "trade_direction":    trade_dir,
         }
 
     except requests.HTTPError as e:
         body = e.response.text if e.response else str(e)
-        logger.error(f"[{symbol}] HTTPError: {body}")
+        logger.error(f"[{symbol}] HTTPError placing order: {body}")
         return {"success": False, "error": body}
     except Exception as e:
-        logger.error(f"[{symbol}] Exception: {e}", exc_info=True)
+        logger.error(f"[{symbol}] Exception placing order: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
@@ -387,19 +370,19 @@ def place_shadow_order(
     position_size_usd: float,
     max_contract_price: float = 0.50,
 ) -> dict:
-    trade_direction = _reverse(signal_direction)
-    price = min(max_contract_price, 0.50)
-    size  = round(position_size_usd / price, 4)
-    logger.info(f"[{symbol}] SHADOW signal={signal_direction} trade={trade_direction} {size} shares @ ${price}")
+    trade_dir = _trade_dir(signal_direction)
+    price     = min(max_contract_price, 0.50)
+    size      = round(position_size_usd / price, 4)
+    logger.info(f"[{symbol}] SHADOW signal={signal_direction} trade={trade_dir} "
+                f"{size} shares @ ${price}")
     return {
         "success":            True,
         "order_id":           f"shadow_{int(time.time())}",
         "contracts":          size,
         "price_per_contract": price,
         "total_spent":        position_size_usd,
-        "slug":               SYMBOL_TO_SLUG.get(symbol, ""),
         "signal_direction":   signal_direction,
-        "trade_direction":    trade_direction,
+        "trade_direction":    trade_dir,
         "shadow":             True,
     }
 
@@ -419,6 +402,6 @@ def execute_order(
 
 
 def get_limitless_market_url(symbol: str) -> str:
-    slug = SYMBOL_TO_SLUG.get(symbol, "")
+    slug = _slug_cache.get(symbol, "")
     return (f"https://limitless.exchange/markets/crypto/{slug}"
             if slug else "https://limitless.exchange/markets/crypto/15-min")
