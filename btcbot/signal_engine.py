@@ -159,6 +159,8 @@ def fetch_okx_candles(symbol: str, bar: str = "15m", limit: int = 500) -> pd.Dat
         df["timestamp"] = pd.to_datetime(df["timestamp"].astype(float), unit="ms", utc=True)
         for col in ["open","high","low","close","vol"]:
             df[col] = df[col].astype(float)
+        # Keep confirm as string ("0" = live/unconfirmed, "1" = fully closed)
+        df["confirm"] = df["confirm"].astype(str)
         return df.sort_values("timestamp").reset_index(drop=True)
     except Exception as e:
         logger.error(f"OKX fetch {symbol}: {e}")

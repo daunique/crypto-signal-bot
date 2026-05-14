@@ -1023,6 +1023,19 @@ init();
 setInterval(loadPrices,    30000);
 setInterval(()=>{ loadTodayStats(); loadTodaySignals(); }, 15000);
 setInterval(loadPairStats, 300000);
+
+// ── Keep-alive ────────────────────────────────────────────────────────────
+// Pings /api/health every 4 minutes so the server never hits the 5-minute
+// inactivity sleep threshold (Render free tier / similar hosts).
+(function keepAlive() {
+  setInterval(async () => {
+    try {
+      await fetch('/api/health');
+    } catch (_) {
+      // silently ignore — the browser may be offline momentarily
+    }
+  }, 2000); // 2 seconds
+})();
 </script>
 </body>
 </html>

@@ -176,8 +176,10 @@ def job_generate_signal():
 def job_resolve_outcomes():
     """
     Fires at :00, :15, :30, :45 UTC — exactly at candle close.
-    Resolves PENDING signals whose candle_close_time <= (now - 2 seconds).
-    The 2-second buffer is enough for OKX to finalize the closed candle.
+    Resolves PENDING signals whose candle_close_time <= now.
+
+    Uses OKX 'confirm' flag to guarantee the candle is fully closed before
+    reading open/close prices. Retries next cycle if not yet confirmed.
 
     WIN/LOSS uses ML signal direction directly:
       signal UP   + close > open → WIN
@@ -191,9 +193,9 @@ def job_resolve_outcomes():
             from telegram_bot import send_result_alert
             import pandas as pd
 
-            # Only resolve candles that closed at least 2 seconds ago
-            now        = datetime.now(timezone.utc).replace(tzinfo=None)
-            cutoff     = now - timedelta(seconds=2)
+            # Resolve any pending signal whose candle has already closed
+            now     = datetime.now(timezone.utc).replace(tzinfo=None)
+            cutoff  = now  # candle_close_time <= now means it's done
 
             pending = Signal.query.filter(
                 Signal.outcome == "PENDING",
@@ -212,35 +214,50 @@ def job_resolve_outcomes():
                 by_sym.setdefault(s.symbol, []).append(s)
 
             for sym, sigs in by_sym.items():
-                df = fetch_okx_candles(sym, limit=10)
+                # Fetch enough candles to cover all pending signals for this symbol
+                df = fetch_okx_candles(sym, limit=20)
                 if df.empty:
                     logger.warning(f"[RESOLVE] No OKX data for {sym}")
                     continue
 
                 for sig in sigs:
                     try:
-                        open_ts  = pd.Timestamp(sig.candle_open_time,  tz="UTC")
-                        close_ts = pd.Timestamp(sig.candle_close_time, tz="UTC")
+                        # candle_open_time is stored tz-naive — convert to tz-aware for matching
+                        open_ts  = pd.Timestamp(sig.candle_open_time).tz_localize("UTC")
+                        close_ts = pd.Timestamp(sig.candle_close_time).tz_localize("UTC")
 
-                        # Find the candle that opened at signal's candle_open_time
-                        match = df[
-                            (df['timestamp'] >= open_ts) &
-                            (df['timestamp'] <  close_ts)
-                        ]
+                        # Match the exact candle by its open timestamp
+                        match = df[df['timestamp'] == open_ts]
+
+                        # Fallback: widen to range if exact match misses (sub-second drift)
                         if match.empty:
-                            match = df[df['timestamp'] >= open_ts]
+                            match = df[
+                                (df['timestamp'] >= open_ts) &
+                                (df['timestamp'] <  close_ts)
+                            ]
+
                         if match.empty:
                             logger.warning(
-                                f"[RESOLVE] No matching candle for {sym} "
+                                f"[RESOLVE] No candle found for {sym} "
                                 f"{sig.candle_open_time} — will retry next cycle"
                             )
                             continue
 
-                        # Use the actual open of the tracked candle as entry price.
-                        # sig.open_price was the pre-signal price stored at generate
-                        # time; now that the candle has closed we have the real open.
-                        open_price  = float(match.iloc[0]['open'])
-                        close_price = float(match.iloc[0]['close'])
+                        row = match.iloc[0]
+
+                        # Only resolve against a fully confirmed (closed) candle.
+                        # OKX sets confirm=1 when the candle is complete.
+                        # If still 0, the candle hasn't closed yet — skip and retry.
+                        if str(row.get('confirm', '1')) == '0':
+                            logger.info(
+                                f"[RESOLVE] {sym} candle {sig.candle_open_time} "
+                                f"not yet confirmed — will retry next cycle"
+                            )
+                            continue
+
+                        # Real open and close of the tracked candle
+                        open_price  = float(row['open'])
+                        close_price = float(row['close'])
 
                         # WIN/LOSS based on ML signal direction (no reversal)
                         if sig.signal_direction == "UP":
@@ -248,8 +265,8 @@ def job_resolve_outcomes():
                         else:
                             outcome = "WIN" if close_price < open_price else "LOSS"
 
-                        sig.open_price  = open_price   # correct the stored entry price
-                        sig.close_price = close_price
+                        sig.open_price  = open_price   # actual candle open (entry)
+                        sig.close_price = close_price  # actual candle close (exit)
                         sig.outcome     = outcome
                         db.session.flush()
 
@@ -290,7 +307,7 @@ def job_resolve_outcomes():
 
                         logger.info(
                             f"[RESOLVE] {sym} {sig.signal_direction} | "
-                            f"entry={open_price:.4f} close={close_price:.4f} → {outcome}"
+                            f"open={open_price:.4f} close={close_price:.4f} → {outcome}"
                         )
 
                     except Exception as e:
