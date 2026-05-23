@@ -711,12 +711,21 @@ def fetch_market(slug: str) -> dict | None:
             if not pos_ids and yes_token:
                 pos_ids = [yes_token] + ([no_token] if no_token else [])
 
+            # Extract conditionId from base market — required for POST /portfolio/redeem
+            condition_id = (
+                market.get("conditionId")
+                or market.get("condition_id")
+                or market.get("ctfConditionId")
+                or market.get("condId")
+            )
+
             market.update({
                 "slug":              slug,
                 "exchange":          exchange_addr,
                 "venue":             {"exchange": exchange_addr},
                 "tokens":            {"yes": yes_token, "no": no_token},
                 "positionIds":       pos_ids,
+                "conditionId":       condition_id,
                 "_raw_orderbook":    ob,
                 "_orderbook_merged": True,
             })
@@ -1103,6 +1112,7 @@ def place_live_order(
             "price_per_contract": price,
             "total_spent":        position_size_usd,
             "slug":               slug,
+            "condition_id":       market.get("conditionId") or market.get("condition_id") or market.get("condId"),
             "signal_direction":   signal_direction,
             "trade_direction":    signal_direction,
             "maker":              maker_addr,
@@ -1208,59 +1218,91 @@ def get_limitless_market_url(symbol: str) -> str:
 # AUTO-CLAIM WINNINGS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def claim_winnings(market_slug: str, signal_direction: str, symbol: str) -> dict:
+def _get_condition_id_from_positions(market_slug: str, symbol: str) -> str | None:
     """
-    Redeem winning positions on Limitless after a WIN is confirmed.
-
-    Limitless prediction markets settle automatically on-chain, but winnings
-    must be explicitly redeemed. This calls POST /redeem with the winning
-    token ID for the resolved market.
-
-    Flow:
-      1. Fetch the resolved market by slug to get the winning token ID
-      2. POST /redeem with the token ID and maker wallet address
-      3. Return success/failure dict with redemption details
-
-    Args:
-        market_slug:       The slug of the market the order was placed on
-                           (e.g. "sol-up-or-down-15-min-1778957111942")
-        signal_direction:  "UP" or "DOWN" — determines which token won
-        symbol:            e.g. "SOL-USDT" — for logging only
-
-    Returns:
-        dict with keys: success, redeemed_amount, tx_hash, error
+    Fallback: fetch GET /portfolio/positions and find the conditionId
+    for a resolved market matching market_slug.
+    Used when conditionId was not stored at order time.
     """
     try:
-        # ── 1. Fetch market to get token IDs ──────────────────────────────────
-        market = fetch_market(market_slug)
-        if not market:
-            return {"success": False, "error": f"Could not fetch market {market_slug}"}
+        path    = "/portfolio/positions"
+        headers = _build_hmac_headers("GET", path)
+        resp    = requests.get(f"{API_BASE}{path}", headers=headers, timeout=10)
+        if not resp.ok:
+            logger.warning("[%s] GET /portfolio/positions → %d", symbol, resp.status_code)
+            return None
+        data  = resp.json() if resp.text else {}
+        clobs = data.get("clob") or []
+        for pos in clobs:
+            mkt = pos.get("market") or {}
+            slug = mkt.get("slug") or ""
+            if market_slug and market_slug in slug:
+                cid = (mkt.get("condition_id")
+                       or mkt.get("conditionId")
+                       or mkt.get("condId"))
+                if cid:
+                    logger.info("[%s] conditionId from portfolio/positions: %s", symbol, cid)
+                    return cid
+        logger.warning("[%s] slug %s not found in portfolio/positions", symbol, market_slug)
+        return None
+    except Exception as e:
+        logger.error("[%s] _get_condition_id_from_positions error: %s", symbol, e)
+        return None
 
-        tokens    = market.get("tokens") or {}
-        yes_token = tokens.get("yes")
-        no_token  = tokens.get("no")
 
-        # Winning token: UP wins YES token, DOWN wins NO token
-        winning_token = yes_token if signal_direction == "UP" else no_token
+def claim_winnings(market_slug: str, signal_direction: str, symbol: str, cond_id: str | None = None) -> dict:
+    """
+    Redeem winning conditional-token positions via POST /portfolio/redeem.
 
-        if not winning_token:
+    Per Limitless docs: POST /portfolio/redeem with conditionId (bytes32 hex).
+
+    conditionId resolution order:
+      1. Pre-stored cond_id passed in (fastest — saved at order time)
+      2. Fetch GET /markets/{slug} and read condition_id field
+      3. Fetch GET /portfolio/positions and match by slug (fallback)
+    """
+    try:
+        # ── 1. Resolve conditionId ────────────────────────────────────────────
+        condition_id = cond_id
+
+        if not condition_id and market_slug:
+            # Try market endpoint first
+            _market_cache.pop(market_slug, None)
+            market = fetch_market(market_slug)
+            if market:
+                condition_id = (
+                    market.get("conditionId")
+                    or market.get("condition_id")
+                    or market.get("ctfConditionId")
+                    or market.get("condId")
+                )
+
+        if not condition_id and market_slug:
+            # Fallback: portfolio positions endpoint
+            logger.info("[%s] conditionId not in market — trying portfolio/positions", symbol)
+            condition_id = _get_condition_id_from_positions(market_slug, symbol)
+
+        if not condition_id:
+            logger.error(
+                "[%s] conditionId could not be resolved for slug=%s. "
+                "Cannot redeem — check market response fields.",
+                symbol, market_slug
+            )
             return {
                 "success": False,
-                "error":   f"No winning token ID found for {signal_direction} in {market_slug}",
+                "error":   f"conditionId not found for {market_slug}",
             }
 
-        maker = get_maker_address()
-        if not maker:
-            return {"success": False, "error": "No maker wallet configured"}
-
-        # ── 2. POST /redeem ───────────────────────────────────────────────────
-        path     = "/redeem"
-        payload  = {
-            "tokenId": str(winning_token),
-            "account": maker,
-        }
+        # ── 2. POST /portfolio/redeem ─────────────────────────────────────────
+        path     = "/portfolio/redeem"
+        payload  = {"conditionId": str(condition_id)}
         body_str = json.dumps(payload, separators=(",", ":"))
         headers  = _build_hmac_headers("POST", path, body_str)
+
+        logger.info(
+            "[%s] POST /portfolio/redeem slug=%s conditionId=%s",
+            symbol, market_slug, condition_id
+        )
 
         resp = requests.post(
             f"{API_BASE}{path}",
@@ -1269,21 +1311,24 @@ def claim_winnings(market_slug: str, signal_direction: str, symbol: str) -> dict
             timeout=15,
         )
 
-        logger.info("[%s] POST /redeem → %d: %s", symbol, resp.status_code, resp.text[:400])
+        logger.info(
+            "[%s] POST /portfolio/redeem → %d: %s",
+            symbol, resp.status_code, resp.text[:400]
+        )
 
         if resp.ok:
-            result = resp.json() if resp.text else {}
+            result   = resp.json() if resp.text else {}
             redeemed = result.get("amount") or result.get("redeemed") or result.get("value")
             tx_hash  = result.get("txHash") or result.get("tx_hash") or result.get("transactionHash")
             logger.info(
-                "[%s] CLAIM ✓ slug=%s dir=%s token=%s redeemed=%s tx=%s",
-                symbol, market_slug, signal_direction, winning_token, redeemed, tx_hash,
+                "[%s] CLAIM ✓ slug=%s conditionId=%s redeemed=%s tx=%s",
+                symbol, market_slug, condition_id, redeemed, tx_hash,
             )
             return {
                 "success":         True,
                 "redeemed_amount": redeemed,
                 "tx_hash":         tx_hash,
-                "token_id":        winning_token,
+                "condition_id":    condition_id,
                 "raw":             result,
             }
         else:
@@ -1291,14 +1336,95 @@ def claim_winnings(market_slug: str, signal_direction: str, symbol: str) -> dict
                 err = resp.json()
             except Exception:
                 err = resp.text
-            logger.error("[%s] CLAIM FAILED %d: %s", symbol, resp.status_code, err)
+            logger.error(
+                "[%s] CLAIM FAILED %d: %s | conditionId=%s",
+                symbol, resp.status_code, err, condition_id
+            )
             return {
-                "success":     False,
-                "http_status": resp.status_code,
-                "error":       f"HTTP {resp.status_code}",
+                "success":      False,
+                "http_status":  resp.status_code,
+                "error":        f"HTTP {resp.status_code}",
                 "api_response": err,
             }
 
     except Exception as e:
         logger.error("[%s] claim_winnings exception: %s", symbol, e)
         return {"success": False, "error": str(e)}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ORDER FILL VERIFICATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def check_order_filled(market_slug: str, order_id: str) -> dict:
+    """
+    Check whether a specific order was actually filled (MATCHED) on Limitless.
+
+    Calls GET /markets/{slug}/user-orders?statuses=MATCHED and looks for
+    the order_id in the results.
+
+    This is used by the martingale system to verify a WIN signal actually
+    resulted in an executed position — limit orders may expire unfilled
+    even when the price moved in the right direction.
+
+    Returns:
+        dict with keys:
+          filled  (bool)   — True if order found with MATCHED status
+          status  (str)    — "MATCHED", "LIVE", "NOT_FOUND", or "ERROR"
+          error   (str)    — error message if status == "ERROR"
+    """
+    if not market_slug or not order_id:
+        return {"filled": False, "status": "ERROR", "error": "missing slug or order_id"}
+
+    # Shadow orders (id starts with "shadow_") are never on-chain
+    if str(order_id).startswith("shadow_"):
+        return {"filled": False, "status": "SHADOW", "error": "shadow order — not on-chain"}
+
+    try:
+        path    = f"/markets/{market_slug}/user-orders"
+        params  = "?statuses=MATCHED&statuses=LIVE&limit=100"
+        headers = _build_hmac_headers("GET", path)
+
+        resp = requests.get(
+            f"{API_BASE}{path}{params}",
+            headers=headers,
+            timeout=10,
+        )
+
+        logger.info(
+            "[ORDER-CHECK] GET %s%s → %d",
+            path, params, resp.status_code
+        )
+
+        if not resp.ok:
+            return {
+                "filled": False,
+                "status": "ERROR",
+                "error":  f"HTTP {resp.status_code}: {resp.text[:200]}",
+            }
+
+        data   = resp.json() if resp.text else {}
+        orders = data.get("orders") or []
+
+        for order in orders:
+            oid = str(order.get("id", ""))
+            if oid == str(order_id):
+                status = str(order.get("status", "")).upper()
+                filled = status == "MATCHED"
+                logger.info(
+                    "[ORDER-CHECK] order_id=%s found with status=%s filled=%s",
+                    order_id, status, filled
+                )
+                return {"filled": filled, "status": status, "error": None}
+
+        # Order not in MATCHED or LIVE — likely expired/cancelled unfilled
+        logger.info(
+            "[ORDER-CHECK] order_id=%s NOT FOUND in user-orders "
+            "(expired or unfilled). Total orders returned: %d",
+            order_id, len(orders)
+        )
+        return {"filled": False, "status": "NOT_FOUND", "error": None}
+
+    except Exception as e:
+        logger.error("[ORDER-CHECK] exception for order_id=%s: %s", order_id, e)
+        return {"filled": False, "status": "ERROR", "error": str(e)}
