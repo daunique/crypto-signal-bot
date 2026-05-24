@@ -4,30 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Limitless Oracle — 15m Signal Dashboard</title>
-    <meta name="description" content="15-minute candlestick direction prediction dashboard for Limitless Exchange" />
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>∞</text></svg>" />
     <style>
-      * { margin: 0; padding: 0; box-sizing: border-box; }
-      body { background: #080810; }
-      #root { min-height: 100vh; }
-
-      /* Scrollbar */
-      ::-webkit-scrollbar { width: 6px; }
-      ::-webkit-scrollbar-track { background: #0d0d1a; }
-      ::-webkit-scrollbar-thumb { background: #1a1a2e; border-radius: 3px; }
-
-      /* Pulse animation for scanning indicator */
-      @keyframes pulse {
-        0%   { box-shadow: 0 0 0 0 rgba(68,170,255,0.6); }
-        70%  { box-shadow: 0 0 0 10px rgba(68,170,255,0); }
-        100% { box-shadow: 0 0 0 0 rgba(68,170,255,0); }
-      }
-
-      /* Blink for active signal */
-      @keyframes blink {
-        0%, 100% { opacity: 1; }
-        50%       { opacity: 0.4; }
-      }
+      *{margin:0;padding:0;box-sizing:border-box}
+      body{background:#080810}
+      #root{min-height:100vh}
+      ::-webkit-scrollbar{width:6px}
+      ::-webkit-scrollbar-track{background:#0d0d1a}
+      ::-webkit-scrollbar-thumb{background:#1a1a2e;border-radius:3px}
+      @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(68,170,255,.6)}70%{box-shadow:0 0 0 10px rgba(68,170,255,0)}100%{box-shadow:0 0 0 0 rgba(68,170,255,0)}}
+      @keyframes blink{0%,100%{opacity:1}50%{opacity:.4}}
     </style>
   </head>
   <body>
