@@ -1,1023 +1,629 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-// ══════════════════════════════════════════════════════════════════
-// CONSTANTS & CONFIG
-// ══════════════════════════════════════════════════════════════════
-const PAIRS = {
-  "BTC-USDT": { family: 0, label: "BTC", color: "#F7931A" },
-  "ETH-USDT": { family: 0, label: "ETH", color: "#627EEA" },
-  "SOL-USDT": { family: 1, label: "SOL", color: "#9945FF" },
-  "DOGE-USDT": { family: 1, label: "DOGE", color: "#C2A633" },
-  "XRP-USDT": { family: 2, label: "XRP", color: "#00AAE4" },
-  "BNB-USDT": { family: 2, label: "BNB", color: "#F0B90B" },
+/* ═══════════════════════════════════════════════════════════════
+   GLOBAL STYLES
+═══════════════════════════════════════════════════════════════ */
+const GLOBAL_CSS = `
+  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Barlow+Condensed:wght@300;500;700;800;900&family=Barlow:wght@300;400;500&display=swap');
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#07080a;--bg1:#0c0e11;--bg2:#111317;--bg3:#181b20;
+    --border:#1e2228;--border2:#272c34;
+    --gold:#c9a84c;--gold2:#e8c96a;--gold-dim:#c9a84c28;
+    --green:#3ddc84;--green-dim:#3ddc8420;
+    --red:#ff4757;--red-dim:#ff475720;
+    --blue:#4a9eff;--blue-dim:#4a9eff18;
+    --text:#d4d8e0;--text2:#8892a0;--text3:#4a5260;
+    --mono:'Space Mono',monospace;
+    --display:'Barlow Condensed',sans-serif;
+    --body:'Barlow',sans-serif;
+  }
+  html,body,#root{min-height:100vh;background:var(--bg);color:var(--text);font-family:var(--body);overflow-x:hidden}
+  ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:var(--bg)}::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
+  @keyframes pulse-ring{0%{box-shadow:0 0 0 0 rgba(201,168,76,.8)}100%{box-shadow:0 0 0 12px transparent}}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @keyframes ticker{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+  @keyframes glow{0%,100%{opacity:.5}50%{opacity:1}}
+  .fade-in{animation:fadeUp .35s ease forwards}
+  input[type=range]{-webkit-appearance:none;width:100%;height:2px;background:var(--border2);border-radius:1px;outline:none}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:var(--gold);cursor:pointer;border:2px solid var(--bg);box-shadow:0 0 8px var(--gold)}
+  input[type=password],input[type=text]{background:var(--bg);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:11px;padding:10px 12px;border-radius:4px;width:100%;outline:none;transition:border-color .2s}
+  input[type=password]:focus,input[type=text]:focus{border-color:var(--gold)}
+  button{cursor:pointer;font-family:var(--display)}
+`;
+
+function injectStyles(){
+  if(document.getElementById("os"))return;
+  const s=document.createElement("style");s.id="os";s.textContent=GLOBAL_CSS;
+  document.head.appendChild(s);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PAIR META
+═══════════════════════════════════════════════════════════════ */
+const PAIRS={
+  "BTC-USDT":{family:0,label:"BTC",fcolor:"#c9a84c"},
+  "ETH-USDT":{family:0,label:"ETH",fcolor:"#4a9eff"},
+  "SOL-USDT":{family:1,label:"SOL",fcolor:"#9945FF"},
+  "DOGE-USDT":{family:1,label:"DOGE",fcolor:"#C2A633"},
+  "XRP-USDT":{family:2,label:"XRP",fcolor:"#00AAE4"},
+  "BNB-USDT":{family:2,label:"BNB",fcolor:"#F0B90B"},
 };
+const FAMILY_NAMES=["BTC · ETH","SOL · DOGE","XRP · BNB"];
+const CANDLE_MS=15*60*1000;
 
-const FAMILY_NAMES = ["BTC·ETH", "SOL·DOGE", "XRP·BNB"];
-const CANDLE_MS = 15 * 60 * 1000;
-
-// Market condition tags
-const MARKET_CONDITIONS = [
-  "Trending","Ranging","High Volatility","Low Volatility","Breakout",
-  "Mean Reversion","Momentum","Reversal","Consolidation","Choppy",
-  "Expansion","Compression","Manipulation","Accumulation","Distribution",
-];
-
-// ══════════════════════════════════════════════════════════════════
-// OKX CANDLE FETCHER
-// ══════════════════════════════════════════════════════════════════
-async function fetchOKXCandles(instId, bar = "15m", limit = 50) {
-  try {
-    const url = `https://www.okx.com/api/v5/market/candles?instId=${instId}&bar=${bar}&limit=${limit}`;
-    const res = await fetch(url);
-    const json = await res.json();
-    if (json.code !== "0") return null;
-    // [ts, open, high, low, close, vol, volCcy, volCcyQuote, confirm]
-    return json.data.map(c => ({
-      ts: Number(c[0]),
-      open: parseFloat(c[1]),
-      high: parseFloat(c[2]),
-      low: parseFloat(c[3]),
-      close: parseFloat(c[4]),
-      vol: parseFloat(c[5]),
-      confirm: c[8] === "1",
-    })).reverse();
-  } catch {
-    return null;
-  }
+function msUntilNext(now=Date.now()){
+  return (Math.floor(now/CANDLE_MS)*CANDLE_MS+CANDLE_MS)-now;
+}
+function fmtPrice(n,pair){
+  if(n==null)return"—";
+  return(pair?.includes("BTC")||pair?.includes("ETH"))?Number(n).toFixed(2):Number(n).toFixed(4);
+}
+function fmtT(ts){
+  const d=new Date(ts);
+  return`${d.getHours().toString().padStart(2,"0")}:${d.getMinutes().toString().padStart(2,"0")}`;
 }
 
-async function fetchOKXTicker(instId) {
-  try {
-    const url = `https://www.okx.com/api/v5/market/ticker?instId=${instId}`;
-    const res = await fetch(url);
-    const json = await res.json();
-    if (json.code !== "0" || !json.data?.[0]) return null;
-    return {
-      last: parseFloat(json.data[0].last),
-      open24h: parseFloat(json.data[0].open24h),
-      high24h: parseFloat(json.data[0].high24h),
-      low24h: parseFloat(json.data[0].low24h),
-      vol24h: parseFloat(json.data[0].vol24h),
-    };
-  } catch {
-    return null;
-  }
+/* ═══════════════════════════════════════════════════════════════
+   KEEP-ALIVE
+═══════════════════════════════════════════════════════════════ */
+function useKeepAlive(){
+  useEffect(()=>{
+    const id=setInterval(()=>fetch("/api/ping").catch(()=>{}),2000);
+    return()=>clearInterval(id);
+  },[]);
 }
 
-// ══════════════════════════════════════════════════════════════════
-// SIGNAL ENGINE — 50+ confluence strategies
-// ══════════════════════════════════════════════════════════════════
-function computeSignal(candles) {
-  if (!candles || candles.length < 20) return null;
-
-  const closed = candles.filter(c => c.confirm);
-  if (closed.length < 15) return null;
-
-  const c = closed;
-  const n = c.length;
-  const closes = c.map(x => x.close);
-  const highs = c.map(x => x.high);
-  const lows = c.map(x => x.low);
-  const opens = c.map(x => x.open);
-  const vols = c.map(x => x.vol);
-  const last = closes[n - 1];
-
-  // ── UTILS ──────────────────────────────────────────────────────
-  const avg = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
-  const ema = (arr, period) => {
-    const k = 2 / (period + 1);
-    let e = arr[0];
-    for (let i = 1; i < arr.length; i++) e = arr[i] * k + e * (1 - k);
-    return e;
-  };
-  const sma = (arr, period) => avg(arr.slice(-period));
-  const stddev = arr => {
-    const m = avg(arr);
-    return Math.sqrt(avg(arr.map(x => (x - m) ** 2)));
-  };
-
-  const scores = [];
-  const tags = [];
-
-  // ── 1. TREND FOLLOWING ──────────────────────────────────────────
-  const ema5 = ema(closes.slice(-10), 5);
-  const ema10 = ema(closes.slice(-14), 10);
-  const ema20 = ema(closes.slice(-24), 20);
-  if (ema5 > ema10 && ema10 > ema20) { scores.push(1); tags.push("EMA Bullish Stack"); }
-  else if (ema5 < ema10 && ema10 < ema20) { scores.push(-1); tags.push("EMA Bearish Stack"); }
-  else scores.push(0);
-
-  // ── 2. RSI (14) ─────────────────────────────────────────────────
-  let gains = 0, losses = 0;
-  for (let i = n - 14; i < n; i++) {
-    const d = closes[i] - closes[i - 1];
-    if (d > 0) gains += d; else losses -= d;
-  }
-  const rsi = 100 - 100 / (1 + (gains / 14) / ((losses / 14) || 0.001));
-  if (rsi > 55 && rsi < 75) { scores.push(1); tags.push("RSI Bullish Zone"); }
-  else if (rsi < 45 && rsi > 25) { scores.push(-1); tags.push("RSI Bearish Zone"); }
-  else if (rsi >= 75) { scores.push(-0.5); tags.push("RSI Overbought"); }
-  else if (rsi <= 25) { scores.push(0.5); tags.push("RSI Oversold"); }
-  else scores.push(0);
-
-  // ── 3. MACD ─────────────────────────────────────────────────────
-  const ema12 = ema(closes.slice(-16), 12);
-  const ema26 = ema(closes.slice(-30), 26);
-  const macdLine = ema12 - ema26;
-  const prevEma12 = ema(closes.slice(-17, -1), 12);
-  const prevEma26 = ema(closes.slice(-31, -1), 26);
-  const prevMacd = prevEma12 - prevEma26;
-  if (macdLine > 0 && macdLine > prevMacd) { scores.push(1); tags.push("MACD Bullish"); }
-  else if (macdLine < 0 && macdLine < prevMacd) { scores.push(-1); tags.push("MACD Bearish"); }
-  else scores.push(0);
-
-  // ── 4. BOLLINGER BANDS ──────────────────────────────────────────
-  const bbMid = sma(closes, 20);
-  const bbStd = stddev(closes.slice(-20));
-  const bbUpper = bbMid + 2 * bbStd;
-  const bbLower = bbMid - 2 * bbStd;
-  const bbWidth = (bbUpper - bbLower) / bbMid;
-  if (last > bbMid && last < bbUpper * 0.98) { scores.push(0.7); tags.push("BB Mid-Upper"); }
-  else if (last < bbMid && last > bbLower * 1.02) { scores.push(-0.7); tags.push("BB Mid-Lower"); }
-  else if (last <= bbLower) { scores.push(1); tags.push("BB Bounce Lower"); }
-  else if (last >= bbUpper) { scores.push(-1); tags.push("BB Bounce Upper"); }
-  else scores.push(0);
-
-  // ── 5. VOLUME ANALYSIS ──────────────────────────────────────────
-  const avgVol = avg(vols.slice(-10));
-  const lastVol = vols[n - 1];
-  const volRatio = lastVol / avgVol;
-  const priceDir = closes[n - 1] > closes[n - 2] ? 1 : -1;
-  if (volRatio > 1.5) { scores.push(priceDir * 1); tags.push("Volume Surge"); }
-  else if (volRatio < 0.5) scores.push(0);
-  else scores.push(priceDir * 0.3);
-
-  // ── 6. CANDLESTICK PATTERNS ─────────────────────────────────────
-  const lastC = c[n - 1], prevC = c[n - 2], prev2C = c[n - 3];
-  const body = Math.abs(lastC.close - lastC.open);
-  const range = lastC.high - lastC.low;
-  const upperWick = lastC.high - Math.max(lastC.open, lastC.close);
-  const lowerWick = Math.min(lastC.open, lastC.close) - lastC.low;
-
-  // Doji
-  if (body / range < 0.1) { scores.push(0); tags.push("Doji"); }
-  // Hammer
-  else if (lowerWick > body * 2 && upperWick < body * 0.5 && lastC.close > lastC.open) {
-    scores.push(1); tags.push("Hammer");
-  }
-  // Shooting star
-  else if (upperWick > body * 2 && lowerWick < body * 0.5 && lastC.close < lastC.open) {
-    scores.push(-1); tags.push("Shooting Star");
-  }
-  // Engulfing
-  else if (lastC.close > lastC.open && prevC.close < prevC.open &&
-           lastC.close > prevC.open && lastC.open < prevC.close) {
-    scores.push(1); tags.push("Bullish Engulf");
-  } else if (lastC.close < lastC.open && prevC.close > prevC.open &&
-             lastC.close < prevC.open && lastC.open > prevC.close) {
-    scores.push(-1); tags.push("Bearish Engulf");
-  } else scores.push(0);
-
-  // ── 7. SUPPORT / RESISTANCE ──────────────────────────────────────
-  const recent20H = Math.max(...highs.slice(-20));
-  const recent20L = Math.min(...lows.slice(-20));
-  const midpoint = (recent20H + recent20L) / 2;
-  if (last > midpoint && last < recent20H * 0.995) { scores.push(0.5); }
-  else if (last < midpoint && last > recent20L * 1.005) { scores.push(-0.5); }
-  else scores.push(0);
-
-  // ── 8. MOMENTUM OSCILLATOR (ROC) ─────────────────────────────────
-  const roc5 = (closes[n - 1] - closes[n - 6]) / closes[n - 6] * 100;
-  if (roc5 > 0.3) { scores.push(1); tags.push("ROC Bullish"); }
-  else if (roc5 < -0.3) { scores.push(-1); tags.push("ROC Bearish"); }
-  else scores.push(0);
-
-  // ── 9. STOCHASTIC ────────────────────────────────────────────────
-  const k14H = Math.max(...highs.slice(-14));
-  const k14L = Math.min(...lows.slice(-14));
-  const stochK = (last - k14L) / (k14H - k14L) * 100;
-  if (stochK > 80) { scores.push(-0.8); tags.push("Stoch OB"); }
-  else if (stochK < 20) { scores.push(0.8); tags.push("Stoch OS"); }
-  else if (stochK > 50) { scores.push(0.4); }
-  else { scores.push(-0.4); }
-
-  // ── 10. ATR VOLATILITY ───────────────────────────────────────────
-  const atrs = [];
-  for (let i = n - 14; i < n; i++) {
-    atrs.push(Math.max(
-      highs[i] - lows[i],
-      Math.abs(highs[i] - closes[i - 1]),
-      Math.abs(lows[i] - closes[i - 1])
-    ));
-  }
-  const atr = avg(atrs);
-  const atrPct = (atr / last) * 100;
-
-  // ── 11. PRICE ACTION STRUCTURE ───────────────────────────────────
-  const isHH = highs[n - 1] > highs[n - 2] && highs[n - 2] > highs[n - 3];
-  const isHL = lows[n - 1] > lows[n - 2] && lows[n - 2] > lows[n - 3];
-  const isLH = highs[n - 1] < highs[n - 2] && highs[n - 2] < highs[n - 3];
-  const isLL = lows[n - 1] < lows[n - 2] && lows[n - 2] < lows[n - 3];
-  if (isHH && isHL) { scores.push(1); tags.push("HH+HL Structure"); }
-  else if (isLH && isLL) { scores.push(-1); tags.push("LH+LL Structure"); }
-  else scores.push(0);
-
-  // ── 12. CLOSE POSITION WITHIN CANDLE ─────────────────────────────
-  const closePos = (lastC.close - lastC.low) / (lastC.high - lastC.low);
-  if (closePos > 0.7) { scores.push(0.6); tags.push("Strong Close"); }
-  else if (closePos < 0.3) { scores.push(-0.6); tags.push("Weak Close"); }
-  else scores.push(0);
-
-  // ── 13. CONSECUTIVE CANDLES ───────────────────────────────────────
-  let bullStreak = 0, bearStreak = 0;
-  for (let i = n - 1; i >= n - 5; i--) {
-    if (closes[i] > opens[i]) bullStreak++;
-    else break;
-  }
-  for (let i = n - 1; i >= n - 5; i--) {
-    if (closes[i] < opens[i]) bearStreak++;
-    else break;
-  }
-  if (bullStreak >= 3) { scores.push(-0.5); tags.push("Exhaustion Bull"); }
-  else if (bearStreak >= 3) { scores.push(0.5); tags.push("Exhaustion Bear"); }
-  else scores.push(0);
-
-  // ── 14. SMA CROSS ────────────────────────────────────────────────
-  const sma5 = sma(closes, 5);
-  const sma20v = sma(closes, 20);
-  const prevSma5 = avg(closes.slice(-6, -1));
-  const prevSma20 = avg(closes.slice(-21, -1));
-  if (sma5 > sma20v && prevSma5 <= prevSma20) { scores.push(1.5); tags.push("SMA Cross Up"); }
-  else if (sma5 < sma20v && prevSma5 >= prevSma20) { scores.push(-1.5); tags.push("SMA Cross Down"); }
-  else if (sma5 > sma20v) scores.push(0.5);
-  else scores.push(-0.5);
-
-  // ── 15. VOLUME-WEIGHTED TREND ────────────────────────────────────
-  let vwapNum = 0, vwapDen = 0;
-  for (let i = Math.max(0, n - 10); i < n; i++) {
-    const typ = (highs[i] + lows[i] + closes[i]) / 3;
-    vwapNum += typ * vols[i];
-    vwapDen += vols[i];
-  }
-  const vwap = vwapNum / vwapDen;
-  if (last > vwap * 1.001) { scores.push(0.6); tags.push("Above VWAP"); }
-  else if (last < vwap * 0.999) { scores.push(-0.6); tags.push("Below VWAP"); }
-  else scores.push(0);
-
-  // ── MARKET CONDITION DETECTION ───────────────────────────────────
-  let marketCondition = "Stable Market";
-  const trendStrength = Math.abs(ema5 - ema20) / ema20 * 100;
-  if (bbWidth > 0.04) marketCondition = "High Volatility Market";
-  else if (bbWidth < 0.01) marketCondition = "Compression Phase";
-  else if (trendStrength > 1) marketCondition = ema5 > ema20 ? "Uptrend" : "Downtrend";
-  else if (rsi > 70) marketCondition = "Euphoria Market";
-  else if (rsi < 30) marketCondition = "Capitulation Market";
-  else if (bullStreak >= 4 || bearStreak >= 4) marketCondition = "Momentum Market";
-  else marketCondition = "Ranging Market";
-
-  // ── FINAL SCORE ───────────────────────────────────────────────────
-  const totalScore = scores.reduce((a, b) => a + b, 0);
-  const maxScore = scores.length;
-  const normalizedScore = totalScore / maxScore;
-
-  // Confidence = how decisive the signal is
-  const confidence = Math.min(95, Math.round(Math.abs(normalizedScore) * 100 + 45));
-
-  if (Math.abs(normalizedScore) < 0.12) return null; // no clear signal
-
-  const direction = normalizedScore > 0 ? "UP" : "DOWN";
-
-  return {
-    direction,
-    confidence,
-    score: normalizedScore,
-    tags: tags.slice(0, 5),
-    marketCondition,
-    rsi: Math.round(rsi),
-    atrPct: atrPct.toFixed(3),
-    stochK: Math.round(stochK),
-    vwap: vwap.toFixed(2),
-    ema5: ema5.toFixed(4),
-    ema20: ema20.toFixed(4),
-  };
-}
-
-// ══════════════════════════════════════════════════════════════════
-// CANDLE BOUNDARY HELPERS
-// ══════════════════════════════════════════════════════════════════
-function getCurrentCandleStart(now = Date.now()) {
-  return Math.floor(now / CANDLE_MS) * CANDLE_MS;
-}
-function getNextCandleStart(now = Date.now()) {
-  return getCurrentCandleStart(now) + CANDLE_MS;
-}
-function msUntilNext(now = Date.now()) {
-  return getNextCandleStart(now) - now;
-}
-
-// ══════════════════════════════════════════════════════════════════
-// LIMITLESS ORDER EXECUTOR (frontend bridge)
-// ══════════════════════════════════════════════════════════════════
-async function callLimitlessAPI(endpoint, method, body, credentials) {
-  try {
-    const res = await fetch(`/api/limitless${endpoint}`, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: body ? JSON.stringify({ ...body, credentials }) : JSON.stringify({ credentials }),
-    });
-    return await res.json();
-  } catch (e) {
-    return { success: false, error: e.message };
-  }
-}
-
-// ══════════════════════════════════════════════════════════════════
-// KEEP-ALIVE
-// ══════════════════════════════════════════════════════════════════
-function useKeepAlive() {
-  useEffect(() => {
-    const ping = () => fetch("/api/ping").catch(() => {});
-    ping();
-    const id = setInterval(ping, 2000);
-    return () => clearInterval(id);
-  }, []);
-}
-
-// ══════════════════════════════════════════════════════════════════
-// NOTIFICATION
-// ══════════════════════════════════════════════════════════════════
-function notify(msg, icon = "🔔") {
-  if ("Notification" in window && Notification.permission === "granted") {
-    new Notification(`${icon} ${msg}`);
-  }
-}
-
-// ══════════════════════════════════════════════════════════════════
-// MAIN APP
-// ══════════════════════════════════════════════════════════════════
-export default function App() {
+/* ═══════════════════════════════════════════════════════════════
+   MAIN APP
+═══════════════════════════════════════════════════════════════ */
+export default function App(){
+  injectStyles();
   useKeepAlive();
 
-  // ── STATE ──────────────────────────────────────────────────────
-  const [prices, setPrices] = useState({});
-  const [candles, setCandles] = useState({});
-  const [signals, setSignals] = useState([]); // history
-  const [activeSignal, setActiveSignal] = useState(null);
-  const [pendingSignal, setPendingSignal] = useState(null); // waiting for candle close
-  const [stats, setStats] = useState({ wins: 0, losses: 0, total: 0 });
-  const [tab, setTab] = useState("dashboard"); // dashboard | history | settings
-  const [settings, setSettings] = useState({
-    mode: "shadow", // shadow | live
-    positionSize: 10,
-    maxContractPrice: 0.50,
-    privateKey: "",
-    tokenId: "",
-    tokenSecret: "",
+  // All state comes FROM the server via SSE
+  const [prices,setPrices]=useState({});
+  const [signals,setSignals]=useState([]);
+  const [activeSignal,setActive]=useState(null);
+  const [stats,setStats]=useState({wins:0,losses:0,total:0});
+  const [cooldown,setCooldown]=useState(0);
+  const [lastFamily,setLastFamily]=useState(null);
+  const [connected,setConnected]=useState(false);
+  const [tab,setTab]=useState("dashboard");
+  const [toast,setToast]=useState(null);
+  const [countdown,setCountdown]=useState(0);
+  const [settings,setSettingsLocal]=useState({
+    mode:"shadow",positionSize:10,maxContractPrice:0.50,
+    privateKey:"",tokenId:"",tokenSecret:"",
   });
-  const [lastFamilyIdx, setLastFamilyIdx] = useState(null);
-  const [consecutiveLosses, setConsecutiveLosses] = useState(0);
-  const [cooldownUntilCandle, setCooldownUntilCandle] = useState(0); // candle count
-  const [countdown, setCountdown] = useState(0);
-  const [now, setNow] = useState(Date.now());
-  const [toast, setToast] = useState(null);
 
-  const signalsRef = useRef([]);
-  const statsRef = useRef({ wins: 0, losses: 0, total: 0 });
-  const consecutiveLossesRef = useRef(0);
-  const cooldownRef = useRef(0);
-  const lastFamilyRef = useRef(null);
-  const pendingRef = useRef(null);
-  const settingsRef = useRef(settings);
+  const showToast=useCallback((msg,type="info")=>{
+    setToast({msg,type});setTimeout(()=>setToast(null),4500);
+  },[]);
 
-  useEffect(() => { settingsRef.current = settings; }, [settings]);
+  // Countdown clock
+  useEffect(()=>{
+    const id=setInterval(()=>setCountdown(Math.ceil(msUntilNext()/1000)),500);
+    return()=>clearInterval(id);
+  },[]);
 
-  // Request notification permission
-  useEffect(() => {
-    if ("Notification" in window && Notification.permission === "default") {
-      Notification.requestPermission();
-    }
-  }, []);
-
-  // ── TOAST ──────────────────────────────────────────────────────
-  const showToast = useCallback((msg, type = "info") => {
-    setToast({ msg, type });
-    setTimeout(() => setToast(null), 4000);
-  }, []);
-
-  // ── CLOCK / COUNTDOWN ─────────────────────────────────────────
-  useEffect(() => {
-    const id = setInterval(() => {
-      const n = Date.now();
-      setNow(n);
-      setCountdown(Math.ceil(msUntilNext(n) / 1000));
-    }, 500);
-    return () => clearInterval(id);
-  }, []);
-
-  // ── DATA FETCHING ─────────────────────────────────────────────
-  const fetchAllData = useCallback(async () => {
-    const pairs = Object.keys(PAIRS);
-    const results = await Promise.allSettled(pairs.map(async p => {
-      const [ticker, cands] = await Promise.all([
-        fetchOKXTicker(p),
-        fetchOKXCandles(p, "15m", 50),
-      ]);
-      return { pair: p, ticker, cands };
-    }));
-
-    const newPrices = {};
-    const newCandles = {};
-    for (const r of results) {
-      if (r.status === "fulfilled" && r.value) {
-        const { pair, ticker, cands } = r.value;
-        if (ticker) newPrices[pair] = ticker;
-        if (cands) newCandles[pair] = cands;
-      }
-    }
-    setPrices(newPrices);
-    setCandles(newCandles);
-  }, []);
-
-  useEffect(() => {
-    fetchAllData();
-    const id = setInterval(fetchAllData, 15000);
-    return () => clearInterval(id);
-  }, [fetchAllData]);
-
-  // ── SIGNAL ENGINE (fires at candle boundaries) ────────────────
-  const evaluateSignals = useCallback(async (currentCandles, currentPrices) => {
-    if (cooldownRef.current > 0) {
-      cooldownRef.current--;
-      setCooldownUntilCandle(cooldownRef.current);
-      showToast(`⏸ Cooldown: ${cooldownRef.current} candle(s) remaining`, "warning");
-      return;
-    }
-
-    // Compute signal for every pair
-    const candidates = [];
-    for (const [pair, cands] of Object.entries(currentCandles)) {
-      const sig = computeSignal(cands);
-      if (!sig) continue;
-      candidates.push({ pair, ...sig });
-    }
-
-    if (candidates.length === 0) return;
-
-    // Filter by family rotation
-    const validFamilies = lastFamilyRef.current !== null
-      ? [0, 1, 2].filter(f => f !== lastFamilyRef.current)
-      : [0, 1, 2];
-
-    const eligible = candidates.filter(c => validFamilies.includes(PAIRS[c.pair].family));
-    if (eligible.length === 0) return;
-
-    // Pick highest confidence
-    eligible.sort((a, b) => b.confidence - a.confidence);
-    const best = eligible[0];
-
-    const candleStart = getCurrentCandleStart();
-    const openPrice = currentPrices[best.pair]?.last;
-    if (!openPrice) return;
-
-    const signal = {
-      id: `sig_${Date.now()}`,
-      pair: best.pair,
-      direction: best.direction,
-      confidence: best.confidence,
-      tags: best.tags,
-      marketCondition: best.marketCondition,
-      rsi: best.rsi,
-      candleStart,
-      openPrice,
-      closePrice: null,
-      result: "PENDING",
-      family: PAIRS[best.pair].family,
-      orderResult: null,
-      timestamp: Date.now(),
-    };
-
-    // Update family tracking
-    lastFamilyRef.current = PAIRS[best.pair].family;
-    setLastFamilyIdx(PAIRS[best.pair].family);
-
-    setPendingSignal(signal);
-    pendingRef.current = signal;
-    setActiveSignal(signal);
-
-    notify(
-      `${PAIRS[best.pair].label} ${best.direction === "UP" ? "▲ LONG" : "▼ SHORT"} @ ${openPrice.toFixed(4)} | Conf: ${best.confidence}%`,
-      best.direction === "UP" ? "🟢" : "🔴"
-    );
-    showToast(`Signal: ${PAIRS[best.pair].label} ${best.direction} (${best.confidence}%)`, best.direction === "UP" ? "success" : "danger");
-
-    // Execute order
-    const s = settingsRef.current;
-    try {
-      const orderResult = await callLimitlessAPI("/execute", "POST", {
-        symbol: best.pair.replace("-USDT", "-USDT"),
-        direction: best.direction,
-        mode: s.mode,
-        positionSize: s.positionSize,
-        maxContractPrice: s.maxContractPrice,
-      }, {
-        privateKey: s.privateKey,
-        tokenId: s.tokenId,
-        tokenSecret: s.tokenSecret,
+  // SSE connection to server engine
+  useEffect(()=>{
+    let es, retryTimer;
+    function connect(){
+      es=new EventSource("/api/stream");
+      es.addEventListener("snapshot",e=>{
+        const d=JSON.parse(e.data);
+        setPrices(d.prices||{});
+        setSignals(d.signals||[]);
+        setActive(d.activeSignal||null);
+        setStats(d.stats||{wins:0,losses:0,total:0});
+        setCooldown(d.cooldownCandles||0);
+        setLastFamily(d.lastFamily);
+        if(d.settings) setSettingsLocal(prev=>({...prev,...d.settings}));
+        setConnected(true);
       });
-      setPendingSignal(prev => prev ? { ...prev, orderResult } : null);
-      pendingRef.current = { ...signal, orderResult };
-    } catch (e) {
-      console.error("Order failed:", e);
+      es.addEventListener("prices",e=>setPrices(JSON.parse(e.data)));
+      es.addEventListener("signal_new",e=>{
+        const sig=JSON.parse(e.data);
+        setActive(sig);
+        showToast(`${PAIRS[sig.pair]?.label} ${sig.direction} · ${sig.confidence}% conf`,sig.direction==="UP"?"success":"danger");
+        if("Notification" in window&&Notification.permission==="granted")
+          new Notification(`${PAIRS[sig.pair]?.label} ${sig.direction==="UP"?"▲":"▼"} ${sig.confidence}%`);
+      });
+      es.addEventListener("signal_order",e=>{
+        const{id,orderResult}=JSON.parse(e.data);
+        setActive(prev=>prev?.id===id?{...prev,orderResult}:prev);
+      });
+      es.addEventListener("signal_settled",e=>{
+        const sig=JSON.parse(e.data);
+        setSignals(prev=>[sig,...prev].slice(0,200));
+        setActive(null);
+        showToast(`${PAIRS[sig.pair]?.label} ${sig.result}`,sig.result==="WIN"?"success":"danger");
+      });
+      es.addEventListener("stats",e=>setStats(JSON.parse(e.data)));
+      es.addEventListener("stats_reset",e=>setStats(JSON.parse(e.data)));
+      es.addEventListener("cooldown",e=>setCooldown(JSON.parse(e.data).remaining||0));
+      es.addEventListener("candle_open",()=>{});
+      es.addEventListener("scan",()=>{});
+      es.onerror=()=>{
+        setConnected(false);es.close();
+        retryTimer=setTimeout(connect,3000);
+      };
     }
-  }, [showToast]);
+    connect();
+    if("Notification" in window&&Notification.permission==="default") Notification.requestPermission();
+    return()=>{es?.close();clearTimeout(retryTimer);};
+  },[showToast]);
 
-  // Settle pending signal at candle close
-  const settlePending = useCallback(async (currentPrices) => {
-    const pending = pendingRef.current;
-    if (!pending) return;
+  const saveSettings=useCallback(async(newSettings)=>{
+    setSettingsLocal(newSettings);
+    try{
+      await fetch("/api/settings",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify(newSettings),
+      });
+    }catch(e){console.error("settings save failed",e);}
+  },[]);
 
-    const closePrice = currentPrices[pending.pair]?.last;
-    if (!closePrice) return;
+  const prog=((CANDLE_MS-msUntilNext())/CANDLE_MS)*100;
+  const wr=stats.total>0?((stats.wins/stats.total)*100).toFixed(1):"—";
+  const todayStart=new Date();todayStart.setHours(0,0,0,0);
+  const todaySignals=signals.filter(s=>s.timestamp>=todayStart.getTime());
 
-    const actualUp = closePrice > pending.openPrice;
-    const won = (pending.direction === "UP" && actualUp) || (pending.direction === "DOWN" && !actualUp);
-
-    const settled = {
-      ...pending,
-      closePrice,
-      result: won ? "WIN" : "LOSS",
-    };
-
-    // Update streak / cooldown
-    if (!won) {
-      consecutiveLossesRef.current++;
-      if (consecutiveLossesRef.current >= 2) {
-        cooldownRef.current = 2;
-        setCooldownUntilCandle(2);
-        showToast("⛔ 2 consecutive losses — 2 candle cooldown activated", "danger");
-        consecutiveLossesRef.current = 0;
-      }
-    } else {
-      consecutiveLossesRef.current = 0;
-    }
-    setConsecutiveLosses(consecutiveLossesRef.current);
-
-    // Update stats
-    const newStats = {
-      wins: statsRef.current.wins + (won ? 1 : 0),
-      losses: statsRef.current.losses + (won ? 0 : 1),
-      total: statsRef.current.total + 1,
-    };
-    statsRef.current = newStats;
-    setStats(newStats);
-
-    // Save to history
-    signalsRef.current = [settled, ...signalsRef.current].slice(0, 200);
-    setSignals([...signalsRef.current]);
-
-    pendingRef.current = null;
-    setPendingSignal(null);
-    setActiveSignal(null);
-
-    notify(
-      `${PAIRS[settled.pair].label} ${settled.result} | Open: ${settled.openPrice.toFixed(4)} → Close: ${closePrice.toFixed(4)}`,
-      won ? "✅" : "❌"
-    );
-    showToast(`${PAIRS[settled.pair].label} ${settled.result}! ${won ? "+" : "-"}`, won ? "success" : "danger");
-  }, [showToast]);
-
-  // Candle boundary detection
-  const lastCandleRef = useRef(getCurrentCandleStart());
-  useEffect(() => {
-    const id = setInterval(() => {
-      const currentStart = getCurrentCandleStart();
-      if (currentStart !== lastCandleRef.current) {
-        lastCandleRef.current = currentStart;
-        // Settle previous pending
-        if (pendingRef.current) {
-          settlePending(prices);
-        }
-        // Then evaluate new signals
-        setTimeout(() => evaluateSignals(candles, prices), 3000); // 3s after boundary for fresh data
-      }
-    }, 1000);
-    return () => clearInterval(id);
-  }, [prices, candles, settlePending, evaluateSignals]);
-
-  // ── DAILY RESET AT 00:00 ─────────────────────────────────────
-  useEffect(() => {
-    const midnight = new Date();
-    midnight.setHours(24, 0, 0, 0);
-    const msToMidnight = midnight.getTime() - Date.now();
-    const id = setTimeout(() => {
-      statsRef.current = { wins: 0, losses: 0, total: 0 };
-      setStats({ wins: 0, losses: 0, total: 0 });
-      showToast("📅 Daily stats reset at 00:00", "info");
-    }, msToMidnight);
-    return () => clearTimeout(id);
-  }, [showToast]);
-
-  // ── DERIVED ───────────────────────────────────────────────────
-  const winRate = stats.total > 0 ? ((stats.wins / stats.total) * 100).toFixed(1) : "—";
-  const candleProgress = ((CANDLE_MS - msUntilNext(now)) / CANDLE_MS) * 100;
-
-  // Group signals by day for history
-  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-  const todaySignals = signals.filter(s => s.timestamp >= todayStart.getTime());
-
-  // ── FORMAT HELPERS ────────────────────────────────────────────
-  const fmt = (n, d = 4) => n != null ? Number(n).toFixed(d) : "—";
-  const fmtTime = ts => {
-    const d = new Date(ts);
-    return `${d.getHours().toString().padStart(2,"0")}:${d.getMinutes().toString().padStart(2,"0")}`;
-  };
-
-  // ── RENDER ────────────────────────────────────────────────────
-  return (
-    <div style={styles.app}>
-      {/* BG */}
-      <div style={styles.bg} />
-      <div style={styles.grid} />
-
-      {/* TOAST */}
-      {toast && (
-        <div style={{ ...styles.toast, background: toast.type === "success" ? "#00ff88" : toast.type === "danger" ? "#ff3b5c" : toast.type === "warning" ? "#f7c948" : "#4af", color: "#000" }}>
-          {toast.msg}
-        </div>
-      )}
-
-      {/* HEADER */}
-      <header style={styles.header}>
-        <div style={styles.logo}>
-          <span style={styles.logoMark}>L∞</span>
-          <span style={styles.logoText}>LIMITLESS ORACLE</span>
-        </div>
-        <div style={styles.headerRight}>
-          <div style={styles.modeBadge} data-mode={settings.mode}>
-            {settings.mode === "live" ? "🟢 LIVE" : "👻 SHADOW"}
-          </div>
-          <nav style={styles.nav}>
-            {["dashboard","history","settings"].map(t => (
-              <button key={t} style={{ ...styles.navBtn, ...(tab === t ? styles.navBtnActive : {}) }} onClick={() => setTab(t)}>
-                {t.charAt(0).toUpperCase() + t.slice(1)}
-              </button>
-            ))}
-          </nav>
-        </div>
-      </header>
-
-      {/* CANDLE PROGRESS BAR */}
-      <div style={styles.progressBar}>
-        <div style={{ ...styles.progressFill, width: `${candleProgress}%` }} />
-        <span style={styles.progressLabel}>Next candle in {countdown}s</span>
-      </div>
-
-      {/* ── DASHBOARD TAB ── */}
-      {tab === "dashboard" && (
-        <main style={styles.main}>
-          {/* Stats Row */}
-          <div style={styles.statsRow}>
-            <StatCard label="WIN RATE" value={`${winRate}%`} color="#00ff88" />
-            <StatCard label="WINS" value={stats.wins} color="#00ff88" />
-            <StatCard label="LOSSES" value={stats.losses} color="#ff3b5c" />
-            <StatCard label="TOTAL TODAY" value={todaySignals.length} color="#4af" />
-            <StatCard label="FAMILY LOCK" value={lastFamilyIdx !== null ? FAMILY_NAMES[lastFamilyIdx] : "—"} color="#f7c948" />
-            <StatCard label="COOLDOWN" value={cooldownUntilCandle > 0 ? `${cooldownUntilCandle}🕐` : "ACTIVE"} color={cooldownUntilCandle > 0 ? "#ff3b5c" : "#00ff88"} />
-          </div>
-
-          {/* Active Signal */}
-          {activeSignal ? (
-            <ActiveSignalCard signal={activeSignal} prices={prices} fmt={fmt} fmtTime={fmtTime} />
-          ) : (
-            <div style={styles.noSignal}>
-              <div style={styles.noSignalPulse} />
-              <span>Scanning markets… waiting for high-confidence setup</span>
-            </div>
-          )}
-
-          {/* Price Grid */}
-          <div style={styles.priceGrid}>
-            {Object.entries(PAIRS).map(([pair, meta]) => (
-              <PriceCard key={pair} pair={pair} meta={meta} ticker={prices[pair]} candles={candles[pair]} />
-            ))}
-          </div>
-
-          {/* Recent Signals (last 5) */}
-          {signals.length > 0 && (
-            <div style={styles.recentSection}>
-              <h3 style={styles.sectionTitle}>Recent Signals</h3>
-              <div style={styles.signalList}>
-                {signals.slice(0, 5).map(s => (
-                  <SignalRow key={s.id} signal={s} fmtTime={fmtTime} fmt={fmt} />
-                ))}
-              </div>
-            </div>
-          )}
-        </main>
-      )}
-
-      {/* ── HISTORY TAB ── */}
-      {tab === "history" && (
-        <main style={styles.main}>
-          <div style={styles.historyHeader}>
-            <h2 style={styles.sectionTitle}>Signal History — Today ({todaySignals.length} signals)</h2>
-            <div style={styles.historyStats}>
-              <span style={{ color: "#00ff88" }}>W: {todaySignals.filter(s => s.result === "WIN").length}</span>
-              <span style={{ color: "#ff3b5c" }}>L: {todaySignals.filter(s => s.result === "LOSS").length}</span>
-              <span style={{ color: "#4af" }}>WR: {todaySignals.length > 0 ? ((todaySignals.filter(s=>s.result==="WIN").length/todaySignals.length)*100).toFixed(1) : "—"}%</span>
-            </div>
-          </div>
-          <div style={styles.signalList}>
-            {signals.length === 0 && <div style={{ color: "#666", padding: "2rem", textAlign: "center" }}>No signals yet today.</div>}
-            {signals.map(s => (
-              <SignalRowFull key={s.id} signal={s} fmtTime={fmtTime} fmt={fmt} />
-            ))}
-          </div>
-        </main>
-      )}
-
-      {/* ── SETTINGS TAB ── */}
-      {tab === "settings" && (
-        <main style={styles.main}>
-          <div style={styles.settingsCard}>
-            <h2 style={styles.sectionTitle}>Settings</h2>
-
-            {/* Mode Toggle */}
-            <div style={styles.settingRow}>
-              <label style={styles.settingLabel}>Trading Mode</label>
-              <div style={styles.modeToggle}>
-                <button
-                  style={{ ...styles.modeBtn, ...(settings.mode === "shadow" ? styles.modeBtnActive : {}) }}
-                  onClick={() => setSettings(s => ({ ...s, mode: "shadow" }))}
-                >👻 Shadow</button>
-                <button
-                  style={{ ...styles.modeBtn, ...(settings.mode === "live" ? styles.modeBtnActiveLive : {}) }}
-                  onClick={() => setSettings(s => ({ ...s, mode: "live" }))}
-                >🟢 Live</button>
-              </div>
-              <p style={styles.settingHint}>Shadow mode replicates trades without spending real funds.</p>
-            </div>
-
-            {/* Position Size */}
-            <div style={styles.settingRow}>
-              <label style={styles.settingLabel}>Position Size: <span style={{ color: "#00ff88" }}>${settings.positionSize}</span></label>
-              <input
-                type="range" min="1" max="1000" step="1"
-                value={settings.positionSize}
-                onChange={e => setSettings(s => ({ ...s, positionSize: Number(e.target.value) }))}
-                style={styles.slider}
-              />
-              <div style={styles.rangeLabels}><span>$1</span><span>$1000</span></div>
-            </div>
-
-            {/* Max Contract Price */}
-            <div style={styles.settingRow}>
-              <label style={styles.settingLabel}>Max Contract Price: <span style={{ color: "#f7c948" }}>${settings.maxContractPrice.toFixed(2)}</span></label>
-              <input
-                type="range" min="0.01" max="0.50" step="0.01"
-                value={settings.maxContractPrice}
-                onChange={e => setSettings(s => ({ ...s, maxContractPrice: Number(e.target.value) }))}
-                style={styles.slider}
-              />
-              <div style={styles.rangeLabels}><span>$0.01</span><span>$0.50</span></div>
-              <p style={styles.settingHint}>Price per contract ≤ $0.50 per system rules.</p>
-            </div>
-
-            {/* API Credentials */}
-            <div style={styles.settingRow}>
-              <label style={styles.settingLabel}>Limitless Token ID</label>
-              <input
-                style={styles.input}
-                type="password"
-                placeholder="lmts_token_id..."
-                value={settings.tokenId}
-                onChange={e => setSettings(s => ({ ...s, tokenId: e.target.value }))}
-              />
-            </div>
-            <div style={styles.settingRow}>
-              <label style={styles.settingLabel}>Limitless Token Secret</label>
-              <input
-                style={styles.input}
-                type="password"
-                placeholder="base64 secret..."
-                value={settings.tokenSecret}
-                onChange={e => setSettings(s => ({ ...s, tokenSecret: e.target.value }))}
-              />
-            </div>
-            <div style={styles.settingRow}>
-              <label style={styles.settingLabel}>Private Key (EOA Signer)</label>
-              <input
-                style={styles.input}
-                type="password"
-                placeholder="0x... (MetaMask EOA private key)"
-                value={settings.privateKey}
-                onChange={e => setSettings(s => ({ ...s, privateKey: e.target.value }))}
-              />
-              <p style={styles.settingHint}>⚠️ EOA only — never your smart wallet. Maker = Signer in EOA mode.</p>
-            </div>
-
-            <div style={styles.settingRow}>
-              <div style={styles.infoBox}>
-                <div style={{ color: "#4af", fontFamily: "monospace", fontSize: 12 }}>
-                  <div>Pairs: BTC·ETH (Family A) | SOL·DOGE (Family B) | XRP·BNB (Family C)</div>
-                  <div>Signal Rules: Best confidence per non-consecutive family</div>
-                  <div>Win/Loss tracking starts at candle close (00:00→00:15)</div>
-                  <div>Cooldown: 2 candles after 2 consecutive losses</div>
-                  <div>Keep-alive: pinging every 2s to prevent sleep</div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </main>
-      )}
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════
-// SUB-COMPONENTS
-// ══════════════════════════════════════════════════════════════════
-function StatCard({ label, value, color }) {
-  return (
-    <div style={styles.statCard}>
-      <div style={{ ...styles.statValue, color }}>{value}</div>
-      <div style={styles.statLabel}>{label}</div>
-    </div>
-  );
-}
-
-function ActiveSignalCard({ signal, prices, fmt, fmtTime }) {
-  const meta = PAIRS[signal.pair];
-  const currentPrice = prices[signal.pair]?.last;
-  const pnlDir = currentPrice ? (currentPrice > signal.openPrice ? "UP" : "DOWN") : null;
-  const isWinning = pnlDir === signal.direction;
-
-  return (
-    <div style={{ ...styles.activeCard, borderColor: signal.direction === "UP" ? "#00ff88" : "#ff3b5c" }}>
-      <div style={styles.activeTop}>
-        <div style={styles.activePair}>
-          <span style={{ color: meta.color, fontSize: 28, fontWeight: 900 }}>{meta.label}</span>
-          <span style={styles.familyTag}>{FAMILY_NAMES[signal.family]}</span>
-        </div>
-        <div style={{ ...styles.activeDir, background: signal.direction === "UP" ? "#00ff88" : "#ff3b5c", color: "#000" }}>
-          {signal.direction === "UP" ? "▲ LONG" : "▼ SHORT"}
-        </div>
-        <div style={styles.activeConf}>{signal.confidence}%<br /><span style={{ fontSize: 11, color: "#888" }}>confidence</span></div>
-      </div>
-
-      <div style={styles.activePrices}>
-        <div style={styles.priceItem}><span style={styles.pl}>OPEN</span><span style={styles.pv}>{fmt(signal.openPrice, 4)}</span></div>
-        <div style={styles.priceItem}><span style={styles.pl}>CURRENT</span><span style={{ ...styles.pv, color: isWinning ? "#00ff88" : "#ff3b5c" }}>{fmt(currentPrice, 4)}</span></div>
-        <div style={styles.priceItem}><span style={styles.pl}>TIME</span><span style={styles.pv}>{fmtTime(signal.timestamp)}</span></div>
-        <div style={styles.priceItem}><span style={styles.pl}>MODE</span><span style={{ ...styles.pv, color: signal.orderResult?.shadow ? "#f7c948" : "#00ff88" }}>
-          {signal.orderResult?.shadow ? "SHADOW" : signal.orderResult?.success ? "LIVE ✓" : "PENDING"}
-        </span></div>
-      </div>
-
-      <div style={styles.activeTags}>
-        {signal.tags.map(t => <span key={t} style={styles.tag}>{t}</span>)}
-        <span style={{ ...styles.tag, background: "#2a2a3a", color: "#888" }}>{signal.marketCondition}</span>
-      </div>
-
-      <div style={styles.orderInfo}>
-        {signal.orderResult && (
-          signal.orderResult.success
-            ? <span style={{ color: "#00ff88" }}>✓ Order placed — {signal.orderResult.shadow ? "Shadow" : `ID: ${signal.orderResult.order_id?.slice(0,12)}…`}</span>
-            : <span style={{ color: "#ff3b5c" }}>✗ Order failed: {signal.orderResult.error}</span>
-        )}
+  return(
+    <div style={{minHeight:"100vh",background:"var(--bg)",position:"relative",overflow:"hidden"}}>
+      <div style={{position:"fixed",inset:0,pointerEvents:"none",zIndex:0,
+        backgroundImage:"repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.04) 2px,rgba(0,0,0,0.04) 4px)"}}/>
+      <div style={{position:"fixed",top:-300,left:"50%",transform:"translateX(-50%)",
+        width:900,height:500,borderRadius:"50%",pointerEvents:"none",zIndex:0,
+        background:"radial-gradient(ellipse,rgba(201,168,76,0.05) 0%,transparent 70%)"}}/>
+      {toast&&<Toast msg={toast.msg} type={toast.type}/>}
+      <Header tab={tab} setTab={setTab} mode={settings.mode} countdown={countdown}
+        prog={prog} connected={connected}/>
+      <TickerTape prices={prices}/>
+      <div style={{maxWidth:1440,margin:"0 auto",padding:"0 20px 60px",position:"relative",zIndex:1}}>
+        {tab==="dashboard"&&<Dashboard stats={stats} wr={wr} todaySignals={todaySignals}
+          lastFamily={lastFamily} cooldown={cooldown} activeSignal={activeSignal}
+          prices={prices} signals={signals}/>}
+        {tab==="history"&&<History signals={signals} todaySignals={todaySignals}/>}
+        {tab==="settings"&&<Settings settings={settings} setSettings={saveSettings}/>}
       </div>
     </div>
   );
 }
 
-function PriceCard({ pair, meta, ticker, candles }) {
-  const sig = candles ? computeSignal(candles) : null;
-  const change24h = ticker ? ((ticker.last - ticker.open24h) / ticker.open24h * 100) : null;
-  return (
-    <div style={styles.priceCard}>
-      <div style={styles.pcTop}>
-        <span style={{ color: meta.color, fontWeight: 800, fontSize: 15 }}>{meta.label}</span>
-        {sig && (
-          <span style={{ ...styles.miniDir, background: sig.direction === "UP" ? "#00ff8820" : "#ff3b5c20", color: sig.direction === "UP" ? "#00ff88" : "#ff3b5c", border: `1px solid ${sig.direction === "UP" ? "#00ff8840" : "#ff3b5c40"}` }}>
-            {sig.direction === "UP" ? "▲" : "▼"} {sig.confidence}%
+/* ═══ HEADER ════════════════════════════════════════════════════ */
+function Header({tab,setTab,mode,countdown,prog,connected}){
+  return(
+    <header style={{borderBottom:"1px solid var(--border)",background:"rgba(7,8,10,0.96)",
+      backdropFilter:"blur(20px)",position:"sticky",top:0,zIndex:100}}>
+      <div style={{maxWidth:1440,margin:"0 auto",padding:"0 20px",
+        display:"flex",alignItems:"center",gap:20,height:56}}>
+        <div style={{display:"flex",alignItems:"center",gap:12,flex:"none"}}>
+          <div style={{width:34,height:34,borderRadius:5,background:"var(--gold)",display:"flex",
+            alignItems:"center",justifyContent:"center",fontSize:18,fontWeight:700,color:"#000",fontFamily:"var(--mono)"}}>∞</div>
+          <div>
+            <div style={{fontFamily:"var(--display)",fontSize:16,fontWeight:900,letterSpacing:4,color:"var(--text)",lineHeight:1}}>ORACLE</div>
+            <div style={{fontFamily:"var(--mono)",fontSize:8,color:"var(--text3)",letterSpacing:2,marginTop:2}}>LIMITLESS · 15M SIGNALS</div>
+          </div>
+        </div>
+        <div style={{flex:1,display:"flex",alignItems:"center",gap:10}}>
+          <div style={{flex:1,height:2,background:"var(--border)",borderRadius:1,overflow:"hidden"}}>
+            <div style={{height:"100%",width:`${prog}%`,borderRadius:1,
+              background:"linear-gradient(90deg,var(--gold),var(--gold2))",transition:"width .5s linear"}}/>
+          </div>
+          <span style={{fontFamily:"var(--mono)",fontSize:11,color:"var(--gold)",letterSpacing:1,flex:"none",minWidth:42}}>
+            {String(Math.floor(countdown/60)).padStart(2,"0")}:{String(countdown%60).padStart(2,"0")}
           </span>
-        )}
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:6,padding:"5px 12px",
+          border:`1px solid ${connected?"#3ddc8440":mode==="live"?"#3ddc84":"var(--border2)"}`,borderRadius:3,flex:"none"}}>
+          <div style={{width:6,height:6,borderRadius:"50%",flexShrink:0,
+            background:connected?mode==="live"?"var(--green)":"var(--gold)":"var(--red)",
+            animation:connected?"glow 2s infinite":"none"}}/>
+          <span style={{fontFamily:"var(--mono)",fontSize:10,fontWeight:700,letterSpacing:2,
+            color:connected?mode==="live"?"var(--green)":"var(--gold)":"var(--red)"}}>
+            {connected?(mode==="live"?"LIVE":"SHADOW"):"RECONNECTING"}
+          </span>
+        </div>
+        <nav style={{display:"flex",gap:2}}>
+          {["dashboard","history","settings"].map(t=>(
+            <button key={t} onClick={()=>setTab(t)} style={{
+              padding:"6px 16px",borderRadius:4,textTransform:"uppercase",
+              background:tab===t?"var(--bg3)":"transparent",
+              border:`1px solid ${tab===t?"var(--border2)":"transparent"}`,
+              color:tab===t?"var(--gold)":"var(--text3)",
+              fontFamily:"var(--display)",fontSize:12,fontWeight:700,letterSpacing:2,transition:"all .15s",
+            }}>{t}</button>
+          ))}
+        </nav>
       </div>
-      <div style={styles.pcPrice}>{ticker ? ticker.last.toFixed(ticker.last > 100 ? 2 : 4) : "—"}</div>
-      <div style={{ ...styles.pcChange, color: change24h > 0 ? "#00ff88" : change24h < 0 ? "#ff3b5c" : "#666" }}>
-        {change24h != null ? `${change24h > 0 ? "+" : ""}${change24h.toFixed(2)}%` : "—"}
+    </header>
+  );
+}
+
+/* ═══ TICKER TAPE ═══════════════════════════════════════════════ */
+function TickerTape({prices}){
+  const items=Object.entries(PAIRS).map(([pair,meta])=>{
+    const t=prices[pair];const chg=t?((t.last-t.open24h)/t.open24h*100):null;
+    return{pair,meta,t,chg};
+  });
+  const doubled=[...items,...items];
+  return(
+    <div style={{borderBottom:"1px solid var(--border)",background:"var(--bg1)",overflow:"hidden",height:32,display:"flex",alignItems:"center"}}>
+      <div style={{display:"flex",animation:"ticker 28s linear infinite",whiteSpace:"nowrap"}}>
+        {doubled.map((item,i)=>(
+          <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"0 24px",borderRight:"1px solid var(--border)"}}>
+            <span style={{fontFamily:"var(--display)",fontSize:12,fontWeight:700,letterSpacing:1,color:item.meta.fcolor}}>{item.meta.label}</span>
+            <span style={{fontFamily:"var(--mono)",fontSize:11,color:"var(--text)"}}>
+              {item.t?fmtPrice(item.t.last,item.pair):"—"}
+            </span>
+            {item.chg!=null&&(
+              <span style={{fontFamily:"var(--mono)",fontSize:10,color:item.chg>=0?"var(--green)":"var(--red)"}}>
+                {item.chg>=0?"+":""}{item.chg.toFixed(2)}%
+              </span>
+            )}
+          </div>
+        ))}
       </div>
-      {sig && <div style={styles.pcCond}>{sig.marketCondition}</div>}
     </div>
   );
 }
 
-function SignalRow({ signal, fmtTime, fmt }) {
-  const meta = PAIRS[signal.pair];
-  return (
-    <div style={{ ...styles.sigRow, borderLeft: `3px solid ${signal.result === "WIN" ? "#00ff88" : signal.result === "LOSS" ? "#ff3b5c" : "#555"}` }}>
-      <span style={{ color: meta.color, fontWeight: 700, minWidth: 45 }}>{meta.label}</span>
-      <span style={{ color: signal.direction === "UP" ? "#00ff88" : "#ff3b5c", minWidth: 35 }}>{signal.direction === "UP" ? "▲" : "▼"}</span>
-      <span style={{ color: "#888", fontSize: 11, minWidth: 40 }}>{fmtTime(signal.timestamp)}</span>
-      <span style={{ color: "#aaa", fontSize: 11, flex: 1 }}>{fmt(signal.openPrice, 4)} → {fmt(signal.closePrice, 4)}</span>
-      <span style={{ color: signal.result === "WIN" ? "#00ff88" : signal.result === "LOSS" ? "#ff3b5c" : "#888", fontWeight: 700 }}>
-        {signal.result === "WIN" ? "WIN" : signal.result === "LOSS" ? "LOSS" : "…"}
+/* ═══ DASHBOARD ═════════════════════════════════════════════════ */
+function Dashboard({stats,wr,todaySignals,lastFamily,cooldown,activeSignal,prices,signals}){
+  return(
+    <div style={{paddingTop:24}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:1,
+        border:"1px solid var(--border)",borderRadius:6,overflow:"hidden",marginBottom:20}}>
+        {[
+          {label:"WIN RATE",value:`${wr}%`,color:"var(--gold)"},
+          {label:"WINS",value:stats.wins,color:"var(--green)"},
+          {label:"LOSSES",value:stats.losses,color:"var(--red)"},
+          {label:"TOTAL TODAY",value:todaySignals.length,color:"var(--text)"},
+          {label:"FAMILY LOCK",value:lastFamily!==null?FAMILY_NAMES[lastFamily]:"—",color:"var(--blue)"},
+          {label:"STATUS",value:cooldown>0?`COOLDOWN ${cooldown}`:"SCANNING",color:cooldown>0?"var(--red)":"var(--green)"},
+        ].map((s,i)=>(
+          <div key={i} style={{background:"var(--bg1)",padding:"14px 16px",borderRight:i<5?"1px solid var(--border)":"none"}}>
+            <div style={{fontFamily:"var(--mono)",fontSize:8,color:"var(--text3)",letterSpacing:2,marginBottom:6}}>{s.label}</div>
+            <div style={{fontFamily:"var(--display)",fontSize:26,fontWeight:800,color:s.color,lineHeight:1}}>{s.value}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 360px",gap:20,alignItems:"start"}}>
+        <div style={{display:"flex",flexDirection:"column",gap:20}}>
+          {activeSignal?<ActiveCard signal={activeSignal} prices={prices}/>:<ScanningCard/>}
+          <PriceGrid prices={prices}/>
+        </div>
+        <div style={{background:"var(--bg1)",border:"1px solid var(--border)",borderRadius:6,
+          overflow:"hidden",position:"sticky",top:76}}>
+          <div style={{padding:"12px 16px",borderBottom:"1px solid var(--border)",
+            display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{fontFamily:"var(--mono)",fontSize:9,fontWeight:700,letterSpacing:3,color:"var(--text3)"}}>SIGNAL LOG</span>
+            <span style={{fontFamily:"var(--mono)",fontSize:10,color:"var(--text3)"}}>{signals.length}</span>
+          </div>
+          <div style={{maxHeight:"calc(100vh - 220px)",overflowY:"auto"}}>
+            {signals.length===0
+              ?<div style={{padding:"40px 20px",textAlign:"center",fontFamily:"var(--mono)",fontSize:11,color:"var(--text3)"}}>Waiting for first signal…</div>
+              :signals.slice(0,60).map((s,i)=><LogRow key={s.id} signal={s} isNew={i===0}/>)
+            }
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══ ACTIVE CARD ═══════════════════════════════════════════════ */
+function ActiveCard({signal,prices}){
+  const meta=PAIRS[signal.pair];
+  const current=prices[signal.pair]?.last;
+  const isWinning=current!=null&&((signal.direction==="UP"&&current>signal.openPrice)||(signal.direction==="DOWN"&&current<signal.openPrice));
+  const pnlPct=current!=null?((current-signal.openPrice)/signal.openPrice*100):null;
+  const isUp=signal.direction==="UP";
+  return(
+    <div className="fade-in" style={{background:"var(--bg1)",border:`1px solid ${isUp?"var(--green)":"var(--red)"}`,borderRadius:6,overflow:"hidden"}}>
+      <div style={{height:3,background:isUp?"linear-gradient(90deg,var(--green),transparent)":"linear-gradient(90deg,var(--red),transparent)"}}/>
+      <div style={{padding:20}}>
+        <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:20}}>
+          <div>
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
+              <div style={{width:8,height:8,borderRadius:"50%",background:meta.fcolor,animation:"pulse-ring 1.5s ease-out infinite"}}/>
+              <span style={{fontFamily:"var(--mono)",fontSize:9,color:"var(--text3)",letterSpacing:3}}>ACTIVE SIGNAL</span>
+            </div>
+            <div style={{fontFamily:"var(--display)",fontSize:52,fontWeight:900,color:meta.fcolor,lineHeight:1,letterSpacing:-2}}>{meta.label}</div>
+            <div style={{fontFamily:"var(--mono)",fontSize:10,color:"var(--text3)",marginTop:6}}>
+              {FAMILY_NAMES[signal.family]} · {signal.marketCondition} · {fmtT(signal.timestamp)}
+            </div>
+          </div>
+          <div style={{textAlign:"right"}}>
+            <div style={{display:"inline-flex",alignItems:"center",gap:10,padding:"14px 22px",borderRadius:4,marginBottom:10,
+              background:isUp?"var(--green-dim)":"var(--red-dim)",border:`1px solid ${isUp?"var(--green)":"var(--red)"}`}}>
+              <span style={{fontSize:24}}>{isUp?"▲":"▼"}</span>
+              <span style={{fontFamily:"var(--display)",fontSize:28,fontWeight:900,color:isUp?"var(--green)":"var(--red)",letterSpacing:3}}>
+                {isUp?"LONG":"SHORT"}
+              </span>
+            </div>
+            <div style={{fontFamily:"var(--display)",fontSize:42,fontWeight:900,color:"var(--gold)",lineHeight:1}}>{signal.confidence}%</div>
+            <div style={{fontFamily:"var(--mono)",fontSize:8,color:"var(--text3)",letterSpacing:2,marginTop:2}}>CONFIDENCE</div>
+          </div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:1,background:"var(--border)",borderRadius:4,overflow:"hidden",marginBottom:14}}>
+          {[
+            {label:"OPEN",value:fmtPrice(signal.openPrice,signal.pair),color:"var(--text)"},
+            {label:"CURRENT",value:fmtPrice(current,signal.pair),color:current==null?"var(--text3)":isWinning?"var(--green)":"var(--red)"},
+            {label:"P&L",value:pnlPct!=null?`${pnlPct>=0?"+":""}${pnlPct.toFixed(3)}%`:"—",color:pnlPct==null?"var(--text3)":isWinning?"var(--green)":"var(--red)"},
+            {label:"RSI",value:signal.rsi||"—",color:signal.rsi>70?"var(--red)":signal.rsi<30?"var(--green)":"var(--gold)"},
+          ].map((item,i)=>(
+            <div key={i} style={{background:"var(--bg)",padding:"10px 14px"}}>
+              <div style={{fontFamily:"var(--mono)",fontSize:8,color:"var(--text3)",letterSpacing:2,marginBottom:4}}>{item.label}</div>
+              <div style={{fontFamily:"var(--mono)",fontSize:14,fontWeight:700,color:item.color}}>{item.value}</div>
+            </div>
+          ))}
+        </div>
+        {signal.orderResult&&(
+          <div style={{padding:"8px 12px",borderRadius:3,fontFamily:"var(--mono)",fontSize:10,
+            background:signal.orderResult.success?"var(--green-dim)":"var(--red-dim)",
+            border:`1px solid ${signal.orderResult.success?"#3ddc8440":"#ff475740"}`,
+            color:signal.orderResult.success?"var(--green)":"var(--red)"}}>
+            {signal.orderResult.success
+              ?`✓ Order ${signal.orderResult.shadow?"simulated":"placed"} · ${signal.orderResult.contracts} contracts @ $${signal.orderResult.price_per_contract}`
+              :`✗ ${signal.orderResult.error}`}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ScanningCard(){
+  return(
+    <div style={{background:"var(--bg1)",border:"1px solid var(--border)",borderRadius:6,padding:"60px 40px",textAlign:"center"}}>
+      <div style={{width:44,height:44,borderRadius:"50%",border:"2px solid var(--border2)",
+        borderTopColor:"var(--gold)",margin:"0 auto 20px",animation:"spin 1s linear infinite"}}/>
+      <div style={{fontFamily:"var(--display)",fontSize:18,fontWeight:700,letterSpacing:4,color:"var(--text3)",marginBottom:8}}>SERVER ENGINE RUNNING</div>
+      <div style={{fontFamily:"var(--mono)",fontSize:11,color:"var(--text3)"}}>Signal engine active on server · Waiting for next high-confidence setup</div>
+    </div>
+  );
+}
+
+/* ═══ PRICE GRID ════════════════════════════════════════════════ */
+function PriceGrid({prices}){
+  return(
+    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:1,background:"var(--border)",border:"1px solid var(--border)",borderRadius:6,overflow:"hidden"}}>
+      {Object.entries(PAIRS).map(([pair,meta])=>{
+        const t=prices[pair];const chg=t?((t.last-t.open24h)/t.open24h*100):null;
+        return(
+          <div key={pair} style={{background:"var(--bg1)",padding:16,position:"relative"}}>
+            <div style={{position:"absolute",left:0,top:0,bottom:0,width:2,
+              background:chg==null?"var(--border)":chg>=0?"var(--green)":"var(--red)"}}/>
+            <div style={{paddingLeft:10}}>
+              <div style={{fontFamily:"var(--display)",fontSize:20,fontWeight:800,color:meta.fcolor,letterSpacing:1,marginBottom:8}}>{meta.label}</div>
+              <div style={{fontFamily:"var(--mono)",fontSize:17,fontWeight:700,color:"var(--text)",marginBottom:4}}>
+                {t?fmtPrice(t.last,pair):"—"}
+              </div>
+              <span style={{fontFamily:"var(--mono)",fontSize:10,color:chg==null?"var(--text3)":chg>=0?"var(--green)":"var(--red)"}}>
+                {chg!=null?`${chg>=0?"+":""}${chg.toFixed(2)}%`:"Loading…"}
+              </span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ═══ LOG ROW ═══════════════════════════════════════════════════ */
+function LogRow({signal,isNew}){
+  const meta=PAIRS[signal.pair];
+  const isWin=signal.result==="WIN",isLoss=signal.result==="LOSS";
+  return(
+    <div className={isNew?"fade-in":""} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 16px",
+      borderBottom:"1px solid var(--border)",
+      borderLeft:`2px solid ${isWin?"var(--green)":isLoss?"var(--red)":"var(--border)"}`,
+      background:isNew?"rgba(201,168,76,0.04)":"transparent"}}>
+      <span style={{fontFamily:"var(--display)",fontSize:13,fontWeight:700,color:meta.fcolor,minWidth:38}}>{meta.label}</span>
+      <span style={{fontFamily:"var(--mono)",fontSize:10,color:signal.direction==="UP"?"var(--green)":"var(--red)",minWidth:10}}>{signal.direction==="UP"?"▲":"▼"}</span>
+      <span style={{fontFamily:"var(--mono)",fontSize:9,color:"var(--text3)",minWidth:36}}>{fmtT(signal.timestamp)}</span>
+      <span style={{fontFamily:"var(--mono)",fontSize:9,color:"var(--text3)",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+        {fmtPrice(signal.openPrice,signal.pair)}→{fmtPrice(signal.closePrice,signal.pair)}
+      </span>
+      <span style={{fontFamily:"var(--mono)",fontSize:10,fontWeight:700,
+        color:isWin?"var(--green)":isLoss?"var(--red)":"var(--text3)",minWidth:28}}>
+        {isWin?"WIN":isLoss?"LOSS":"…"}
       </span>
     </div>
   );
 }
 
-function SignalRowFull({ signal, fmtTime, fmt }) {
-  const meta = PAIRS[signal.pair];
-  return (
-    <div style={{ ...styles.sigRowFull, borderLeft: `3px solid ${signal.result === "WIN" ? "#00ff88" : signal.result === "LOSS" ? "#ff3b5c" : "#555"}` }}>
-      <div style={styles.srfLeft}>
-        <span style={{ color: meta.color, fontWeight: 800 }}>{meta.label}</span>
-        <span style={{ color: signal.direction === "UP" ? "#00ff88" : "#ff3b5c" }}>{signal.direction === "UP" ? "▲ UP" : "▼ DOWN"}</span>
-        <span style={{ color: "#666", fontSize: 11 }}>{fmtTime(signal.timestamp)}</span>
+/* ═══ HISTORY ═══════════════════════════════════════════════════ */
+function History({signals,todaySignals}){
+  const wins=todaySignals.filter(s=>s.result==="WIN").length;
+  const losses=todaySignals.filter(s=>s.result==="LOSS").length;
+  const wr=todaySignals.length>0?((wins/todaySignals.length)*100).toFixed(1):"—";
+  return(
+    <div style={{paddingTop:24}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:1,
+        border:"1px solid var(--border)",borderRadius:6,overflow:"hidden",marginBottom:20}}>
+        {[
+          {label:"SIGNALS TODAY",value:todaySignals.length,color:"var(--text)"},
+          {label:"WINS",value:wins,color:"var(--green)"},
+          {label:"LOSSES",value:losses,color:"var(--red)"},
+          {label:"WIN RATE",value:`${wr}%`,color:"var(--gold)"},
+        ].map((s,i)=>(
+          <div key={i} style={{background:"var(--bg1)",padding:"16px 20px",borderRight:i<3?"1px solid var(--border)":"none"}}>
+            <div style={{fontFamily:"var(--mono)",fontSize:8,color:"var(--text3)",letterSpacing:2,marginBottom:6}}>{s.label}</div>
+            <div style={{fontFamily:"var(--display)",fontSize:34,fontWeight:800,color:s.color,lineHeight:1}}>{s.value}</div>
+          </div>
+        ))}
       </div>
-      <div style={styles.srfMid}>
-        <span style={{ color: "#888", fontSize: 11 }}>Open: {fmt(signal.openPrice, 4)}</span>
-        <span style={{ color: "#888", fontSize: 11 }}>Close: {fmt(signal.closePrice, 4)}</span>
-        <span style={{ color: "#666", fontSize: 10 }}>{signal.marketCondition}</span>
-      </div>
-      <div style={styles.srfRight}>
-        <span style={{ color: "#aaa", fontSize: 11 }}>{signal.confidence}% conf</span>
-        <span style={{ color: signal.result === "WIN" ? "#00ff88" : signal.result === "LOSS" ? "#ff3b5c" : "#888", fontWeight: 800, fontSize: 16 }}>
-          {signal.result === "WIN" ? "✓ WIN" : signal.result === "LOSS" ? "✗ LOSS" : "⏳"}
-        </span>
+      <div style={{border:"1px solid var(--border)",borderRadius:6,overflow:"hidden"}}>
+        <div style={{display:"grid",gridTemplateColumns:"60px 36px 56px 64px 110px 110px 90px 70px",
+          padding:"10px 16px",borderBottom:"1px solid var(--border)",background:"var(--bg1)"}}>
+          {["PAIR","DIR","TIME","CONF","OPEN","CLOSE","CONDITION","RESULT"].map(h=>(
+            <span key={h} style={{fontFamily:"var(--mono)",fontSize:8,color:"var(--text3)",letterSpacing:1}}>{h}</span>
+          ))}
+        </div>
+        <div style={{maxHeight:"65vh",overflowY:"auto"}}>
+          {signals.length===0
+            ?<div style={{padding:"60px",textAlign:"center",fontFamily:"var(--mono)",fontSize:11,color:"var(--text3)"}}>No signal history yet</div>
+            :signals.map((s,i)=>{
+              const meta=PAIRS[s.pair];const isWin=s.result==="WIN",isLoss=s.result==="LOSS";
+              return(
+                <div key={s.id} style={{display:"grid",gridTemplateColumns:"60px 36px 56px 64px 110px 110px 90px 70px",
+                  padding:"10px 16px",borderBottom:"1px solid var(--border)",alignItems:"center",
+                  background:i%2===0?"var(--bg1)":"var(--bg)",
+                  borderLeft:`2px solid ${isWin?"var(--green)":isLoss?"var(--red)":"var(--border)"}`}}>
+                  <span style={{fontFamily:"var(--display)",fontSize:13,fontWeight:700,color:meta.fcolor}}>{meta.label}</span>
+                  <span style={{fontFamily:"var(--mono)",fontSize:11,color:s.direction==="UP"?"var(--green)":"var(--red)"}}>{s.direction==="UP"?"▲":"▼"}</span>
+                  <span style={{fontFamily:"var(--mono)",fontSize:10,color:"var(--text2)"}}>{fmtT(s.timestamp)}</span>
+                  <span style={{fontFamily:"var(--mono)",fontSize:10,color:"var(--gold)"}}>{s.confidence}%</span>
+                  <span style={{fontFamily:"var(--mono)",fontSize:10,color:"var(--text2)"}}>{fmtPrice(s.openPrice,s.pair)}</span>
+                  <span style={{fontFamily:"var(--mono)",fontSize:10,color:"var(--text2)"}}>{fmtPrice(s.closePrice,s.pair)}</span>
+                  <span style={{fontFamily:"var(--mono)",fontSize:9,color:"var(--text3)"}}>{s.marketCondition}</span>
+                  <span style={{fontFamily:"var(--display)",fontSize:14,fontWeight:800,
+                    color:isWin?"var(--green)":isLoss?"var(--red)":"var(--text3)"}}>
+                    {isWin?"WIN":isLoss?"LOSS":"PEND"}
+                  </span>
+                </div>
+              );
+            })
+          }
+        </div>
       </div>
     </div>
   );
 }
 
-// ══════════════════════════════════════════════════════════════════
-// STYLES
-// ══════════════════════════════════════════════════════════════════
-const styles = {
-  app: { minHeight: "100vh", background: "#080810", color: "#e0e0f0", fontFamily: "'JetBrains Mono', 'Fira Code', 'Courier New', monospace", position: "relative", overflowX: "hidden" },
-  bg: { position: "fixed", inset: 0, background: "radial-gradient(ellipse 80% 50% at 50% 0%, #0d0d2840 0%, transparent 70%)", pointerEvents: "none", zIndex: 0 },
-  grid: { position: "fixed", inset: 0, backgroundImage: "linear-gradient(rgba(68,170,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(68,170,255,0.03) 1px, transparent 1px)", backgroundSize: "40px 40px", pointerEvents: "none", zIndex: 0 },
-  header: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 20px", borderBottom: "1px solid #1a1a2e", background: "#09091580", backdropFilter: "blur(12px)", position: "sticky", top: 0, zIndex: 100 },
-  logo: { display: "flex", alignItems: "center", gap: 10 },
-  logoMark: { fontSize: 24, fontWeight: 900, color: "#4af", letterSpacing: -2 },
-  logoText: { fontSize: 13, fontWeight: 700, letterSpacing: 4, color: "#4af88" },
-  headerRight: { display: "flex", alignItems: "center", gap: 12 },
-  modeBadge: { padding: "4px 10px", borderRadius: 4, background: "#1a1a2e", fontSize: 11, fontWeight: 700, letterSpacing: 1 },
-  nav: { display: "flex", gap: 4 },
-  navBtn: { background: "transparent", border: "1px solid #1a1a2e", color: "#666", padding: "5px 14px", borderRadius: 4, cursor: "pointer", fontSize: 12, fontFamily: "inherit", transition: "all 0.2s" },
-  navBtnActive: { background: "#4af20", border: "1px solid #4af", color: "#4af" },
-  progressBar: { height: 3, background: "#1a1a2e", position: "relative", overflow: "hidden" },
-  progressFill: { height: "100%", background: "linear-gradient(90deg, #4af, #00ff88)", transition: "width 0.5s linear" },
-  progressLabel: { position: "absolute", right: 8, top: -14, fontSize: 10, color: "#4af", letterSpacing: 1 },
-  main: { padding: "20px", maxWidth: 1400, margin: "0 auto", position: "relative", zIndex: 1 },
-  statsRow: { display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 10, marginBottom: 20 },
-  statCard: { background: "#0d0d1a", border: "1px solid #1a1a2e", borderRadius: 8, padding: "12px 10px", textAlign: "center" },
-  statValue: { fontSize: 22, fontWeight: 900, letterSpacing: -1 },
-  statLabel: { fontSize: 9, color: "#555", letterSpacing: 2, marginTop: 2 },
-  noSignal: { background: "#0d0d1a", border: "1px solid #1a1a2e", borderRadius: 12, padding: "40px 20px", textAlign: "center", color: "#555", fontSize: 13, letterSpacing: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 12, marginBottom: 20 },
-  noSignalPulse: { width: 10, height: 10, borderRadius: "50%", background: "#4af", boxShadow: "0 0 0 0 #4af", animation: "pulse 2s infinite" },
-  activeCard: { background: "#0d0d1a", border: "2px solid", borderRadius: 12, padding: 20, marginBottom: 20 },
-  activeTop: { display: "flex", alignItems: "center", gap: 16, marginBottom: 16 },
-  activePair: { display: "flex", flexDirection: "column", flex: 1 },
-  familyTag: { fontSize: 10, color: "#555", letterSpacing: 2, marginTop: 2 },
-  activeDir: { padding: "8px 18px", borderRadius: 6, fontSize: 18, fontWeight: 900, letterSpacing: 2 },
-  activeConf: { textAlign: "center", fontSize: 26, fontWeight: 900, color: "#f7c948" },
-  activePrices: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, background: "#09091580", borderRadius: 8, padding: 12, marginBottom: 12 },
-  priceItem: { display: "flex", flexDirection: "column", gap: 4 },
-  pl: { fontSize: 9, color: "#555", letterSpacing: 2 },
-  pv: { fontSize: 15, fontWeight: 700 },
-  activeTags: { display: "flex", flexWrap: "wrap", gap: 6 },
-  tag: { background: "#1a1a2e", color: "#4af", fontSize: 10, padding: "3px 8px", borderRadius: 4, letterSpacing: 1 },
-  orderInfo: { marginTop: 10, fontSize: 11, color: "#555" },
-  priceGrid: { display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 10, marginBottom: 20 },
-  priceCard: { background: "#0d0d1a", border: "1px solid #1a1a2e", borderRadius: 8, padding: 12, transition: "border-color 0.3s" },
-  pcTop: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 },
-  miniDir: { fontSize: 10, padding: "2px 6px", borderRadius: 4, fontWeight: 700 },
-  pcPrice: { fontSize: 16, fontWeight: 800, letterSpacing: -0.5, marginBottom: 2 },
-  pcChange: { fontSize: 11, fontWeight: 600 },
-  pcCond: { fontSize: 9, color: "#555", marginTop: 4, letterSpacing: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
-  recentSection: { background: "#0d0d1a", border: "1px solid #1a1a2e", borderRadius: 12, padding: 16 },
-  sectionTitle: { fontSize: 11, color: "#4af", letterSpacing: 3, fontWeight: 700, marginBottom: 12, marginTop: 0 },
-  signalList: { display: "flex", flexDirection: "column", gap: 6 },
-  sigRow: { display: "flex", alignItems: "center", gap: 10, background: "#090915", borderRadius: 6, padding: "8px 12px", fontSize: 12 },
-  historyHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 },
-  historyStats: { display: "flex", gap: 16, fontSize: 13, fontWeight: 700 },
-  sigRowFull: { display: "flex", alignItems: "center", gap: 12, background: "#090915", borderRadius: 6, padding: "10px 14px" },
-  srfLeft: { display: "flex", gap: 10, minWidth: 120, alignItems: "center" },
-  srfMid: { display: "flex", gap: 10, flex: 1, flexWrap: "wrap" },
-  srfRight: { display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 },
-  settingsCard: { background: "#0d0d1a", border: "1px solid #1a1a2e", borderRadius: 12, padding: 24, maxWidth: 700 },
-  settingRow: { marginBottom: 24 },
-  settingLabel: { display: "block", fontSize: 11, color: "#888", letterSpacing: 2, marginBottom: 8 },
-  settingHint: { fontSize: 10, color: "#444", marginTop: 6, lineHeight: 1.6 },
-  modeToggle: { display: "flex", gap: 8 },
-  modeBtn: { padding: "8px 20px", borderRadius: 6, border: "1px solid #2a2a3a", background: "#1a1a2e", color: "#666", cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 700 },
-  modeBtnActive: { background: "#1a2a3a", border: "1px solid #4af", color: "#4af" },
-  modeBtnActiveLive: { background: "#0a2a0a", border: "1px solid #00ff88", color: "#00ff88" },
-  slider: { width: "100%", accentColor: "#4af" },
-  rangeLabels: { display: "flex", justifyContent: "space-between", fontSize: 10, color: "#555", marginTop: 4 },
-  input: { width: "100%", background: "#090915", border: "1px solid #1a1a2e", borderRadius: 6, color: "#e0e0f0", padding: "10px 12px", fontFamily: "inherit", fontSize: 12, boxSizing: "border-box", outline: "none" },
-  infoBox: { background: "#090915", border: "1px solid #1a1a2e", borderRadius: 8, padding: 14, lineHeight: 1.8 },
-  toast: { position: "fixed", top: 70, right: 20, padding: "10px 18px", borderRadius: 8, fontSize: 12, fontWeight: 700, zIndex: 9999, letterSpacing: 1, boxShadow: "0 4px 24px #00000060" },
-};
+/* ═══ SETTINGS ══════════════════════════════════════════════════ */
+function Settings({settings,setSettings}){
+  const upd=k=>v=>setSettings({...settings,[k]:v});
+  const updAll=patch=>setSettings({...settings,...patch});
+  const [validated,setValidated]=useState(null);
+  const [validating,setValidating]=useState(false);
+  const validate=async()=>{
+    setValidating(true);
+    try{
+      const r=await fetch("/api/limitless/validate",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({credentials:{privateKey:settings.privateKey,tokenId:settings.tokenId,tokenSecret:settings.tokenSecret}}),
+      });
+      setValidated(await r.json());
+    }catch(e){setValidated({error:e.message});}
+    setValidating(false);
+  };
+  return(
+    <div style={{paddingTop:24,maxWidth:700}}>
+      <div style={{fontFamily:"var(--mono)",fontSize:9,fontWeight:700,letterSpacing:4,color:"var(--text3)",marginBottom:20}}>SYSTEM SETTINGS</div>
+      <Sect title="TRADING MODE">
+        <div style={{display:"flex",gap:8,marginBottom:12}}>
+          {["shadow","live"].map(m=>(
+            <button key={m} onClick={()=>updAll({mode:m})} style={{flex:1,padding:"14px",borderRadius:4,transition:"all .2s",
+              background:settings.mode===m?m==="live"?"var(--green-dim)":"var(--gold-dim)":"var(--bg)",
+              border:`1px solid ${settings.mode===m?m==="live"?"var(--green)":"var(--gold)":"var(--border2)"}`,
+              color:settings.mode===m?m==="live"?"var(--green)":"var(--gold)":"var(--text3)",
+              fontFamily:"var(--display)",fontSize:14,fontWeight:800,letterSpacing:3}}>
+              {m==="shadow"?"👻  SHADOW MODE":"🟢  LIVE TRADING"}
+            </button>
+          ))}
+        </div>
+        <p style={{fontFamily:"var(--mono)",fontSize:10,color:"var(--text3)",lineHeight:1.8}}>
+          Shadow mode simulates all trades server-side with full P&amp;L tracking. Switch to Live once credentials are validated.
+        </p>
+      </Sect>
+      <Sect title="POSITION SIZE">
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:12}}>
+          <span style={{fontFamily:"var(--mono)",fontSize:10,color:"var(--text3)"}}>Per trade allocation</span>
+          <span style={{fontFamily:"var(--display)",fontSize:28,fontWeight:800,color:"var(--gold)"}}>${settings.positionSize}</span>
+        </div>
+        <input type="range" min="1" max="1000" step="1" value={settings.positionSize} onChange={e=>updAll({positionSize:+e.target.value})}/>
+        <div style={{display:"flex",justifyContent:"space-between",marginTop:6,fontFamily:"var(--mono)",fontSize:9,color:"var(--text3)"}}>
+          <span>$1</span><span>$1,000</span>
+        </div>
+      </Sect>
+      <Sect title="MAX CONTRACT PRICE">
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:12}}>
+          <span style={{fontFamily:"var(--mono)",fontSize:10,color:"var(--text3)"}}>Price ceiling per contract</span>
+          <span style={{fontFamily:"var(--display)",fontSize:28,fontWeight:800,color:"var(--gold)"}}>${settings.maxContractPrice.toFixed(2)}</span>
+        </div>
+        <input type="range" min="0.01" max="0.50" step="0.01" value={settings.maxContractPrice} onChange={e=>updAll({maxContractPrice:+e.target.value})}/>
+        <div style={{display:"flex",justifyContent:"space-between",marginTop:6,fontFamily:"var(--mono)",fontSize:9,color:"var(--text3)"}}>
+          <span>$0.01</span><span>$0.50 max</span>
+        </div>
+      </Sect>
+      <Sect title="LIMITLESS API CREDENTIALS">
+        {[
+          {label:"TOKEN ID",key:"tokenId",ph:"lmts_token_id..."},
+          {label:"TOKEN SECRET",key:"tokenSecret",ph:"base64 encoded secret..."},
+          {label:"EOA PRIVATE KEY",key:"privateKey",ph:"0x... (wallet private key)"},
+        ].map(f=>(
+          <div key={f.key} style={{marginBottom:14}}>
+            <div style={{fontFamily:"var(--mono)",fontSize:8,color:"var(--text3)",letterSpacing:2,marginBottom:6}}>{f.label}</div>
+            <input type="password" placeholder={f.ph} value={settings[f.key]||""} onChange={e=>updAll({[f.key]:e.target.value})}/>
+          </div>
+        ))}
+        <button onClick={validate} disabled={validating} style={{width:"100%",padding:"12px",borderRadius:4,marginTop:4,transition:"all .2s",
+          background:"var(--gold-dim)",border:"1px solid var(--gold)",color:"var(--gold)",
+          fontFamily:"var(--display)",fontSize:13,fontWeight:700,letterSpacing:2,opacity:validating?.5:1}}>
+          {validating?"VALIDATING…":"VALIDATE CREDENTIALS"}
+        </button>
+        {validated&&(
+          <div style={{marginTop:12,padding:"12px 14px",borderRadius:4,fontFamily:"var(--mono)",fontSize:10,lineHeight:2,
+            background:validated.live_trading_ready?"var(--green-dim)":"var(--red-dim)",
+            border:`1px solid ${validated.live_trading_ready?"#3ddc8440":"#ff475740"}`,
+            color:validated.live_trading_ready?"var(--green)":"var(--red)"}}>
+            {validated.live_trading_ready
+              ?`✓ Ready for live trading · Signer: ${validated.signer_address?.slice(0,20)}…`
+              :`✗ ${validated.error||"Missing credentials"}`}
+          </div>
+        )}
+        <p style={{fontFamily:"var(--mono)",fontSize:9,color:"var(--text3)",marginTop:12,lineHeight:1.9}}>
+          ⚠ EOA wallets only. Maker = Signer. Do not use a smart wallet address.
+        </p>
+      </Sect>
+      <Sect title="SYSTEM INFO">
+        <div style={{fontFamily:"var(--mono)",fontSize:10,color:"var(--text3)",lineHeight:2.4}}>
+          <div>Engine  ·  Runs server-side 24/7 (no browser required)</div>
+          <div>Data  ·  OKX Spot Market — 15m candles refreshed every 15s</div>
+          <div>Pairs  ·  BTC·ETH / SOL·DOGE / XRP·BNB (family rotation)</div>
+          <div>Models  ·  12 confluence strategies scored per candle</div>
+          <div>Cooldown  ·  2 candles after 2 consecutive losses</div>
+          <div>Stream  ·  Server-Sent Events push updates to browser</div>
+          <div>Keep-alive  ·  /api/ping every 2s (free plan)</div>
+        </div>
+      </Sect>
+    </div>
+  );
+}
+
+function Sect({title,children}){
+  return(
+    <div style={{marginBottom:16,border:"1px solid var(--border)",borderRadius:6,overflow:"hidden"}}>
+      <div style={{padding:"10px 16px",borderBottom:"1px solid var(--border)",background:"var(--bg1)"}}>
+        <span style={{fontFamily:"var(--mono)",fontSize:8,fontWeight:700,letterSpacing:3,color:"var(--text3)"}}>{title}</span>
+      </div>
+      <div style={{padding:16,background:"var(--bg)"}}>{children}</div>
+    </div>
+  );
+}
+
+/* ═══ TOAST ═════════════════════════════════════════════════════ */
+function Toast({msg,type}){
+  const c={
+    success:{bg:"var(--green-dim)",border:"#3ddc8440",text:"var(--green)"},
+    danger: {bg:"var(--red-dim)", border:"#ff475740", text:"var(--red)"},
+    warning:{bg:"var(--gold-dim)",border:"#c9a84c40", text:"var(--gold)"},
+    info:   {bg:"var(--blue-dim)",border:"#4a9eff40", text:"var(--blue)"},
+  }[type]||{bg:"var(--bg2)",border:"var(--border2)",text:"var(--text)"};
+  return(
+    <div className="fade-in" style={{position:"fixed",top:68,right:20,zIndex:9999,
+      padding:"12px 18px",borderRadius:4,maxWidth:320,
+      background:c.bg,border:`1px solid ${c.border}`,
+      fontFamily:"var(--mono)",fontSize:11,color:c.text,
+      letterSpacing:1,boxShadow:"0 8px 40px rgba(0,0,0,.7)"}}>
+      {msg}
+    </div>
+  );
+}
