@@ -93,6 +93,40 @@ def create_app():
         # and falls back to try/catch for SQLite compatibility.
         _is_pg = "postgresql" in str(app.config["SQLALCHEMY_DATABASE_URI"])
 
+        # ── Fix broken SERIAL sequences on PostgreSQL ──────────────────────────
+        # If the signals/daily_stats/settings tables were created without a
+        # proper SERIAL sequence (id col is INTEGER but has no nextval default),
+        # inserts will fail with NotNullViolation on id. This block repairs it.
+        if _is_pg:
+            from sqlalchemy import text
+            _seq_fixes = [
+                ("signals",      "signals_id_seq"),
+                ("daily_stats",  "daily_stats_id_seq"),
+                ("settings",     "settings_id_seq"),
+                ("shadow_balance","shadow_balance_id_seq"),
+            ]
+            try:
+                with db.engine.connect() as _sc:
+                    for _tbl, _seq in _seq_fixes:
+                        # Create sequence if missing
+                        _sc.execute(text(
+                            f"CREATE SEQUENCE IF NOT EXISTS {_seq} START 1"
+                        ))
+                        # Attach sequence to id column as default (safe if already set)
+                        _sc.execute(text(
+                            f"ALTER TABLE {_tbl} ALTER COLUMN id "
+                            f"SET DEFAULT nextval('{_seq}')"
+                        ))
+                        # Advance sequence past any existing max id
+                        _sc.execute(text(
+                            f"SELECT setval('{_seq}', "
+                            f"GREATEST(COALESCE((SELECT MAX(id) FROM {_tbl}), 0) + 1, 1), false)"
+                        ))
+                    _sc.commit()
+                    logger.info("[APP] SERIAL sequence repair complete")
+            except Exception as _se:
+                logger.warning(f"[APP] Sequence repair warning: {_se}")
+
         def _add_column(table, col, coldef):
             from sqlalchemy import text
             try:
