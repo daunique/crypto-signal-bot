@@ -135,6 +135,29 @@ def create_app():
         ]:
             _add_column("signals", _col, _def)
 
+        # Fix legacy 'pair' column — old schema used 'pair', new uses 'symbol'.
+        # Drop the NOT NULL constraint on 'pair' and keep it in sync via trigger.
+        if _is_pg:
+            from sqlalchemy import text
+            try:
+                with db.engine.connect() as _lc:
+                    # Add pair column if missing (legacy)
+                    _lc.execute(text(
+                        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS pair VARCHAR(20)"
+                    ))
+                    # Remove NOT NULL constraint so inserts that only set symbol dont fail
+                    _lc.execute(text(
+                        "ALTER TABLE signals ALTER COLUMN pair DROP NOT NULL"
+                    ))
+                    # Backfill pair from symbol for any existing rows
+                    _lc.execute(text(
+                        "UPDATE signals SET pair = symbol WHERE pair IS NULL AND symbol IS NOT NULL"
+                    ))
+                    _lc.commit()
+                    logger.info("[APP] Legacy pair column fixed")
+            except Exception as _le:
+                logger.warning(f"[APP] pair column fix: {_le}")
+
         # Fix id columns that may have been created as TEXT instead of INTEGER
         if _is_pg:
             from sqlalchemy import text

@@ -8,6 +8,7 @@ class Signal(db.Model):
     id                = db.Column(db.Integer, primary_key=True)
     created_at        = db.Column(db.DateTime, default=datetime.utcnow)
     symbol            = db.Column(db.String(20), nullable=False)
+    pair              = db.Column(db.String(20))  # legacy alias for symbol
     candle_open_time  = db.Column(db.DateTime, nullable=False)
     candle_close_time = db.Column(db.DateTime, nullable=False)
     signal_direction  = db.Column(db.String(4), nullable=False)   # UP or DOWN
