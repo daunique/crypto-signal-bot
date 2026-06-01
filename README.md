@@ -1,213 +1,135 @@
-# Limitless Oracle — Render Deployment Guide
-### Pure Node.js · No apt-get · Deploys first time, every time
+# ⚡ CryptoSignal Bot — 15m Prediction Market
+
+ML-powered 15-minute candlestick direction bot for BTC, ETH, SOL, XRP, BNB, DOGE.  
+Signals delivered via Telegram. Auto-executes on [Limitless Exchange](https://limitless.exchange).
 
 ---
 
-## What changed from the Python version
+## 🚀 Deploy to Render (Step-by-Step)
 
-The backend is now a **Node.js Express server** (`server/index.js`).
-It does everything the Python executor did:
-- HMAC-signed requests to Limitless API
-- EIP-712 order signing via **ethers v6** (same math, no Python/web3 needed)
-- Market slug discovery, orderbook fetch, owner ID resolution
-- Shadow and live order execution
-- Claim winnings, order status check
+### Step 1 — GitHub Setup
+1. Create a new GitHub repository (e.g. `crypto-signal-bot`)
+2. Upload ALL files from this folder into it (drag & drop in GitHub UI)
+3. Make sure `.env` is NOT uploaded (it's in `.gitignore`)
 
-The entire project runs on **one Node runtime** — Render builds it with
-a single `npm install && npm run build` and starts it with `node server/index.js`.
+### Step 2 — Render Setup
+1. Go to [render.com](https://render.com) → New → Web Service
+2. Connect your GitHub repo
+3. Render will auto-detect `render.yaml` — click **Apply**
 
----
+### Step 3 — Set Environment Variables in Render
+Go to your service → **Environment** tab → Add each:
 
-## File Structure
+| Key | Value |
+|-----|-------|
+| `TELEGRAM_BOT_TOKEN` | From @BotFather on Telegram |
+| `TELEGRAM_CHAT_ID` | Your chat ID (use @userinfobot) |
+| `LIMITLESS_TOKEN_ID` | Token ID from `POST /auth/api-tokens/derive` |
+| `LIMITLESS_TOKEN_SECRET` | Base64 secret from same response (shown **once** — save it) |
+| `LIMITLESS_PRIVATE_KEY` | Your wallet private key (starts with 0x) — signs orders via EIP-712 |
+| `LIMITLESS_OWNER_ID` | Your numeric profile ID from `GET /profiles/{your_address}` |
+| `DEFAULT_MODE` | `shadow` (start here, switch to live when ready) |
+| `DEFAULT_POSITION_SIZE` | `10` |
 
-```
-limitless-oracle/
-├── package.json          ← root (Express + ethers deps, build/start scripts)
-├── render.yaml           ← Render Blueprint
-├── .gitignore
-├── server/
-│   └── index.js          ← Express API + EIP-712 signing (replaces executor.py)
-└── client/
-    ├── package.json      ← Vite + React
-    ├── vite.config.js
-    ├── index.html
-    └── src/
-        ├── main.jsx
-        └── App.jsx       ← Full dashboard (unchanged)
-```
+### Step 4 — Deploy
+Click **Deploy** in Render. First deploy takes ~3-5 minutes.  
+Your dashboard will be live at: `https://your-service-name.onrender.com`
 
 ---
 
-## Deploy to Render — Step by Step
+## 🤖 Telegram Bot Setup
 
-### 1. Push to GitHub
-
-Open a terminal in the `limitless-oracle/` folder:
-
-```bash
-git init
-git add .
-git commit -m "Limitless Oracle — initial deploy"
-```
-
-Create a new repo at https://github.com/new (name it `limitless-oracle`), then:
-
-```bash
-git remote add origin https://github.com/YOUR_USERNAME/limitless-oracle.git
-git branch -M main
-git push -u origin main
-```
+1. Message [@BotFather](https://t.me/botfather) on Telegram
+2. Send `/newbot` → follow prompts → copy the token
+3. Message [@userinfobot](https://t.me/userinfobot) to get your Chat ID
+4. Paste both into Render environment variables
 
 ---
 
-### 2. Create the Web Service on Render
+## 🔑 Limitless Auth Setup (Two Layers)
 
-**Option A — Blueprint (easiest):**
-1. render.com → **New → Blueprint**
-2. Connect GitHub → select `limitless-oracle`
-3. Render reads `render.yaml` and fills everything automatically
-4. Click **Apply**
+### Layer 1 — HMAC Token (authenticates HTTP requests)
+1. Go to [limitless.exchange](https://limitless.exchange) and connect your wallet
+2. Call `POST https://api.limitless.exchange/auth/api-tokens/derive` with your Privy `Bearer` token in the `identity` header and `{"scopes": ["trading"]}` as the body
+3. The response contains `tokenId` and `secret` — **the secret is shown only once, save it immediately**
+4. Set `LIMITLESS_TOKEN_ID` and `LIMITLESS_TOKEN_SECRET` in Render
 
-**Option B — Manual:**
-1. render.com → **New → Web Service**
-2. Connect `limitless-oracle` repo
-3. Fill in exactly:
+### Layer 2 — EIP-712 Signing (authenticates order payloads)
+1. Export your wallet private key from MetaMask → Settings → Accounts → Export Private Key
+2. Set `LIMITLESS_PRIVATE_KEY` in Render (the `0x...` key)
 
-| Field | Value |
-|---|---|
-| Runtime | **Node** |
-| Build Command | `npm install && npm run build` |
-| Start Command | `node server/index.js` |
-| Node Version | `20.11.0` |
+### Profile ID
+Call `GET https://api.limitless.exchange/profiles/{your_wallet_address}` and copy the numeric `id` field → set as `LIMITLESS_OWNER_ID`
+
+> ⚠️ **Never share your private key or token secret.** Only store them in Render's environment variables (never in GitHub).
 
 ---
 
-### 3. Set Environment Variables
+## 📊 How It Works
 
-Render dashboard → your service → **Environment** tab → **Add Environment Variable**:
+### Signal Engine
+- Fetches 15m OHLCV candles from **OKX Spot** for 6 pairs
+- Computes 40 technical indicators (RSI, MACD, Stochastic, BB, ADX, Williams %R, CCI, etc.)
+- Runs **Random Forest + Gradient Boosting ensemble** (58.25% accuracy, ~16 signals/day)
+- **Anti-spam**: Only fires the SINGLE best signal per 15-minute candle (highest confidence across all 6 pairs)
 
-| Key | Value | Notes |
-|---|---|---|
-| `LIMITLESS_PRIVATE_KEY` | `0x...` | Your EOA private key |
-| `LIMITLESS_TOKEN_ID` | `tok_...` | From Limitless API token endpoint |
-| `LIMITLESS_TOKEN_SECRET` | base64 string | Shown once — save it immediately |
-| `NODE_ENV` | `production` | Already in render.yaml |
+### Signal Timing
+- **:00, :15, :30, :45** UTC — Signal evaluated at candle open
+- **:01, :16, :31, :46** UTC — Outcome resolved at candle close
+- Win/Loss counted ONLY after the 15-minute candle fully closes
 
-> **EOA wallets only.** Do NOT set `LIMITLESS_SMART_WALLET`.
-> In EOA mode: maker = signer = the address derived from your private key.
+### Order Execution
+- **Shadow mode**: Paper trades only, tracks P&L against $1,000 demo balance
+- **Live mode**: Places real GTC limit orders on Limitless Exchange
+- Contract price always ≤ $0.50 as required
+- Order type: **GTC (Good Till Cancelled)**
 
-> **Tip:** You can also enter credentials in the dashboard Settings tab at runtime.
-> Dashboard credentials override env vars, so you don't need to redeploy to switch wallets.
-
----
-
-### 4. Deploy
-
-Click **Create Web Service** (or Render auto-deploys from the Blueprint).
-Build takes ~2 minutes. You'll get a URL like:
-```
-https://limitless-oracle.onrender.com
-```
+### Signal Tiers
+| Tier | Condition | Daily Avg | Accuracy |
+|------|-----------|-----------|----------|
+| T1 (High) | ML ≥58% + Volume spike >1.5× | ~1-2/day | ~62% |
+| T2 (Standard) | ML ≥58% | ~14-15/day | ~58% |
 
 ---
 
-## Getting Your Limitless API Token
+## 🛠 Settings (via Dashboard)
 
-Run this in your browser DevTools console **while logged into limitless.exchange**:
-
-```javascript
-fetch("https://api.limitless.exchange/auth/api-tokens/derive", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  credentials: "include",
-  body: JSON.stringify({ name: "oracle-bot" })
-}).then(r => r.json()).then(d => {
-  console.log("TOKEN ID:", d.tokenId);
-  console.log("SECRET (save now!):", d.secret);
-})
-```
-
-- `tokenId` → `LIMITLESS_TOKEN_ID`
-- `secret` → `LIMITLESS_TOKEN_SECRET` *(shown once — copy it immediately)*
+| Setting | Range | Description |
+|---------|-------|-------------|
+| Mode | Live/Shadow | Toggle via dashboard |
+| Position Size | $1–$1,000 | Decimal sizing supported |
+| Martingale | On/Off | Double after loss |
+| Martingale Multiplier | 1.1×–5× | Loss multiplier |
+| Contract Price Cap | $0.01–$0.50 | Max per contract |
+| Min ML Confidence | 55%–75% | Higher = fewer but better signals |
 
 ---
 
-## Local Development
+## 📁 File Structure
 
-### Run the backend
-```bash
-# From project root:
-npm install
-
-export LIMITLESS_PRIVATE_KEY=0x...
-export LIMITLESS_TOKEN_ID=...
-export LIMITLESS_TOKEN_SECRET=...
-
-node server/index.js
-# → http://localhost:5000
 ```
-
-### Run the frontend (separate terminal)
-```bash
-cd client
-npm install
-npm run dev
-# → http://localhost:3000  (proxies /api → :5000 automatically)
+crypto-signal-bot/
+├── app.py              # Flask app + all API routes
+├── wsgi.py             # Render/Gunicorn entrypoint
+├── extensions.py       # db + socketio instances
+├── models.py           # SQLAlchemy DB models
+├── signal_engine.py    # OKX data fetch + ML signal generation
+├── limitless_executor.py # Limitless order placement (live + shadow)
+├── telegram_bot.py     # Telegram notifications
+├── scheduler.py        # APScheduler jobs (signal, resolve, summary)
+├── templates/
+│   └── index.html      # Full dashboard UI
+├── requirements.txt    # Python dependencies
+├── render.yaml         # Render deployment config
+├── .env.example        # Environment variable template
+└── .gitignore
 ```
 
 ---
 
-## Commands Reference
+## ⚠️ Important Notes
 
-| Purpose | Command |
-|---|---|
-| Install all deps | `npm install` (root) + `cd client && npm install` |
-| Build frontend | `npm run build` (runs `cd client && npm install && npm run build`) |
-| Start server | `node server/index.js` |
-| Full Render build | `npm install && npm run build` |
-| Full Render start | `node server/index.js` |
-
----
-
-## API Endpoints
-
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/ping` | Keep-alive / health check |
-| POST | `/api/limitless/execute` | Place live or shadow order |
-| POST | `/api/limitless/claim` | Redeem winning positions |
-| POST | `/api/limitless/order-status` | Check if order was filled |
-| POST | `/api/limitless/validate` | Validate credentials |
-| GET | `/api/limitless/slug/:symbol` | Discover active market slug |
-
----
-
-## Troubleshooting
-
-**Build failed — `Cannot find module`**
-→ Make sure `package.json` at the root has `"type": "module"` and all
-dependencies listed. Run `npm install` locally first to verify.
-
-**`"type": "module"` errors in server**
-→ The server uses ES module syntax (`import`/`export`). Confirm root
-`package.json` has `"type": "module"`.
-
-**"No active 15-min market found"**
-→ This is normal at the :00/:15/:30/:45 boundary — the old market expires
-and the new one takes a few seconds to appear. The engine retries 5×.
-
-**"Signer does not match"**
-→ Do not set `LIMITLESS_SMART_WALLET`. EOA mode only: your private key
-*is* both your maker and signer.
-
-**"USDC not approved"**
-→ Visit limitless.exchange with your wallet and place one manual trade first.
-The UI triggers the USDC approval on-chain automatically.
-
-**Free plan sleeping (signals missed)**
-→ The 2s keep-alive ping only works while your browser tab is open.
-Upgrade to Render **Starter ($7/mo)** for always-on execution.
-
-**Order rejected with HTTP 400**
-→ The full API response is returned in `api_response`. Check the dashboard
-console or Render logs for the exact rejection reason.
+- **Start in Shadow mode** and run for at least 1 week before switching live
+- The bot retrains ML models every Sunday at 02:00 UTC automatically
+- SQLite is used for simplicity on Render free tier; for production use PostgreSQL
+- Render free tier sleeps after inactivity — upgrade to paid for 24/7 operation

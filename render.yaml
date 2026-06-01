@@ -1,27 +1,30 @@
-# render.yaml — Limitless Oracle
-# Connect this repo on Render via New → Blueprint
 services:
   - type: web
-    name: limitless-oracle
-    runtime: node
-    region: oregon
+    name: btcbot
+    env: python
+    buildCommand: pip install --upgrade pip setuptools wheel && pip install --no-cache-dir -r requirements.txt
+    startCommand: gunicorn --worker-class geventwebsocket.gunicorn.workers.GeventWebSocketWorker -w 1 --timeout 120 --bind 0.0.0.0:$PORT wsgi:app
     plan: free
-
-    buildCommand: npm install && npm run build
-    startCommand: npm start
-
-    healthCheckPath: /api/ping
-
     envVars:
-      - key: NODE_VERSION
-        value: "20.11.0"
-      - key: NODE_ENV
+      - key: SECRET_KEY
+        generateValue: true
+      - key: FLASK_ENV
         value: production
-
-      # ── Set these in Render → Environment tab (never commit real values) ──
-      # - key: LIMITLESS_PRIVATE_KEY
-      #   value: "0x..."
-      # - key: LIMITLESS_TOKEN_ID
-      #   value: "..."
-      # - key: LIMITLESS_TOKEN_SECRET
-      #   value: "..."
+      - key: DATABASE_URL
+        sync: false
+      - key: LIMITLESS_TOKEN_ID
+        sync: false
+      - key: LIMITLESS_TOKEN_SECRET
+        sync: false
+      - key: LIMITLESS_PRIVATE_KEY
+        sync: false
+      - key: LIMITLESS_SMART_WALLET
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: DEFAULT_MODE
+        value: shadow
+      - key: DEFAULT_POSITION_SIZE
+        value: "10"
