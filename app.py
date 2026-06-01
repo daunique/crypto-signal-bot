@@ -110,9 +110,28 @@ def create_app():
 
         # signals table
         for _col, _def in [
-            ("market_slug",   "VARCHAR(200)"),
-            ("condition_id",  "VARCHAR(100)"),
-            ("limitless_fill","VARCHAR(10) DEFAULT 'NEUTRAL'"),
+            ("symbol",           "VARCHAR(20)"),
+            ("candle_open_time", "TIMESTAMP"),
+            ("candle_close_time","TIMESTAMP"),
+            ("signal_direction", "VARCHAR(4)"),
+            ("ml_confidence",    "REAL"),
+            ("rsi_14",           "REAL"),
+            ("macd_hist",        "REAL"),
+            ("adx",              "REAL"),
+            ("vol_ratio",        "REAL"),
+            ("tier",             "VARCHAR(10)"),
+            ("outcome",          "VARCHAR(10) DEFAULT 'PENDING'"),
+            ("open_price",       "REAL"),
+            ("close_price",      "REAL"),
+            ("mode",             "VARCHAR(10) DEFAULT 'shadow'"),
+            ("order_id",         "VARCHAR(100)"),
+            ("position_size",    "REAL"),
+            ("contracts_bought", "REAL"),
+            ("contract_price",   "REAL"),
+            ("telegram_sent",    "BOOLEAN DEFAULT FALSE"),
+            ("market_slug",      "VARCHAR(200)"),
+            ("condition_id",     "VARCHAR(100)"),
+            ("limitless_fill",   "VARCHAR(10) DEFAULT 'NEUTRAL'"),
         ]:
             _add_column("signals", _col, _def)
 
