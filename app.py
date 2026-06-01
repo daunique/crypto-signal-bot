@@ -135,18 +135,24 @@ def create_app():
         ]:
             _add_column("signals", _col, _def)
 
-        # daily_stats table — add ALL columns including id
+        # Fix id columns that may have been created as TEXT instead of INTEGER
         if _is_pg:
             from sqlalchemy import text
-            try:
-                with db.engine.connect() as _dc:
-                    # Add id column if missing (bare INTEGER, sequence wired below)
-                    _dc.execute(text(
-                        "ALTER TABLE daily_stats ADD COLUMN IF NOT EXISTS id INTEGER"
-                    ))
-                    _dc.commit()
-            except Exception as _de:
-                logger.warning(f"[APP] daily_stats.id migration: {_de}")
+            for _fix_tbl in ["signals", "daily_stats", "settings", "shadow_balance"]:
+                try:
+                    with db.engine.connect() as _dc:
+                        _dc.execute(text(
+                            f"ALTER TABLE {_fix_tbl} ADD COLUMN IF NOT EXISTS id INTEGER"
+                        ))
+                        _dc.execute(text(
+                            f"ALTER TABLE {_fix_tbl} ALTER COLUMN id TYPE INTEGER "
+                            f"USING id::integer"
+                        ))
+                        _dc.commit()
+                except Exception as _de:
+                    _dem = str(_de).lower()
+                    if "already exists" not in _dem and "duplicate" not in _dem:
+                        logger.warning(f"[APP] id column fix ({_fix_tbl}): {_de}")
         for _col, _def in [
             ("date",          "DATE UNIQUE"),
             ("total_signals", "INTEGER DEFAULT 0"),
@@ -188,7 +194,7 @@ def create_app():
                             f"ALTER TABLE {_tbl} ALTER COLUMN id SET DEFAULT nextval('{_seq}')"))
                         _sc.execute(text(
                             f"SELECT setval('{_seq}', "
-                            f"GREATEST(COALESCE((SELECT MAX(id) FROM {_tbl}), 0) + 1, 1), false)"))
+                            f"GREATEST(COALESCE((SELECT MAX(id::integer) FROM {_tbl}), 0) + 1, 1), false)"))
                     _sc.commit()
                     logger.info("[APP] SERIAL sequence repair complete")
             except Exception as _se:
