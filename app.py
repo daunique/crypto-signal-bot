@@ -193,8 +193,8 @@ def create_app():
                             if _db_col in _nullable_set or _db_col not in {c for c,t,n in _cols}:
                                 try:
                                     _cx.execute(_text(
-                                        f"ALTER TABLE {_tbl} "
-                                        f"ALTER COLUMN "{_db_col}" DROP NOT NULL"
+                                        "ALTER TABLE " + _tbl +
+                                        " ALTER COLUMN "" + _db_col + "" DROP NOT NULL"
                                     ))
                                     logger.info(f"[MIGRATE] dropped NOT NULL on {_tbl}.{_db_col}")
                                 except Exception as _e:
