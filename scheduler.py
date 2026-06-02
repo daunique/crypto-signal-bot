@@ -119,20 +119,17 @@ def job_generate_signal():
             else:
                 position_size = base_size
 
-            # ── 2-candle cooldown after 2 consecutive losses ────────────
-            # Applies in both shadow and live mode.
-            # cooldown_remaining is decremented each candle regardless of
-            # whether a signal fires, so it counts wall-clock candles not trades.
-            cd_remaining = int(settings.cooldown_remaining or 0)
-            if cd_remaining > 0:
-                settings.cooldown_remaining = cd_remaining - 1
-                db.session.commit()
-                logger.info(
-                    f"[GENERATE] COOLDOWN active — sitting out this candle "
-                    f"({cd_remaining} candle(s) remaining after this one). "
-                    f"Resuming in {cd_remaining - 1} more candle(s)."
-                )
-                return
+            # ── 2-candle cooldown after 2 consecutive losses — DISABLED ────────
+            # cd_remaining = int(settings.cooldown_remaining or 0)
+            # if cd_remaining > 0:
+            #     settings.cooldown_remaining = cd_remaining - 1
+            #     db.session.commit()
+            #     logger.info(
+            #         f"[GENERATE] COOLDOWN active — sitting out this candle "
+            #         f"({cd_remaining} candle(s) remaining after this one). "
+            #         f"Resuming in {cd_remaining - 1} more candle(s)."
+            #     )
+            #     return
 
             logger.info(f"[GENERATE] Starting | mode={mode} min_conf={min_conf}")
 
@@ -184,13 +181,21 @@ def job_generate_signal():
                         "DOGE-USDT": "B", "SOL-USDT": "B",
                         "XRP-USDT": "C", "BNB-USDT": "C",
                     }
-                    _last_family = _FAMILY_MAP.get(_last_sig.symbol, "A")
-                    _excluded_families = [_last_family]
-                    logger.info(
-                        f"[GENERATE] Last signal family={_last_family} "
-                        f"({_last_sig.symbol}) — "
-                        f"excluding family {_excluded_families} this candle"
-                    )
+                    # Use symbol, fall back to pair (legacy column) if symbol is null
+                    _last_symbol = _last_sig.symbol or _last_sig.pair or ""
+                    _last_family = _FAMILY_MAP.get(_last_symbol)
+                    if _last_family:
+                        _excluded_families = [_last_family]
+                        logger.info(
+                            f"[GENERATE] Last signal family={_last_family} "
+                            f"({_last_symbol}) — "
+                            f"excluding family {_excluded_families} this candle"
+                        )
+                    else:
+                        logger.info(
+                            f"[GENERATE] Last signal symbol='{_last_symbol}' "
+                            f"not in family map — no family exclusion this candle"
+                        )
             except Exception as _fe:
                 logger.warning(f"[GENERATE] Family rotation check error: {_fe}")
 
@@ -638,52 +643,34 @@ def job_resolve_outcomes():
                         except Exception as _me:
                             logger.warning(f"[RESOLVE] Martingale update error: {_me}")
 
-                        # ── Cooldown counter update ───────────────────────
-                        # Runs in both shadow and live mode, regardless of
-                        # whether martingale is on. The cooldown is a signal
-                        # quality filter — it applies to all trade modes.
-                        # LOSS: 2 consecutive → sit out 2 candles.
-                        # WIN (invert mode only): 2 consecutive → sit out 2 candles.
-                        try:
-                            _resolve_settings = Settings.query.first()
-                            if _resolve_settings:
-                                _inv_mode = bool(getattr(_resolve_settings, 'invert_direction', False))
-                                if outcome == "WIN":
-                                    _resolve_settings.cooldown_loss_count = 0
-                                    logger.info("[RESOLVE] Cooldown loss count RESET after WIN")
-
-                                    if _inv_mode:
-                                        new_win_count = int(getattr(_resolve_settings, 'cooldown_win_count', 0) or 0) + 1
-                                        if new_win_count >= 2:
-                                            _resolve_settings.cooldown_remaining = 2
-                                            _resolve_settings.cooldown_win_count = 1
-                                            logger.warning(
-                                                "[RESOLVE] INVERT WIN COOLDOWN TRIGGERED — "
-                                                "2 consecutive wins. Sitting out 2 candles."
-                                            )
-                                        else:
-                                            _resolve_settings.cooldown_win_count = new_win_count
-                                            logger.info(f"[RESOLVE] Invert win count={new_win_count}/2")
-                                    else:
-                                        _resolve_settings.cooldown_win_count = 0
-
-                                else:  # LOSS
-                                    _resolve_settings.cooldown_win_count = 0
-                                    new_loss_count = int(_resolve_settings.cooldown_loss_count or 0) + 1
-                                    if new_loss_count >= 2:
-                                        _resolve_settings.cooldown_remaining  = 2
-                                        _resolve_settings.cooldown_loss_count = 1
-                                        logger.warning(
-                                            f"[RESOLVE] COOLDOWN TRIGGERED — "
-                                            f"2 consecutive losses. Sitting out next 2 candles. "
-                                            f"Loss count carried forward as 1."
-                                        )
-                                    else:
-                                        _resolve_settings.cooldown_loss_count = new_loss_count
-                                        logger.info(f"[RESOLVE] Cooldown loss count={new_loss_count}/2")
-                                db.session.commit()
-                        except Exception as _cde:
-                            logger.warning(f"[RESOLVE] Cooldown update error: {_cde}")
+                        # ── Cooldown counter update — DISABLED ───────────────
+                        # (2-loss-streak cooldown commented out)
+                        # try:
+                        #     _resolve_settings = Settings.query.first()
+                        #     if _resolve_settings:
+                        #         _inv_mode = bool(getattr(_resolve_settings, 'invert_direction', False))
+                        #         if outcome == "WIN":
+                        #             _resolve_settings.cooldown_loss_count = 0
+                        #             if _inv_mode:
+                        #                 new_win_count = int(getattr(_resolve_settings, 'cooldown_win_count', 0) or 0) + 1
+                        #                 if new_win_count >= 2:
+                        #                     _resolve_settings.cooldown_remaining = 2
+                        #                     _resolve_settings.cooldown_win_count = 1
+                        #                 else:
+                        #                     _resolve_settings.cooldown_win_count = new_win_count
+                        #             else:
+                        #                 _resolve_settings.cooldown_win_count = 0
+                        #         else:  # LOSS
+                        #             _resolve_settings.cooldown_win_count = 0
+                        #             new_loss_count = int(_resolve_settings.cooldown_loss_count or 0) + 1
+                        #             if new_loss_count >= 2:
+                        #                 _resolve_settings.cooldown_remaining  = 2
+                        #                 _resolve_settings.cooldown_loss_count = 1
+                        #             else:
+                        #                 _resolve_settings.cooldown_loss_count = new_loss_count
+                        #         db.session.commit()
+                        # except Exception as _cde:
+                        #     logger.warning(f"[RESOLVE] Cooldown update error: {_cde}")
 
                         # Telegram result
                         try:
