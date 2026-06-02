@@ -182,22 +182,27 @@ def create_app():
                     # 2. Drop NOT NULL on every column that should be nullable
                     #    AND on any unknown legacy columns not in our schema
                     for _tbl, _cols in _SCHEMA.items():
+                        _known_cols = {c for c,t,n in _cols}
                         _nullable_set = {c for c, t, n in _cols if n}
-                        # fetch all NOT NULL cols from DB for this table
-                        _q = _cx.execute(_text(
-                            "SELECT column_name FROM information_schema.columns "
-                            f"WHERE table_name='{_tbl}' AND is_nullable='NO' "
-                            "AND column_name != 'id'"
-                        ))
-                        for (_db_col,) in _q.fetchall():
-                            if _db_col in _nullable_set or _db_col not in {c for c,t,n in _cols}:
+                        try:
+                            _q = _cx.execute(_text(
+                                "SELECT column_name FROM information_schema.columns "
+                                f"WHERE table_name='{_tbl}' AND is_nullable='NO' "
+                                "AND column_name != 'id'"
+                            ))
+                            _nn_cols = _q.fetchall()
+                        except Exception:
+                            _nn_cols = []
+                        for (_db_col,) in _nn_cols:
+                            if _db_col in _nullable_set or _db_col not in _known_cols:
                                 try:
-                                    _cx.execute(_text(
-                                        "ALTER TABLE " + _tbl +
-                                        " ALTER COLUMN "" + _db_col + "" DROP NOT NULL"
-                                    ))
+                                    _cx.execute(_text("SAVEPOINT sp_nn"))
+                                    sql = f'ALTER TABLE {_tbl} ALTER COLUMN "{_db_col}" DROP NOT NULL'
+                                    _cx.execute(_text(sql))
+                                    _cx.execute(_text("RELEASE SAVEPOINT sp_nn"))
                                     logger.info(f"[MIGRATE] dropped NOT NULL on {_tbl}.{_db_col}")
                                 except Exception as _e:
+                                    _cx.execute(_text("ROLLBACK TO SAVEPOINT sp_nn"))
                                     logger.warning(f"[MIGRATE] drop NOT NULL {_tbl}.{_db_col}: {_e}")
 
                     # 3. Cast id columns to INTEGER and wire SERIAL sequences
