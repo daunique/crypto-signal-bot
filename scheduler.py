@@ -167,28 +167,27 @@ def job_generate_signal():
             # ── Pair family rotation ──────────────────────────────────────────
             # Families: A = BTC-USDT + ETH-USDT, B = DOGE-USDT + SOL-USDT,
             #           C = XRP-USDT + BNB-USDT.
-            # After a signal fires from one family, the next signal MUST come
-            # from a different family (strict exclusion, not just preference).
-            # Falls through to all families only if no other family qualifies.
+            # Check both the last RESOLVED signal AND any current PENDING signal
+            # to determine which family to exclude next.
             _excluded_families = None
             try:
+                _FAMILY_MAP = {
+                    "BTC-USDT": "A", "ETH-USDT": "A",
+                    "DOGE-USDT": "B", "SOL-USDT": "B",
+                    "XRP-USDT": "C", "BNB-USDT": "C",
+                }
+                # Use the most recent signal regardless of outcome (pending or resolved)
                 _last_sig = Signal.query.order_by(
-                    Signal.candle_open_time.desc()
+                    Signal.created_at.desc()
                 ).first()
                 if _last_sig:
-                    _FAMILY_MAP = {
-                        "BTC-USDT": "A", "ETH-USDT": "A",
-                        "DOGE-USDT": "B", "SOL-USDT": "B",
-                        "XRP-USDT": "C", "BNB-USDT": "C",
-                    }
-                    # Use symbol, fall back to pair (legacy column) if symbol is null
                     _last_symbol = _last_sig.symbol or _last_sig.pair or ""
                     _last_family = _FAMILY_MAP.get(_last_symbol)
                     if _last_family:
                         _excluded_families = [_last_family]
                         logger.info(
                             f"[GENERATE] Last signal family={_last_family} "
-                            f"({_last_symbol}) — "
+                            f"({_last_symbol} outcome={_last_sig.outcome}) — "
                             f"excluding family {_excluded_families} this candle"
                         )
                     else:
@@ -233,12 +232,26 @@ def job_generate_signal():
 
             any_pending = Signal.query.filter(Signal.outcome == "PENDING").first()
             if any_pending:
-                logger.info(
-                    f"[GENERATE] Blocked — signal id={any_pending.id} "
-                    f"({any_pending.symbol} {any_pending.signal_direction}) "
-                    f"is still PENDING. No new signal until it resolves."
-                )
-                return
+                _pending_symbol = any_pending.symbol or any_pending.pair or ""
+                _pending_family = {
+                    "BTC-USDT": "A", "ETH-USDT": "A",
+                    "DOGE-USDT": "B", "SOL-USDT": "B",
+                    "XRP-USDT": "C", "BNB-USDT": "C",
+                }.get(_pending_symbol)
+                if _pending_family:
+                    # Add pending family to exclusion list (don't fire same family twice)
+                    _excluded_families = list(set((_excluded_families or []) + [_pending_family]))
+                    logger.info(
+                        f"[GENERATE] Signal id={any_pending.id} "
+                        f"({_pending_symbol}) still PENDING — "
+                        f"excluding its family {_pending_family} from candidates"
+                    )
+                else:
+                    logger.info(
+                        f"[GENERATE] Blocked — signal id={any_pending.id} "
+                        f"({_pending_symbol}) is still PENDING. No new signal until it resolves."
+                    )
+                    return
 
             # ── Place order — retry every 5s for up to 2 minutes (24 attempts) ──
             # Stops immediately on first success. Gives the market time to open
