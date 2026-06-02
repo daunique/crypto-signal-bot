@@ -342,7 +342,8 @@ def job_generate_signal():
             # ── Save signal ──────────────────────────────────────────────────────
             signal_obj = Signal(
                 symbol            = sig['symbol'],
-                pair              = sig['symbol'],   # legacy column kept in sync
+                pair              = sig['symbol'],         # legacy column kept in sync
+                direction         = sig['direction'],      # legacy column kept in sync
                 candle_open_time  = candle_open,
                 candle_close_time = candle_close,
                 signal_direction  = sig['direction'],

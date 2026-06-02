@@ -87,141 +87,145 @@ def create_app():
     with app.app_context():
         db.create_all()
 
-        # ── Safe column migrations ──────────────────────────────────────────────
-        # db.create_all() only creates missing TABLES — it never adds new columns
-        # to existing tables. Each migration uses IF NOT EXISTS on PostgreSQL
-        # and falls back to try/catch for SQLite compatibility.
+        # ══════════════════════════════════════════════════════════════════════
+        # ONE-PASS SCHEMA MIGRATION
+        # For every table: add missing columns, drop NOT NULL on unknown legacy
+        # columns, fix SERIAL sequences. Runs on every deploy — all ops are
+        # idempotent (IF NOT EXISTS / try-except).
+        # ══════════════════════════════════════════════════════════════════════
         _is_pg = "postgresql" in str(app.config["SQLALCHEMY_DATABASE_URI"])
 
-        def _add_column(table, col, coldef):
-            from sqlalchemy import text
-            try:
-                with db.engine.connect() as _c:
-                    if _is_pg:
-                        _c.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {coldef}"))
-                    else:
-                        _c.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {coldef}"))
-                    _c.commit()
-                    logger.info(f"[APP] Migration: added {table}.{col}")
-            except Exception as _e:
-                _em = str(_e).lower()
-                if "duplicate column" not in _em and "already exists" not in _em:
-                    logger.warning(f"[APP] Migration warning ({table}.{col}): {_e}")
+        # ── Desired schema: {table: [(col, pg_type, nullable)]} ───────────────
+        _SCHEMA = {
+            "signals": [
+                ("id",               "INTEGER",      False),
+                ("created_at",       "TIMESTAMP",    True),
+                ("symbol",           "VARCHAR(20)",  False),
+                ("pair",             "VARCHAR(20)",  True),   # legacy
+                ("direction",        "VARCHAR(10)",  True),   # legacy
+                ("candle_open_time", "TIMESTAMP",    False),
+                ("candle_close_time","TIMESTAMP",    False),
+                ("signal_direction", "VARCHAR(4)",   False),
+                ("ml_confidence",    "REAL",         True),
+                ("rsi_14",           "REAL",         True),
+                ("macd_hist",        "REAL",         True),
+                ("adx",              "REAL",         True),
+                ("vol_ratio",        "REAL",         True),
+                ("tier",             "VARCHAR(10)",  True),
+                ("outcome",          "VARCHAR(10)",  True),
+                ("open_price",       "REAL",         True),
+                ("close_price",      "REAL",         True),
+                ("mode",             "VARCHAR(10)",  True),
+                ("order_id",         "VARCHAR(100)", True),
+                ("market_slug",      "VARCHAR(200)", True),
+                ("condition_id",     "VARCHAR(100)", True),
+                ("position_size",    "REAL",         True),
+                ("contracts_bought", "REAL",         True),
+                ("contract_price",   "REAL",         True),
+                ("telegram_sent",    "BOOLEAN",      True),
+                ("limitless_fill",   "VARCHAR(10)",  True),
+            ],
+            "daily_stats": [
+                ("id",           "INTEGER",     False),
+                ("date",         "DATE",        False),
+                ("total_signals","INTEGER",     True),
+                ("wins",         "INTEGER",     True),
+                ("losses",       "INTEGER",     True),
+                ("win_rate",     "REAL",        True),
+                ("mode",         "VARCHAR(10)", True),
+            ],
+            "settings": [
+                ("id",                  "INTEGER",      False),
+                ("mode",               "VARCHAR(10)",  True),
+                ("position_size",      "REAL",         True),
+                ("use_martingale",     "BOOLEAN",      True),
+                ("martingale_sequence","VARCHAR(200)", True),
+                ("martingale_step",    "REAL",         True),
+                ("martingale_cap",     "INTEGER",      True),
+                ("martingale_streak",  "INTEGER",      True),
+                ("cooldown_remaining", "INTEGER",      True),
+                ("cooldown_loss_count","INTEGER",      True),
+                ("cooldown_win_count", "INTEGER",      True),
+                ("max_contract_price", "REAL",         True),
+                ("min_confidence",     "REAL",         True),
+                ("invert_direction",   "BOOLEAN",      True),
+                ("updated_at",         "TIMESTAMP",    True),
+            ],
+            "shadow_balance": [
+                ("id",               "INTEGER",   False),
+                ("balance",          "REAL",      True),
+                ("total_profit_loss","REAL",      True),
+                ("updated_at",       "TIMESTAMP", True),
+            ],
+        }
 
-        # signals table
-        for _col, _def in [
-            ("symbol",           "VARCHAR(20)"),
-            ("candle_open_time", "TIMESTAMP"),
-            ("candle_close_time","TIMESTAMP"),
-            ("signal_direction", "VARCHAR(4)"),
-            ("ml_confidence",    "REAL"),
-            ("rsi_14",           "REAL"),
-            ("macd_hist",        "REAL"),
-            ("adx",              "REAL"),
-            ("vol_ratio",        "REAL"),
-            ("tier",             "VARCHAR(10)"),
-            ("outcome",          "VARCHAR(10) DEFAULT 'PENDING'"),
-            ("open_price",       "REAL"),
-            ("close_price",      "REAL"),
-            ("mode",             "VARCHAR(10) DEFAULT 'shadow'"),
-            ("order_id",         "VARCHAR(100)"),
-            ("position_size",    "REAL"),
-            ("contracts_bought", "REAL"),
-            ("contract_price",   "REAL"),
-            ("telegram_sent",    "BOOLEAN DEFAULT FALSE"),
-            ("market_slug",      "VARCHAR(200)"),
-            ("condition_id",     "VARCHAR(100)"),
-            ("limitless_fill",   "VARCHAR(10) DEFAULT 'NEUTRAL'"),
-        ]:
-            _add_column("signals", _col, _def)
-
-        # Fix legacy 'pair' column — old schema used 'pair', new uses 'symbol'.
-        # Drop the NOT NULL constraint on 'pair' and keep it in sync via trigger.
         if _is_pg:
-            from sqlalchemy import text
+            from sqlalchemy import text as _text
             try:
-                with db.engine.connect() as _lc:
-                    # Add pair column if missing (legacy)
-                    _lc.execute(text(
-                        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS pair VARCHAR(20)"
-                    ))
-                    # Remove NOT NULL constraint so inserts that only set symbol dont fail
-                    _lc.execute(text(
-                        "ALTER TABLE signals ALTER COLUMN pair DROP NOT NULL"
-                    ))
-                    # Backfill pair from symbol for any existing rows
-                    _lc.execute(text(
-                        "UPDATE signals SET pair = symbol WHERE pair IS NULL AND symbol IS NOT NULL"
-                    ))
-                    _lc.commit()
-                    logger.info("[APP] Legacy pair column fixed")
-            except Exception as _le:
-                logger.warning(f"[APP] pair column fix: {_le}")
+                with db.engine.connect() as _cx:
 
-        # Fix id columns that may have been created as TEXT instead of INTEGER
-        if _is_pg:
-            from sqlalchemy import text
-            for _fix_tbl in ["signals", "daily_stats", "settings", "shadow_balance"]:
-                try:
-                    with db.engine.connect() as _dc:
-                        _dc.execute(text(
-                            f"ALTER TABLE {_fix_tbl} ADD COLUMN IF NOT EXISTS id INTEGER"
+                    # 1. Add any missing columns
+                    for _tbl, _cols in _SCHEMA.items():
+                        for _col, _typ, _nullable in _cols:
+                            if _col == "id":
+                                continue  # handled by sequence repair below
+                            try:
+                                _cx.execute(_text(
+                                    f"ALTER TABLE {_tbl} "
+                                    f"ADD COLUMN IF NOT EXISTS {_col} {_typ}"
+                                ))
+                            except Exception as _e:
+                                _em = str(_e).lower()
+                                if "already exists" not in _em and "duplicate" not in _em:
+                                    logger.warning(f"[MIGRATE] add {_tbl}.{_col}: {_e}")
+
+                    # 2. Drop NOT NULL on every column that should be nullable
+                    #    AND on any unknown legacy columns not in our schema
+                    for _tbl, _cols in _SCHEMA.items():
+                        _nullable_set = {c for c, t, n in _cols if n}
+                        # fetch all NOT NULL cols from DB for this table
+                        _q = _cx.execute(_text(
+                            "SELECT column_name FROM information_schema.columns "
+                            f"WHERE table_name='{_tbl}' AND is_nullable='NO' "
+                            "AND column_name != 'id'"
                         ))
-                        _dc.execute(text(
-                            f"ALTER TABLE {_fix_tbl} ALTER COLUMN id TYPE INTEGER "
-                            f"USING id::integer"
-                        ))
-                        _dc.commit()
-                except Exception as _de:
-                    _dem = str(_de).lower()
-                    if "already exists" not in _dem and "duplicate" not in _dem:
-                        logger.warning(f"[APP] id column fix ({_fix_tbl}): {_de}")
-        for _col, _def in [
-            ("date",          "DATE UNIQUE"),
-            ("total_signals", "INTEGER DEFAULT 0"),
-            ("wins",          "INTEGER DEFAULT 0"),
-            ("losses",        "INTEGER DEFAULT 0"),
-            ("win_rate",      "REAL DEFAULT 0.0"),
-            ("mode",          "VARCHAR(10) DEFAULT 'shadow'"),
-        ]:
-            _add_column("daily_stats", _col, _def)
+                        for (_db_col,) in _q.fetchall():
+                            if _db_col in _nullable_set or _db_col not in {c for c,t,n in _cols}:
+                                try:
+                                    _cx.execute(_text(
+                                        f"ALTER TABLE {_tbl} "
+                                        f"ALTER COLUMN "{_db_col}" DROP NOT NULL"
+                                    ))
+                                    logger.info(f"[MIGRATE] dropped NOT NULL on {_tbl}.{_db_col}")
+                                except Exception as _e:
+                                    logger.warning(f"[MIGRATE] drop NOT NULL {_tbl}.{_db_col}: {_e}")
 
-        # settings table
-        for _col, _def in [
-            ("invert_direction",    "BOOLEAN DEFAULT FALSE"),
-            ("martingale_step",     "REAL DEFAULT 0.5"),
-            ("martingale_cap",      "INTEGER DEFAULT 10"),
-            ("martingale_streak",   "INTEGER DEFAULT 0"),
-            ("cooldown_remaining",  "INTEGER DEFAULT 0"),
-            ("cooldown_loss_count", "INTEGER DEFAULT 0"),
-            ("cooldown_win_count",  "INTEGER DEFAULT 0"),
-            ("martingale_sequence", "VARCHAR(200) DEFAULT '1,1.5,2,3,4.5,6.7'"),
-        ]:
-            _add_column("settings", _col, _def)
+                    # 3. Cast id columns to INTEGER and wire SERIAL sequences
+                    for _tbl in _SCHEMA:
+                        _seq = f"{_tbl}_id_seq"
+                        try:
+                            _cx.execute(_text(
+                                f"ALTER TABLE {_tbl} ALTER COLUMN id TYPE INTEGER USING id::integer"
+                            ))
+                        except Exception:
+                            pass
+                        try:
+                            _cx.execute(_text(f"CREATE SEQUENCE IF NOT EXISTS {_seq} START 1"))
+                            _cx.execute(_text(
+                                f"ALTER TABLE {_tbl} ALTER COLUMN id SET DEFAULT nextval('{_seq}')"
+                            ))
+                            _cx.execute(_text(
+                                f"SELECT setval('{_seq}', "
+                                f"GREATEST(COALESCE((SELECT MAX(id::integer) FROM {_tbl}),0)+1,1),false)"
+                            ))
+                        except Exception as _e:
+                            logger.warning(f"[MIGRATE] sequence {_tbl}: {_e}")
 
-        # ── Fix broken SERIAL sequences on PostgreSQL ──────────────────────────
-        # Runs AFTER all column migrations so id cols are guaranteed to exist.
-        if _is_pg:
-            from sqlalchemy import text
-            _seq_fixes = [
-                ("signals",       "signals_id_seq"),
-                ("daily_stats",   "daily_stats_id_seq"),
-                ("settings",      "settings_id_seq"),
-                ("shadow_balance","shadow_balance_id_seq"),
-            ]
-            try:
-                with db.engine.connect() as _sc:
-                    for _tbl, _seq in _seq_fixes:
-                        _sc.execute(text(f"CREATE SEQUENCE IF NOT EXISTS {_seq} START 1"))
-                        _sc.execute(text(
-                            f"ALTER TABLE {_tbl} ALTER COLUMN id SET DEFAULT nextval('{_seq}')"))
-                        _sc.execute(text(
-                            f"SELECT setval('{_seq}', "
-                            f"GREATEST(COALESCE((SELECT MAX(id::integer) FROM {_tbl}), 0) + 1, 1), false)"))
-                    _sc.commit()
-                    logger.info("[APP] SERIAL sequence repair complete")
-            except Exception as _se:
-                logger.warning(f"[APP] Sequence repair warning: {_se}")
+                    _cx.commit()
+                    logger.info("[MIGRATE] Schema migration complete")
+
+            except Exception as _me:
+                logger.warning(f"[MIGRATE] Migration error: {_me}")
 
         if not Settings.query.first():
             db.session.add(Settings(
