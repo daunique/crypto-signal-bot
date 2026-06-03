@@ -46,6 +46,16 @@ from apscheduler.triggers.cron import CronTrigger
 logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler(timezone="UTC")
 
+# ── Family rotation tracker ───────────────────────────────────────────────────
+# Persisted in memory across candles. Updated immediately after a signal fires.
+# A = BTC-USDT + ETH-USDT | B = DOGE-USDT + SOL-USDT | C = XRP-USDT + BNB-USDT
+_FAMILY_MAP = {
+    "BTC-USDT": "A", "ETH-USDT": "A",
+    "DOGE-USDT": "B", "SOL-USDT": "B",
+    "XRP-USDT": "C", "BNB-USDT": "C",
+}
+_last_fired_family = None  # set immediately after every signal insert
+
 
 def _ctx():
     from app import app
@@ -165,36 +175,27 @@ def job_generate_signal():
                 logger.warning(f"[GENERATE] SOL cooldown check error: {_se}")
 
             # ── Pair family rotation ──────────────────────────────────────────
-            # Families: A = BTC-USDT + ETH-USDT, B = DOGE-USDT + SOL-USDT,
-            #           C = XRP-USDT + BNB-USDT.
-            # Check both the last RESOLVED signal AND any current PENDING signal
-            # to determine which family to exclude next.
+            # Uses module-level _last_fired_family (set immediately when a signal
+            # is inserted). Falls back to DB query only on cold start (when the
+            # variable is None after a redeploy).
+            global _last_fired_family
             _excluded_families = None
             try:
-                _FAMILY_MAP = {
-                    "BTC-USDT": "A", "ETH-USDT": "A",
-                    "DOGE-USDT": "B", "SOL-USDT": "B",
-                    "XRP-USDT": "C", "BNB-USDT": "C",
-                }
-                # Use the most recent signal regardless of outcome (pending or resolved)
-                _last_sig = Signal.query.order_by(
-                    Signal.created_at.desc()
-                ).first()
-                if _last_sig:
-                    _last_symbol = _last_sig.symbol or _last_sig.pair or ""
-                    _last_family = _FAMILY_MAP.get(_last_symbol)
-                    if _last_family:
-                        _excluded_families = [_last_family]
-                        logger.info(
-                            f"[GENERATE] Last signal family={_last_family} "
-                            f"({_last_symbol} outcome={_last_sig.outcome}) — "
-                            f"excluding family {_excluded_families} this candle"
-                        )
-                    else:
-                        logger.info(
-                            f"[GENERATE] Last signal symbol='{_last_symbol}' "
-                            f"not in family map — no family exclusion this candle"
-                        )
+                _current_family = _last_fired_family
+                if _current_family is None:
+                    # Cold start — seed from DB
+                    _seed_sig = Signal.query.order_by(Signal.created_at.desc()).first()
+                    if _seed_sig:
+                        _seed_sym = _seed_sig.symbol or _seed_sig.pair or ""
+                        _current_family = _FAMILY_MAP.get(_seed_sym)
+                        _last_fired_family = _current_family
+                        logger.info(f"[GENERATE] Cold-start: seeded last family={_current_family} from DB ({_seed_sym})")
+
+                if _current_family:
+                    _excluded_families = [_current_family]
+                    logger.info(f"[GENERATE] Excluding family {_current_family} — must rotate to another family")
+                else:
+                    logger.info("[GENERATE] No family exclusion — first signal ever")
             except Exception as _fe:
                 logger.warning(f"[GENERATE] Family rotation check error: {_fe}")
 
@@ -384,6 +385,10 @@ def job_generate_signal():
             )
             db.session.add(signal_obj)
             db.session.commit()
+
+            # ── Update family tracker immediately ────────────────────────────────
+            _last_fired_family = _FAMILY_MAP.get(sig['symbol'])
+            logger.info(f"[GENERATE] Family tracker updated → {_last_fired_family} ({sig['symbol']})")
 
             # ── Shadow balance deduction ─────────────────────────────────────────
             if mode == "shadow":
