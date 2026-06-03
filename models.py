@@ -108,6 +108,7 @@ class Settings(db.Model):
     min_confidence       = db.Column(db.Float, default=0.58)
     invert_direction     = db.Column(db.Boolean, default=False)  # False=normal, True=inverse
     updated_at           = db.Column(db.DateTime, default=datetime.utcnow)
+    last_family          = db.Column(db.String(1), default=None)   # last fired family: A, B, or C
 
     def to_dict(self):
         return {

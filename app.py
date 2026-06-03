@@ -149,6 +149,7 @@ def create_app():
                 ("max_contract_price", "REAL",         True),
                 ("min_confidence",     "REAL",         True),
                 ("invert_direction",   "BOOLEAN",      True),
+                ("last_family",        "VARCHAR(1)",   True),
                 ("updated_at",         "TIMESTAMP",    True),
             ],
             "shadow_balance": [
