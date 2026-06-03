@@ -54,7 +54,8 @@ _FAMILY_MAP = {
     "DOGE-USDT": "B", "SOL-USDT": "B",
     "XRP-USDT": "C", "BNB-USDT": "C",
 }
-_last_fired_family = None  # set immediately after every signal insert
+_fired_family_history = []  # last 2 families fired — enforces A→B→C→A rotation
+_MAX_HISTORY = 2           # how many consecutive families to exclude
 
 
 def _ctx():
@@ -175,25 +176,29 @@ def job_generate_signal():
                 logger.warning(f"[GENERATE] SOL cooldown check error: {_se}")
 
             # ── Pair family rotation ──────────────────────────────────────────
-            # Uses module-level _last_fired_family (set immediately when a signal
-            # is inserted). Falls back to DB query only on cold start (when the
-            # variable is None after a redeploy).
-            global _last_fired_family
+            # Tracks the last 2 fired families in memory.
+            # Excludes both so the bot is FORCED to cycle A→B→C→A strictly.
+            # Falls back to DB seed on cold start (after redeploy).
+            global _fired_family_history
             _excluded_families = None
             try:
-                _current_family = _last_fired_family
-                if _current_family is None:
-                    # Cold start — seed from DB
-                    _seed_sig = Signal.query.order_by(Signal.created_at.desc()).first()
-                    if _seed_sig:
-                        _seed_sym = _seed_sig.symbol or _seed_sig.pair or ""
-                        _current_family = _FAMILY_MAP.get(_seed_sym)
-                        _last_fired_family = _current_family
-                        logger.info(f"[GENERATE] Cold-start: seeded last family={_current_family} from DB ({_seed_sym})")
+                # Cold start — seed history from last 2 DB signals
+                if not _fired_family_history:
+                    _seed_sigs = Signal.query.order_by(Signal.created_at.desc()).limit(2).all()
+                    for _ss in reversed(_seed_sigs):
+                        _ss_sym = _ss.symbol or _ss.pair or ""
+                        _ss_fam = _FAMILY_MAP.get(_ss_sym)
+                        if _ss_fam and _ss_fam not in _fired_family_history:
+                            _fired_family_history.append(_ss_fam)
+                    logger.info(f"[GENERATE] Cold-start: seeded family history={_fired_family_history} from DB")
 
-                if _current_family:
-                    _excluded_families = [_current_family]
-                    logger.info(f"[GENERATE] Excluding family {_current_family} — must rotate to another family")
+                if _fired_family_history:
+                    # Exclude all families in history (up to 2)
+                    _excluded_families = list(_fired_family_history)
+                    # If all 3 families are somehow excluded, only exclude the last 1
+                    if len(set(_excluded_families)) >= 3:
+                        _excluded_families = [_fired_family_history[-1]]
+                    logger.info(f"[GENERATE] Excluding families {_excluded_families} — forcing rotation")
                 else:
                     logger.info("[GENERATE] No family exclusion — first signal ever")
             except Exception as _fe:
@@ -242,6 +247,8 @@ def job_generate_signal():
                 if _pending_family:
                     # Add pending family to exclusion list (don't fire same family twice)
                     _excluded_families = list(set((_excluded_families or []) + [_pending_family]))
+                    if len(set(_excluded_families)) >= 3:
+                        _excluded_families = [_fired_family_history[-1]] if _fired_family_history else [_pending_family]
                     logger.info(
                         f"[GENERATE] Signal id={any_pending.id} "
                         f"({_pending_symbol}) still PENDING — "
@@ -386,9 +393,13 @@ def job_generate_signal():
             db.session.add(signal_obj)
             db.session.commit()
 
-            # ── Update family tracker immediately ────────────────────────────────
-            _last_fired_family = _FAMILY_MAP.get(sig['symbol'])
-            logger.info(f"[GENERATE] Family tracker updated → {_last_fired_family} ({sig['symbol']})")
+            # ── Update family history immediately ────────────────────────────────
+            _fired_fam = _FAMILY_MAP.get(sig['symbol'])
+            if _fired_fam:
+                _fired_family_history.append(_fired_fam)
+                if len(_fired_family_history) > _MAX_HISTORY:
+                    _fired_family_history.pop(0)  # keep only last 2
+            logger.info(f"[GENERATE] Family history updated → {_fired_family_history} (just fired: {_fired_fam})")
 
             # ── Shadow balance deduction ─────────────────────────────────────────
             if mode == "shadow":
