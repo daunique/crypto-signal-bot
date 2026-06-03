@@ -175,19 +175,31 @@ def job_generate_signal():
             except Exception as _se:
                 logger.warning(f"[GENERATE] SOL cooldown check error: {_se}")
 
-            # ── Pair family rotation (DB-persisted) ──────────────────────────
-            # settings.last_family stores the last fired family (A, B, or C).
-            # Persisted in Supabase — survives restarts and redeployments.
-            # The excluded family is simply the last one fired.
-            # Engine falls through to all families if no other qualifies.
+            # ── Pair family rotation — strict round-robin (DB-persisted) ───────
+            # Enforces A→B→C→A→B→C... strictly.
+            # settings.last_family = last fired family (A, B, or C).
+            # The NEXT required family is the one after last in the cycle.
+            # Only that family is ALLOWED — all others are excluded.
+            # Falls through to any family only if required family has no signal.
+            _CYCLE = ["A", "B", "C"]
             _excluded_families = None
+            _required_family   = None
             try:
-                _last_fam = settings.last_family  # None on first ever signal
-                if _last_fam:
-                    _excluded_families = [_last_fam]
-                    logger.info(f"[GENERATE] Last family={_last_fam} (from DB) — excluding it, must rotate")
+                # Fresh DB read to avoid stale cached settings object
+                _fresh_settings = Settings.query.first()
+                _last_fam = _fresh_settings.last_family if _fresh_settings else None
+                if _last_fam and _last_fam in _CYCLE:
+                    _next_idx = (_CYCLE.index(_last_fam) + 1) % 3
+                    _required_family = _CYCLE[_next_idx]
+                    # Exclude the other two families — only required family allowed
+                    _excluded_families = [f for f in _CYCLE if f != _required_family]
+                    logger.info(
+                        f"[GENERATE] Last family={_last_fam} → "
+                        f"REQUIRED next family={_required_family} "
+                        f"(excluding {_excluded_families})"
+                    )
                 else:
-                    logger.info("[GENERATE] No last_family in DB — no exclusion (first signal)")
+                    logger.info("[GENERATE] No last_family — no exclusion (first signal ever)")
             except Exception as _fe:
                 logger.warning(f"[GENERATE] Family rotation check error: {_fe}")
 
@@ -225,29 +237,12 @@ def job_generate_signal():
 
             any_pending = Signal.query.filter(Signal.outcome == "PENDING").first()
             if any_pending:
-                _pending_symbol = any_pending.symbol or any_pending.pair or ""
-                _pending_family = {
-                    "BTC-USDT": "A", "ETH-USDT": "A",
-                    "DOGE-USDT": "B", "SOL-USDT": "B",
-                    "XRP-USDT": "C", "BNB-USDT": "C",
-                }.get(_pending_symbol)
-                if _pending_family:
-                    # Add pending family to exclusion list (don't fire same family twice)
-                    _excluded_families = list(set((_excluded_families or []) + [_pending_family]))
-                    # Safety: never exclude all 3 families
-                    if len(set(_excluded_families)) >= 3:
-                        _excluded_families = [_pending_family]
-                    logger.info(
-                        f"[GENERATE] Signal id={any_pending.id} "
-                        f"({_pending_symbol}) still PENDING — "
-                        f"excluding its family {_pending_family} from candidates"
-                    )
-                else:
-                    logger.info(
-                        f"[GENERATE] Blocked — signal id={any_pending.id} "
-                        f"({_pending_symbol}) is still PENDING. No new signal until it resolves."
-                    )
-                    return
+                logger.info(
+                    f"[GENERATE] Blocked — signal id={any_pending.id} "
+                    f"({any_pending.symbol or any_pending.pair}) still PENDING. "
+                    f"Waiting for resolution before next signal."
+                )
+                return
 
             # ── Place order — retry every 5s for up to 2 minutes (24 attempts) ──
             # Stops immediately on first success. Gives the market time to open

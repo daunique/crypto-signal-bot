@@ -727,12 +727,12 @@ def pick_best_signal(min_confidence: float = None, exclude: list = None,
     def score(s):
         return s['margin'] + (0.04 if s['tier'] == 'T1' else 0.0)
 
-    # ── Family rotation — strict exclusion with fallback ──────────────────────
-    # The last signal's family is excluded so the next signal must come from
-    # one of the other two families. Only falls through to all families if
-    # neither of the other two families has a qualifying signal this candle.
+    # ── Family rotation — strict round-robin, NO fallthrough ─────────────────
+    # Scheduler passes excluded_families = the 2 families that are NOT next in
+    # the A→B→C cycle. Only the required family is allowed. If it has no
+    # qualifying signal this candle, return None (skip candle) rather than
+    # break rotation by picking from the wrong family.
     _blocked_families = excluded_families or (
-        # backward-compat: preferred_families means "all others are blocked"
         [f for f in ["A", "B", "C"] if f not in preferred_families]
         if preferred_families else []
     )
@@ -740,17 +740,19 @@ def pick_best_signal(min_confidence: float = None, exclude: list = None,
         non_blocked = [s for s in candidates if s['family'] not in _blocked_families]
         if non_blocked:
             best = max(non_blocked, key=score)
-            logger.info(f"[ENGINE] Best (excluded family {_blocked_families}): "
+            logger.info(f"[ENGINE] Best (required family, excluded {_blocked_families}): "
                         f"{best['symbol']} {best['direction']} "
                         f"conf={best['confidence']:.3f} tier={best['tier']} "
                         f"family={best['family']}")
             return best
         else:
-            logger.info(f"[ENGINE] No signal outside excluded families "
-                        f"{_blocked_families} — falling through to all families")
+            logger.info(f"[ENGINE] Required family not available this candle "
+                        f"(excluded {_blocked_families}) — skipping to preserve rotation")
+            return None
 
+    # No family exclusion — pick global best
     best = max(candidates, key=score)
-    logger.info(f"[ENGINE] Best: {best['symbol']} {best['direction']} "
+    logger.info(f"[ENGINE] Best (no family filter): {best['symbol']} {best['direction']} "
                 f"conf={best['confidence']:.3f} tier={best['tier']} "
                 f"family={best.get('family','?')}")
     return best
