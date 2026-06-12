@@ -442,14 +442,39 @@ input[type=number]:focus{border-color:var(--accent)}
     </div>
   </div>
 
-  <!-- Per-pair cooldown status panel -->
+  <!-- Per-pair cooldown status + log panel -->
   <div class="card" id="cooldown-status-card" style="margin-bottom:12px">
-    <div class="card-hdr" style="display:flex;justify-content:space-between;align-items:center">
-      <span class="card-title">🔒 Pair Cooldowns</span>
+    <div class="card-hdr" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
+      <span class="card-title">🔒 Pair Cooldowns &amp; Execution Control</span>
       <span id="cooldown-early-session" style="display:none;font-size:0.65rem;background:rgba(255,200,0,0.12);color:var(--warn);border:1px solid rgba(255,200,0,0.3);border-radius:6px;padding:2px 8px">⚠️ Early session (08:00–09:30 UTC) — be selective</span>
     </div>
-    <div id="cooldown-pairs-list" style="display:flex;flex-wrap:wrap;gap:8px;padding:6px 0;min-height:28px">
-      <span style="color:var(--text2);font-size:0.72rem;font-style:italic">All pairs active — no cooldowns</span>
+
+    <!-- Active cooldowns row -->
+    <div style="margin-bottom:8px">
+      <div style="font-size:0.68rem;color:var(--text2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em">Active Cooldowns</div>
+      <div id="cooldown-pairs-list" style="display:flex;flex-wrap:wrap;gap:8px;min-height:28px">
+        <span style="color:var(--text2);font-size:0.72rem;font-style:italic">All pairs active — no cooldowns</span>
+      </div>
+    </div>
+
+    <!-- No-execute pairs row -->
+    <div style="margin-bottom:8px;padding-top:8px;border-top:1px solid var(--border)">
+      <div style="font-size:0.68rem;color:var(--text2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em">Signal-Only Pairs (no live execution)</div>
+      <div id="no-execute-pairs-list" style="display:flex;flex-wrap:wrap;gap:8px;min-height:24px">
+        <span style="color:var(--text2);font-size:0.72rem;font-style:italic">Loading…</span>
+      </div>
+      <div style="font-size:0.65rem;color:var(--text2);margin-top:4px">These pairs generate signals normally but NO live orders are placed on Limitless or Polymarket.</div>
+    </div>
+
+    <!-- Cooldown event log -->
+    <div style="padding-top:8px;border-top:1px solid var(--border)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div style="font-size:0.68rem;color:var(--text2);text-transform:uppercase;letter-spacing:.05em">Cooldown Event Log</div>
+        <span style="font-size:0.65rem;color:var(--text2)">last 20 events</span>
+      </div>
+      <div id="cooldown-log-list" style="max-height:180px;overflow-y:auto;display:flex;flex-direction:column;gap:4px">
+        <span style="color:var(--text2);font-size:0.72rem;font-style:italic">No cooldown events yet</span>
+      </div>
     </div>
   </div>
 
@@ -1013,30 +1038,84 @@ async function derivePolyKey() {
 
 // PAIR COOLDOWN PANEL
 function updateCooldownPanel(s) {
+  // ── Early session warning ──────────────────────────────────────────────────
   const nowUTC  = new Date();
   const utcMins = nowUTC.getUTCHours() * 60 + nowUTC.getUTCMinutes();
   const earlyEl = document.getElementById('cooldown-early-session');
   if (earlyEl) earlyEl.style.display = (utcMins >= 480 && utcMins < 570) ? '' : 'none';
 
+  // ── Active cooldowns ───────────────────────────────────────────────────────
   const listEl = document.getElementById('cooldown-pairs-list');
-  if (!listEl) return;
-  let cooldowns = {};
-  try { cooldowns = JSON.parse(s.pair_loss_cooldowns || '{}'); } catch(e) {}
-  const pairs = Object.keys(cooldowns);
-  if (!pairs.length) {
-    listEl.innerHTML = '<span style="color:var(--text2);font-size:0.72rem;font-style:italic">All pairs active — no cooldowns</span>';
-    return;
+  if (listEl) {
+    let cooldowns = {};
+    try { cooldowns = JSON.parse(s.pair_loss_cooldowns || '{}'); } catch(e) {}
+    const pairs = Object.keys(cooldowns);
+    if (!pairs.length) {
+      listEl.innerHTML = '<span style="color:var(--text2);font-size:0.72rem;font-style:italic">All pairs active — no cooldowns</span>';
+    } else {
+      listEl.innerHTML = pairs.map(pair => {
+        const state = cooldowns[pair];
+        const rem   = state.candles_remaining || 0;
+        const tier  = state.tier || 'T2';
+        return `<span style="display:inline-flex;align-items:center;gap:5px;background:rgba(255,77,109,0.1);border:1px solid rgba(255,77,109,0.3);border-radius:6px;padding:3px 10px;font-size:0.72rem">
+          <span style="color:var(--down);font-weight:700">🔒 ${pair}</span>
+          <span style="color:${tier==='T1'?'var(--warn)':'var(--down)'}">${tier}</span>
+          <span style="color:var(--text2)">${rem} candle${rem!==1?'s':''} (${rem*15}m)</span>
+        </span>`;
+      }).join('');
+    }
   }
-  listEl.innerHTML = pairs.map(pair => {
-    const state = cooldowns[pair];
-    const rem   = state.candles_remaining || 0;
-    const tier  = state.tier || 'T2';
-    return `<span style="display:inline-flex;align-items:center;gap:5px;background:rgba(255,77,109,0.1);border:1px solid rgba(255,77,109,0.3);border-radius:6px;padding:3px 10px;font-size:0.72rem">
-      <span style="color:var(--down);font-weight:700">🔒 ${pair}</span>
-      <span style="color:${tier==='T1'?'var(--warn)':'var(--down)'}">${tier}</span>
-      <span style="color:var(--text2)">${rem} candle${rem!==1?'s':''} (${rem*15}m)</span>
-    </span>`;
-  }).join('');
+
+  // ── No-execute pairs ───────────────────────────────────────────────────────
+  const nepEl = document.getElementById('no-execute-pairs-list');
+  if (nepEl) {
+    let noExec = [];
+    try { noExec = JSON.parse(s.no_execute_pairs || '["XRP-USDT"]'); } catch(e) {}
+    if (!noExec.length) {
+      nepEl.innerHTML = '<span style="color:var(--text2);font-size:0.72rem;font-style:italic">All pairs executing live orders</span>';
+    } else {
+      nepEl.innerHTML = noExec.map(pair =>
+        `<span style="display:inline-flex;align-items:center;gap:5px;background:rgba(255,165,0,0.1);border:1px solid rgba(255,165,0,0.35);border-radius:6px;padding:3px 10px;font-size:0.72rem">
+          <span style="color:#f6a030;font-weight:700">👁 ${pair}</span>
+          <span style="color:var(--text2)">signal only</span>
+        </span>`
+      ).join('');
+    }
+  }
+
+  // ── Cooldown event log ─────────────────────────────────────────────────────
+  const logEl = document.getElementById('cooldown-log-list');
+  if (logEl) {
+    let logEntries = [];
+    try { logEntries = JSON.parse(s.cooldown_log || '[]'); } catch(e) {}
+    const last20 = logEntries.slice(-20).reverse(); // newest first
+    if (!last20.length) {
+      logEl.innerHTML = '<span style="color:var(--text2);font-size:0.72rem;font-style:italic">No cooldown events yet</span>';
+    } else {
+      logEl.innerHTML = last20.map(ev => {
+        const isSet     = ev.event === 'COOLDOWN_SET';
+        const bgColor   = isSet ? 'rgba(255,77,109,0.07)' : 'rgba(0,229,160,0.07)';
+        const bdColor   = isSet ? 'rgba(255,77,109,0.25)' : 'rgba(0,229,160,0.2)';
+        const icon      = isSet ? '🔒' : '✅';
+        const evLabel   = isSet ? `Cooldown set (${ev.candles || 0} candle${ev.candles!==1?'s':''}, ${(ev.candles||0)*15}m)` : 'Cooldown cleared';
+        const tierBadge = ev.tier ? `<span style="font-size:0.62rem;background:rgba(255,255,255,0.07);border-radius:3px;padding:1px 5px;margin-left:4px">${ev.tier}</span>` : '';
+        const outcBadge = ev.outcome
+          ? `<span style="font-size:0.62rem;color:${ev.outcome==='WIN'?'var(--up)':'var(--down)'};margin-left:4px">${ev.outcome}</span>`
+          : '';
+        return `<div style="display:flex;align-items:flex-start;gap:8px;padding:5px 8px;border-radius:6px;background:${bgColor};border:1px solid ${bdColor};font-size:0.7rem">
+          <span>${icon}</span>
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px">
+              <span style="font-weight:700;color:var(--text)">${ev.pair || '?'}</span>
+              ${tierBadge}${outcBadge}
+              <span style="color:var(--text2)">· ${evLabel}</span>
+            </div>
+            <div style="color:var(--text2);font-size:0.65rem;margin-top:1px">${ev.ts || ''} · ${ev.reason || ''}</div>
+          </div>
+        </div>`;
+      }).join('');
+    }
+  }
 }
 
 // 7-DAY PERF CHART

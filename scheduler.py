@@ -416,6 +416,26 @@ def job_generate_signal():
             _poly_order    = {"success": False, "error": "Polymarket disabled"}
             _poly_order_id = None
 
+            # ── No-execute pairs: signal fires normally but NO live order ────
+            # XRP-USDT (and any other pairs in this list) will generate signals,
+            # appear on the dashboard, and track dip/resolve outcomes —
+            # but the actual Limitless / Polymarket orders are skipped.
+            _no_execute = []
+            try:
+                import json as _nep_j
+                _nep_raw = getattr(settings, 'no_execute_pairs', '["XRP-USDT"]') or '["XRP-USDT"]'
+                _no_execute = _nep_raw if isinstance(_nep_raw, list) else _nep_j.loads(_nep_raw)
+            except Exception as _nepe:
+                logger.warning('[GENERATE] no_execute_pairs read error: %s', _nepe)
+                _no_execute = ['XRP-USDT']
+
+            _is_no_execute_pair = sig['symbol'] in _no_execute
+            if _is_no_execute_pair:
+                logger.info(
+                    '[GENERATE] %s is in no_execute_pairs — signal fires but NO live order will be placed.',
+                    sig['symbol']
+                )
+
             def _run_limitless():
                 nonlocal order, order_id, contracts, contract_price
                 for _attempt in range(1, ORDER_MAX_ATTEMPTS + 1):
@@ -490,14 +510,21 @@ def job_generate_signal():
                     logger.error("[GENERATE][POLY] Exception: %s", _pe, exc_info=True)
                     _poly_order = {"success": False, "error": str(_pe)}
 
-            # Start threads
+            # Start threads — skipped for no_execute_pairs
             _threads = []
-            if _use_limitless:
+            if _use_limitless and not _is_no_execute_pair:
                 _t_ltl = _threading.Thread(target=_run_limitless, name="ltl-order", daemon=True)
                 _threads.append(_t_ltl)
                 _t_ltl.start()
+            elif _is_no_execute_pair:
+                # Synthetic SHADOW result so the signal still resolves correctly
+                order = {"success": True, "order_id": None,
+                         "contracts": 0, "price_per_contract": max_cp,
+                         "status": "NO_EXECUTE",
+                         "note": f"{sig['symbol']} is in no_execute_pairs — signal only"}
+                logger.info('[GENERATE] %s no-execute: synthetic order created', sig['symbol'])
 
-            if _use_polymarket:
+            if _use_polymarket and not _is_no_execute_pair:
                 _t_poly = _threading.Thread(target=_run_polymarket, name="poly-order", daemon=True)
                 _threads.append(_t_poly)
                 _t_poly.start()
@@ -1165,6 +1192,30 @@ def job_resolve_outcomes():
                                 _pcd2[sym] = {'candles_remaining': _cd, 'tier': sig.tier or 'T2'}
                                 logger.warning('[RESOLVE] Cooldown SET: %s suppressed %d candle(s)', sym, _cd)
                             _resolve_settings.pair_loss_cooldowns = _json2.dumps(_pcd2)
+
+                            # Write to cooldown_log for dashboard display
+                            try:
+                                import json as _cdl_j
+                                from datetime import datetime as _dt
+                                _cdl_raw = getattr(_resolve_settings, 'cooldown_log', '[]') or '[]'
+                                _cdl = _cdl_raw if isinstance(_cdl_raw, list) else _cdl_j.loads(_cdl_raw)
+                                _cdl_entry = {
+                                    'ts':     _dt.utcnow().strftime('%Y-%m-%d %H:%M UTC'),
+                                    'pair':   sym,
+                                    'event':  'COOLDOWN_SET' if outcome == 'LOSS' else 'COOLDOWN_CLEARED',
+                                    'reason': f'Loss after {sig.tier or "T2"} signal' if outcome == 'LOSS' else 'Win',
+                                    'candles': _cd if outcome == 'LOSS' else 0,
+                                    'tier':   sig.tier or 'T2',
+                                    'outcome': outcome,
+                                }
+                                _cdl.append(_cdl_entry)
+                                # Keep last 50 log entries only
+                                if len(_cdl) > 50:
+                                    _cdl = _cdl[-50:]
+                                _resolve_settings.cooldown_log = _cdl_j.dumps(_cdl)
+                            except Exception as _cdlw:
+                                logger.warning('[RESOLVE] cooldown_log write error: %s', _cdlw)
+
                             db.session.commit()
                         except Exception as _pcd2e:
                             logger.warning('[RESOLVE] Cooldown write error: %s', _pcd2e)

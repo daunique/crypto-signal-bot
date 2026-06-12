@@ -165,6 +165,9 @@ def create_app():
             ("use_polymarket",       "BOOLEAN DEFAULT FALSE"),
             ("poly_position_size",   "REAL DEFAULT 10.0"),
             ("poly_max_price",       "REAL DEFAULT 0.5"),
+            # v3 additions
+            ("no_execute_pairs",     "TEXT DEFAULT '[\"XRP-USDT\"]'"),
+            ("cooldown_log",         "TEXT DEFAULT '[]'"),
         ]:
             _add_column("settings", _col, _def)
 
@@ -172,9 +175,27 @@ def create_app():
             db.session.add(Settings(
                 mode=os.environ.get("DEFAULT_MODE", "shadow"),
                 position_size=float(os.environ.get("DEFAULT_POSITION_SIZE", "10")),
+                min_confidence=0.0,
+                no_execute_pairs='["XRP-USDT"]',
+                cooldown_log='[]',
             ))
             db.session.commit()
             logger.info("[APP] Default settings seeded")
+        else:
+            # v3 migration: reset legacy min_confidence=0.58 to 0.0 (disabled)
+            # Per-pair thresholds in PAIR_CONFIG are now the sole confidence gates.
+            _existing = Settings.query.first()
+            _changed  = False
+            if _existing and _existing.min_confidence and _existing.min_confidence >= 0.55:
+                _existing.min_confidence = 0.0
+                _changed = True
+                logger.info("[APP] Migration: min_confidence reset to 0.0 (per-pair gates active)")
+            if _existing and not _existing.no_execute_pairs:
+                _existing.no_execute_pairs = '["XRP-USDT"]'
+                _changed = True
+                logger.info("[APP] Migration: no_execute_pairs seeded with XRP-USDT")
+            if _changed:
+                db.session.commit()
         if not ShadowBalance.query.first():
             db.session.add(ShadowBalance(balance=1000.0))
             db.session.commit()
@@ -875,6 +896,18 @@ def create_app():
             s.max_contract_price = min(float(data["max_contract_price"]), 0.50)
         if "min_confidence" in data:
             s.min_confidence = float(data["min_confidence"])
+        if "no_execute_pairs" in data:
+            import json as _nep_json
+            _nep = data["no_execute_pairs"]
+            if isinstance(_nep, list):
+                s.no_execute_pairs = _nep_json.dumps(_nep)
+            elif isinstance(_nep, str):
+                # Validate it's a valid JSON list
+                try:
+                    _nep_json.loads(_nep)
+                    s.no_execute_pairs = _nep
+                except Exception:
+                    pass
         if "use_cooldown" in data:
             s.use_cooldown = bool(data["use_cooldown"])
         if "stop_loss_balance" in data:
