@@ -422,7 +422,7 @@ input[type=number]:focus{border-color:var(--accent)}
       <div style="margin-top:8px">
         <div style="font-size:0.6rem;color:var(--text2);margin-bottom:3px">
           <span id="dip-side-lbl">Signal token</span>% over time (lower = cheaper entry)
-          <span style="color:rgba(255,77,109,0.7);margin-left:4px">── 20% dip target</span>
+          <span style="color:rgba(255,77,109,0.7);margin-left:4px">── 20¢ dip target</span>
         </div>
         <div style="position:relative;height:55px">
           <canvas id="pullback-chart" style="position:absolute;inset:0;width:100%;height:100%"></canvas>
@@ -1180,7 +1180,7 @@ async function loadSignals() {
           if(p===null||p===undefined) return '<span style="color:var(--text2);font-size:0.75rem">—</span>';
           const n=parseFloat(p);
           const [col,icon]=n<=20?['#ffd700','🎯']:n<=40?['var(--win)','✅']:n<=60?['var(--warn)','⚠️']:['var(--text2)',''];
-          return `<span style="color:${col};font-weight:700;font-size:0.8rem">${icon} ${n.toFixed(1)}%</span>`;
+          return `<span style="color:${col};font-weight:700;font-size:0.8rem">${icon} ${n.toFixed(1)}¢</span>`;
         })(s.best_entry_pct)}</td>
         <td><span class="outcome-badge ${out==='win'?'ob-win':out==='loss'?'ob-loss':'ob-pending'}">${s.outcome||'PENDING'}</span></td>
         <td>${(function(f){return f==='FILLED'?'<span class="outcome-badge ob-win">FILLED</span>':f==='UNFILLED'?'<span class="outcome-badge ob-loss">UNFILLED</span>':'<span class="outcome-badge ob-neutral">–</span>';})(s.limitless_fill||'NEUTRAL')}</td>
@@ -1223,7 +1223,7 @@ async function loadDipStats() {
       const hits    = stat.hits    || 0;
       const wins    = stat.wins    || 0;
       const losses  = stat.losses  || 0;
-      const rangeStr = stat.range  || (t + '%');
+      const rangeStr = stat.range  || (t + '¢');
       const winRate = stat.win_rate != null ? stat.win_rate.toFixed(1) + '%' : '—';
       const hitRate = stat.hit_rate != null ? stat.hit_rate.toFixed(1) + '%' : '—';
       const isTarget = t <= 20;
@@ -1685,10 +1685,10 @@ function updateHistoricalStats() {
   const wins   = valid.filter(r => r.outcome === 'WIN');
   const losses = valid.filter(r => r.outcome === 'LOSS');
   const avg    = arr => arr.length
-    ? (arr.reduce((a, b) => a + b.bestDip, 0) / arr.length).toFixed(1) + '%'
+    ? (arr.reduce((a, b) => a + b.bestDip, 0) / arr.length).toFixed(1) + '¢'
     : '—';
   const deepest = valid.length
-    ? valid.reduce((m, r) => Math.min(m, r.bestDip), 100).toFixed(1) + '%'
+    ? valid.reduce((m, r) => Math.min(m, r.bestDip), 100).toFixed(1) + '¢'
     : '—';
   if (el('hist-avg-win'))  el('hist-avg-win').textContent  = avg(wins);
   if (el('hist-avg-loss')) el('hist-avg-loss').textContent = avg(losses);
@@ -1740,7 +1740,7 @@ function initPullbackChart() {
           min: 0, max: 100,
           grid: { color: 'rgba(255,255,255,0.05)' },
           ticks: { color: 'var(--text2)', font: { size: 9 }, stepSize: 25,
-                   callback: v => v + '%' }
+                   callback: v => v + '¢' }
         }
       }
     }
@@ -1807,7 +1807,7 @@ function renderGauge(signalAskPct, rawYesAskPct, rawNoAskPct) {
   const _isRealTick = !!gaugeState.slug;
   if (gaugeState.entryPct === null && _isRealTick) {
     gaugeState.entryPct = signalPct;
-    console.log('[Gauge] Entry price locked at', signalPct.toFixed(1) + '%');
+    console.log('[Gauge] Entry price locked at', signalPct.toFixed(1) + '¢');
   }
 
   gaugeState.currentPct = signalPct;
@@ -1845,7 +1845,7 @@ function renderGauge(signalAskPct, rawYesAskPct, rawNoAskPct) {
   updateGaugeSVG(signalPct);
   const pctEl = el('gauge-pct');
   if (pctEl) {
-    pctEl.textContent = signalPct.toFixed(1) + '%';
+    pctEl.textContent = signalPct.toFixed(1) + '¢';
     pctEl.setAttribute('fill', signalPct > 20 ? 'var(--accent)' : 'var(--down)');
   }
   const sideLbl = el('gauge-side-label');
@@ -1866,8 +1866,8 @@ function renderGauge(signalAskPct, rawYesAskPct, rawNoAskPct) {
   if (noVal)  noVal.textContent  = noPct2.toFixed(1) + '%';
 
   // Dip tracker stats
-  if (el('dip-best'))    el('dip-best').textContent    = gaugeState.bestDip !== null ? gaugeState.bestDip.toFixed(1) + '%' : '—';
-  if (el('dip-current')) el('dip-current').textContent = signalPct.toFixed(1) + '%';
+  if (el('dip-best'))    el('dip-best').textContent    = gaugeState.bestDip !== null ? gaugeState.bestDip.toFixed(1) + '¢' : '—';
+  if (el('dip-current')) el('dip-current').textContent = signalPct.toFixed(1) + '¢';
   if (el('dip-hits'))    el('dip-hits').textContent    = gaugeState.hitsTarget;
   if (el('dip-drop-pct')) {
     el('dip-drop-pct').textContent = dropPct >= 0.05 ? dropPct.toFixed(1) + '%' : '0.0%';
@@ -2046,7 +2046,7 @@ async function startGaugeForSignal(sig) {
   gaugeState.hitsTarget  = 0;
   gaugeState.history     = [];
   if (gaugeState.bestDip !== null) {
-    console.log('[Gauge] Restored bestDip from DB:', gaugeState.bestDip.toFixed(1) + '%');
+    console.log('[Gauge] Restored bestDip from DB:', gaugeState.bestDip.toFixed(1) + '¢');
   }
 
   // Show card
