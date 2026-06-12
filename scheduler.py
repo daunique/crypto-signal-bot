@@ -660,171 +660,22 @@ def job_generate_signal():
             logger.error(f"[GENERATE] Unhandled error: {e}", exc_info=True)
 
 
-# ── Real-time Limitless price tracker state ─────────────────────────────────
-_dip_ws_state = {
-    "slug":      None,
-    "signal_id": None,
-    "direction": None,
-    "greenlet":  None,
-}
-
-
-def _compute_signal_pct(yes_float, direction, bids=None):
-    """Convert YES float (0-1) to signal-side % (UP tracks UP%, DOWN tracks DOWN%)."""
-    yes_pct = round(yes_float * 100, 2)
-    if direction == "UP":
-        return round(yes_pct, 1), "UP"
-    down_mid = round(100 - yes_pct, 2)
-    if bids:
-        try:
-            entry = bids[0]
-            best_up_bid = float(entry[0] if isinstance(entry, (list, tuple)) else entry)
-            if best_up_bid > 1: best_up_bid /= 100
-            down_ask = round((1 - best_up_bid) * 100, 2)
-            return round(min(down_mid, down_ask), 1), "DOWN"
-        except Exception:
-            pass
-    return round(down_mid, 1), "DOWN"
-
-
-def _persist_best_dip(signal_id, signal_pct):
-    """Update best_entry_pct in DB if this is a new minimum."""
-    # Guard: 50.0% means Limitless market is settled/neutral/not yet open.
-    # Also reject values > 95% which indicate the market has already resolved.
-    # Only accept prices in the 1–94% range as genuine trading prices.
-    if signal_pct is None or signal_pct < 1.0 or signal_pct > 94.0:
-        logger.debug("[DIP_WS] ignoring out-of-range signal_pct=%.1f%%", signal_pct or 0)
-        return False
-    # Reject exactly 50% — Limitless default when no trades have occurred
-    if abs(signal_pct - 50.0) < 0.5:
-        logger.debug("[DIP_WS] ignoring 50%% placeholder value")
-        return False
-    try:
-        with _ctx():
-            from models import Signal
-            from extensions import db
-            sig = Signal.query.get(signal_id)
-            if sig and sig.outcome == "PENDING":
-                if sig.best_entry_pct is None or signal_pct < sig.best_entry_pct:
-                    prev = sig.best_entry_pct
-                    sig.best_entry_pct = signal_pct
-                    db.session.commit()
-                    logger.info(
-                        "[DIP_WS] %s %s — new best_dip=%.1f%% (prev=%s)",
-                        sig.symbol, sig.signal_direction, signal_pct, prev
-                    )
-                    return True
-    except Exception as _e:
-        logger.debug("[DIP_WS] persist error: %s", _e)
-    return False
-
-
-def _rest_poll_dip(slug, signal_id, direction):
-    """REST fallback: poll orderbook every 3s when WebSocket unavailable."""
-    import requests as _req
-    import gevent as _gevent
-    API = "https://api.limitless.exchange"
-    logger.info("[DIP_TRACK] REST polling for %s", slug)
-    while _dip_ws_state.get("slug") == slug:
-        try:
-            r = _req.get(f"{API}/markets/{slug}/orderbook", timeout=3)
-            if r.ok:
-                ob      = r.json() or {}
-                yes_raw = (ob.get("adjustedMidpoint") or
-                           ob.get("midpoint") or
-                           ob.get("lastTradePrice"))
-                if yes_raw is not None:
-                    yes_f = float(yes_raw)
-                    if yes_f > 1: yes_f /= 100
-                    spct, _ = _compute_signal_pct(yes_f, direction, ob.get("bids") or [])
-                    # Skip if orderbook is returning neutral 50% (market closed/reset)
-                    if abs(spct - 50.0) >= 0.5:
-                        _persist_best_dip(signal_id, spct)
-        except Exception as _pe:
-            logger.debug("[DIP_TRACK] REST poll error: %s", _pe)
-        _gevent.sleep(3)
-
-
-def _run_dip_ws(slug, signal_id, direction):
-    """
-    Gevent greenlet: WebSocket subscriber to Limitless real-time price feed.
-    Receives newPriceData events and updates best_entry_pct on every new
-    minimum. Falls back to REST polling if WebSocket is unavailable.
-    """
-    import json as _json
-    import gevent as _gevent
-    WS_URL = "wss://ws.limitless.exchange/markets"
-
-    try:
-        import websocket as _ws
-
-        def _on_open(ws):
-            logger.info("[DIP_WS] Connected — subscribing to %s", slug)
-            ws.send(_json.dumps({
-                "action":      "subscribe_market_prices",
-                "marketSlugs": [slug],
-            }))
-
-        def _on_message(ws, msg):
-            if _dip_ws_state.get("slug") != slug:
-                ws.close(); return
-            try:
-                data   = _json.loads(msg)
-                prices = (data.get("updatedPrices") or data.get("prices") or data.get("data"))
-                if not prices: return
-                yes_raw = (prices.get("yes") or prices.get("YES") or
-                           prices.get("up")  or prices.get("UP") or
-                           prices.get("0"))
-                if yes_raw is None: return
-                yes_f = float(yes_raw)
-                if yes_f > 1: yes_f /= 100
-                spct, _ = _compute_signal_pct(yes_f, direction)
-                _persist_best_dip(signal_id, spct)
-            except Exception as _me:
-                logger.debug("[DIP_WS] msg error: %s", _me)
-
-        def _on_error(ws, err):
-            logger.warning("[DIP_WS] error: %s", err)
-
-        def _on_close(ws, code, msg):
-            logger.info("[DIP_WS] closed (code=%s)", code)
-
-        wsapp = _ws.WebSocketApp(WS_URL,
-            on_open=_on_open, on_message=_on_message,
-            on_error=_on_error, on_close=_on_close)
-
-        while _dip_ws_state.get("slug") == slug:
-            try:
-                wsapp.run_forever(ping_interval=20, ping_timeout=10)
-            except Exception as _we:
-                logger.warning("[DIP_WS] run error: %s", _we)
-            if _dip_ws_state.get("slug") == slug:
-                _gevent.sleep(2)  # reconnect pause
-
-    except ImportError:
-        logger.warning("[DIP_WS] websocket-client not installed — using REST fallback")
-        _rest_poll_dip(slug, signal_id, direction)
-    except Exception as _ge:
-        logger.warning("[DIP_WS] fatal error: %s — REST fallback", _ge)
-        _rest_poll_dip(slug, signal_id, direction)
-
-
-def _start_dip_tracker(slug, signal_id, direction):
-    """Launch or replace the dip tracker greenlet for a new signal."""
-    import gevent as _gevent
-    _dip_ws_state["slug"] = None  # signal running greenlet to exit
-    _gevent.sleep(0.05)
-    _dip_ws_state.update({"slug": slug, "signal_id": signal_id, "direction": direction})
-    g = _gevent.spawn(_run_dip_ws, slug, signal_id, direction)
-    _dip_ws_state["greenlet"] = g
-    logger.info("[DIP_WS] Tracker started — slug=%s id=%s dir=%s", slug, signal_id, direction)
-
-
 def job_track_best_dip():
     """
-    Runs every 3s. Ensures the WS/REST dip tracker is running for the
-    current PENDING signal. Restarts if signal or slug changes.
+    Runs every 3s while a signal is PENDING.
+    Fetches the Limitless orderbook and records the lowest signal-side %
+    seen during the candle as best_entry_pct. Works entirely server-side
+    so best_dip is accurate even when the dashboard is closed.
+
+    Price extraction:
+      UP   signal → tracks YES% directly from adjustedMidpoint
+      DOWN signal → tracks NO%  = 1 - YES_mid  (binary market: YES+NO=1.0)
+                    Also reads NO best-ask from bids (NO bids = YES asks inverted)
+                    to get the most accurate tradeable NO price.
     """
+    import requests as _req
+    API = "https://api.limitless.exchange"
+
     with _ctx():
         try:
             from models import Signal
@@ -834,32 +685,120 @@ def job_track_best_dip():
             ).order_by(Signal.candle_open_time.desc()).first()
 
             if not pending:
-                if _dip_ws_state.get("slug"):
-                    _dip_ws_state["slug"] = None
-                    logger.info("[DIP_WS] No pending signal — tracker stopped")
-                return
+                return  # no active signal — nothing to do
 
             slug = pending.market_slug
             if not slug:
                 try:
                     from limitless_executor import _slug_cache
-                    sym  = pending.symbol
-                    slug = (_slug_cache.get(sym) or
-                            _slug_cache.get(sym.replace("-USDT", "")))
+                    sym = pending.symbol
+                    slug = (_slug_cache.get(sym)
+                            or _slug_cache.get(sym.replace("-USDT", "")))
                     if slug:
                         pending.market_slug = slug
                         db.session.commit()
                 except Exception:
                     pass
+
             if not slug:
+                return  # slug not yet discovered — bg thread will fill it
+
+            # Fetch orderbook (3s timeout — runs every 3s so must be fast)
+            try:
+                r = _req.get(f"{API}/markets/{slug}/orderbook", timeout=3)
+                if not r.ok:
+                    logger.debug("[DIP_TRACK] orderbook %d for %s", r.status_code, slug)
+                    return
+                ob = r.json() or {}
+            except Exception as _fe:
+                logger.debug("[DIP_TRACK] fetch error: %s", _fe)
                 return
 
-            if (slug     != _dip_ws_state.get("slug") or
-                    pending.id != _dip_ws_state.get("signal_id")):
-                _start_dip_tracker(slug, pending.id, pending.signal_direction)
+            # ── Extract YES mid-price (0–1 float) ────────────────────────────
+            # adjustedMidpoint is the primary YES price on Limitless.
+            # Falls back to midpoint → lastTradePrice → best ask.
+            yes_raw = (
+                ob.get("adjustedMidpoint")
+                or ob.get("midpoint")
+                or ob.get("lastTradePrice")
+            )
+            if yes_raw is None:
+                asks = ob.get("asks") or []
+                if asks:
+                    try:
+                        entry = asks[0]
+                        yes_raw = float(
+                            entry[0] if isinstance(entry, (list, tuple)) else entry
+                        )
+                    except Exception:
+                        pass
+
+            if yes_raw is None:
+                logger.debug("[DIP_TRACK] no price in orderbook for %s", slug)
+                return
+
+            yes_float = float(yes_raw)
+            if yes_float > 1:               # already expressed as percentage
+                yes_float = yes_float / 100
+            yes_pct = round(yes_float * 100, 2)   # e.g. 65.40
+
+            # ── Compute signal-side % ─────────────────────────────────────────
+            # UP   signal: we want the YES token to dip as low as possible
+            #              before resolving UP → track YES%
+            # DOWN signal: we want the NO  token to dip as low as possible
+            # Limitless shows two independent token prices:
+            #   UP token   ("Up ↑ X%")   = adjustedMidpoint from orderbook
+            #   DOWN token ("Down ↓ X%") = 1 - UP_mid (binary market complement)
+            #
+            # UP   signal → track UP%   (lowest UP% seen = best limit entry)
+            # DOWN signal → track DOWN% (lowest DOWN% seen = best limit entry)
+            if pending.signal_direction == "UP":
+                signal_pct = yes_pct          # UP token % = adjustedMidpoint
+                side_label = "UP"
+            else:
+                # DOWN token price = 1 - UP_mid on binary market
+                down_mid = round(100 - yes_pct, 2)
+
+                # Refinement: derive DOWN ask from best UP bid
+                # Best UP bid = highest price someone pays for UP token
+                # DOWN ask ≈ 1 - best_UP_bid (cheapest DOWN available to buy)
+                bids = ob.get("bids") or []
+                if bids:
+                    try:
+                        best_bid_entry = bids[0]
+                        best_up_bid = float(
+                            best_bid_entry[0]
+                            if isinstance(best_bid_entry, (list, tuple))
+                            else best_bid_entry
+                        )
+                        if best_up_bid > 1:
+                            best_up_bid /= 100
+                        down_ask = round((1 - best_up_bid) * 100, 2)
+                        # Use lower of mid and ask — most conservative dip value
+                        signal_pct = min(down_mid, down_ask)
+                    except Exception:
+                        signal_pct = down_mid
+                else:
+                    signal_pct = down_mid
+                side_label = "DOWN"
+
+            signal_pct = round(signal_pct, 1)
+
+            # ── Update best_entry_pct only if new minimum ─────────────────────
+            current_best = pending.best_entry_pct
+            if current_best is None or signal_pct < current_best:
+                pending.best_entry_pct = signal_pct
+                db.session.commit()
+                logger.info(
+                    "[DIP_TRACK] %s %s — new best_dip=%.1f%% (prev=%s) "
+                    "%s%%=%.2f UP%%=%.2f",
+                    pending.symbol, pending.signal_direction,
+                    signal_pct, current_best,
+                    side_label, signal_pct, yes_pct
+                )
 
         except Exception as _e:
-            logger.warning("[DIP_TRACK] job error: %s", _e)
+            logger.warning("[DIP_TRACK] Unhandled error: %s", _e)
 
 
 def job_resolve_outcomes():
@@ -967,7 +906,7 @@ def job_resolve_outcomes():
                         # ── Rule 2: update saturation history with resolved result ──
                         try:
                             import json as _json_sat2
-                            _resolve_settings2 = BotSettings.query.first()
+                            _resolve_settings2 = Settings.query.first()
                             if _resolve_settings2:
                                 _sat_raw3 = getattr(_resolve_settings2, 'dir_saturation_history', '[]') or '[]'
                                 _sat_hist3 = _sat_raw3 if isinstance(_sat_raw3, list) else _json_sat2.loads(_sat_raw3)
@@ -987,17 +926,49 @@ def job_resolve_outcomes():
                         except Exception as _sat3e:
                             logger.debug('[RESOLVE] Rule2 history update error: %s', _sat3e)
 
-                        # ── Best-dip: tracked live by job_track_best_dip WS tracker ──
-                        # Do NOT fetch orderbook at resolve time — at candle close
-                        # the Limitless market resets to ~50% neutral which would
-                        # corrupt the best_dip record. The WS tracker captured the
-                        # real minimum during the candle. Leave NULL if tracker
-                        # had no data (slug was never discovered).
-                        if sig.best_entry_pct is not None:
-                            logger.info(
-                                "[RESOLVE] best_dip=%.1f%% already recorded for signal id=%s",
-                                sig.best_entry_pct, sig.id
-                            )
+                        # ── Best-dip: fetch orderbook once at resolve time ────
+                        # The frontend gauge tracks best_dip live and POSTs it
+                        # when the signal resolves. But if the dashboard wasn't
+                        # open, best_entry_pct stays NULL. As a server-side
+                        # safety net, we fetch the orderbook at resolve time and
+                        # record it if nothing better has already been saved.
+                        # best_entry_pct is now tracked continuously by
+                        # job_track_best_dip (every 30s). Only do a final
+                        # snapshot here if it's still null (signal fired but
+                        # tracker hadn't run yet).
+                        if sig.best_entry_pct is None and sig.market_slug:
+                            try:
+                                import requests as _req
+                                _ob_url = (
+                                    f"https://api.limitless.exchange/markets/"
+                                    f"{sig.market_slug}/orderbook"
+                                )
+                                _ob_r = _req.get(_ob_url, timeout=6)
+                                if _ob_r.ok:
+                                    _ob = _ob_r.json()
+                                    _yes_raw = (
+                                        _ob.get("adjustedMidpoint")
+                                        or _ob.get("midpoint")
+                                        or _ob.get("lastTradePrice")
+                                    )
+                                    if _yes_raw is not None:
+                                        _yes_pct = float(_yes_raw)
+                                        if _yes_pct > 1:
+                                            _yes_pct = _yes_pct / 100
+                                        _yes_pct_display = _yes_pct * 100
+                                        _signal_pct = (
+                                            _yes_pct_display
+                                            if sig.signal_direction == "UP"
+                                            else 100 - _yes_pct_display
+                                        )
+                                        sig.best_entry_pct = round(_signal_pct, 1)
+                                        logger.info(
+                                            "[RESOLVE] best_entry_pct (final snapshot) "
+                                            "= %.1f%% for signal id=%s",
+                                            sig.best_entry_pct, sig.id
+                                        )
+                            except Exception as _be:
+                                logger.debug("[RESOLVE] best_entry_pct snapshot failed: %s", _be)
 
                         db.session.flush()
 

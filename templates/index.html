@@ -1723,13 +1723,10 @@ function renderGauge(yesPct) {
 
   // ── Track best dip (lowest signal-side % = best limit entry opportunity) ──
   // Only update bestDip from real orderbook ticks (not the 50% fallback)
-  // Also guard: reject 50% (Limitless neutral/settled value) and out-of-range values
-  const _validDip = _isRealTick &&
-                    signalPct >= 1.0 && signalPct <= 94.0 &&
-                    Math.abs(signalPct - 50.0) >= 0.5;
-  if (_validDip && (gaugeState.bestDip === null || signalPct < gaugeState.bestDip)) {
+  if (_isRealTick && (gaugeState.bestDip === null || signalPct < gaugeState.bestDip)) {
     gaugeState.bestDip = signalPct;
-    // Persist to DB immediately
+    // Persist to DB immediately — server-side tracker also does this every 30s
+    // but frontend has higher resolution (every 2s) so can catch deeper dips
     if (gaugeState.signalId && gaugeState.signalId !== 'pending_load') {
       fetch(`/api/signals/${gaugeState.signalId}/best_entry`, {
         method: 'POST',
