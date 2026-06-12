@@ -1703,12 +1703,24 @@ function updateGaugeSVG(pct) {
 }
 
 // ── Main render called on every orderbook tick ────────────────────────────────
-function renderGauge(yesPct) {
-  // Signal-side %: the token you're buying
-  // UP   signal → buying UP   token → track UP%   (yesPct from orderbook)
-  // DOWN signal → buying DOWN token → track DOWN%  (100 - yesPct)
-  // Lower % = cheaper entry = better limit buy opportunity
-  const signalPct = gaugeState.direction === 'UP' ? yesPct : (100 - yesPct);
+function renderGauge(signalAskPct, rawYesAskPct, rawNoAskPct) {
+  // signalAskPct  — the best ASK price for the token we are BUYING (0–100 cents)
+  //                 UP signal   → YES token best ask
+  //                 DOWN signal → NO  token best ask
+  // rawYesAskPct  — YES token best ask (for the YES/NO bar display)
+  // rawNoAskPct   — NO  token best ask (for the YES/NO bar display)
+  //
+  // Lower ask = cheaper entry = better dip opportunity = higher payout.
+  // At 20¢: pay $0.20 per share, win $1.00 → 5× payout.
+  // At 33¢: pay $0.33 per share, win $1.00 → 3× payout.
+  //
+  // We do NOT compute (100 - yesPct) anymore for DOWN signals.
+  // The server now gives us the actual NO ask directly.
+  const signalPct = signalAskPct;
+
+  // Infer raw YES/NO for the bar display if not provided
+  const yesPct = rawYesAskPct  != null ? rawYesAskPct  : (gaugeState.direction === 'UP'   ? signalPct : 100 - signalPct);
+  const noPct2 = rawNoAskPct   != null ? rawNoAskPct   : (gaugeState.direction === 'DOWN' ? signalPct : 100 - signalPct);
 
   // ── Set entry price on first REAL tick ──────────────────────────────────
   // Only set if this is a real data point (not the 50% fallback).
@@ -1758,16 +1770,21 @@ function renderGauge(yesPct) {
     pctEl.setAttribute('fill', signalPct > 20 ? 'var(--accent)' : 'var(--down)');
   }
   const sideLbl = el('gauge-side-label');
-  if (sideLbl) sideLbl.textContent = gaugeState.direction === 'UP' ? 'UP token %' : 'DOWN token %';
+  if (sideLbl) {
+    const payoutX = signalPct > 0 ? (100 / signalPct).toFixed(2) : '∞';
+    const tokenLabel = gaugeState.direction === 'UP' ? 'UP token ask' : 'DOWN token ask';
+    sideLbl.textContent = `${tokenLabel} · ${payoutX}x payout`;
+  }
 
   // YES/NO bar
   const yesBar = el('gauge-yes-bar'), noBar = el('gauge-no-bar');
   const yesVal = el('gauge-yes-val'), noVal = el('gauge-no-val');
-  const noPct = 100 - yesPct;
+  // YES/NO bar: show actual ask prices for each token (not a complement of each other)
+  // These are independent CLOB books — YES ask + NO ask do NOT necessarily sum to 100.
   if (yesBar) { yesBar.style.width = yesPct.toFixed(1) + '%'; yesBar.style.flex = 'none'; yesBar.textContent = yesPct >= 10 ? yesPct.toFixed(0) + '%' : ''; }
-  if (noBar)  { noBar.style.width  = noPct.toFixed(1) + '%';  noBar.style.flex  = 'none'; noBar.textContent  = noPct >= 10 ? noPct.toFixed(0) + '%' : ''; }
+  if (noBar)  { noBar.style.width  = noPct2.toFixed(1) + '%';  noBar.style.flex  = 'none'; noBar.textContent  = noPct2 >= 10 ? noPct2.toFixed(0) + '%' : ''; }
   if (yesVal) yesVal.textContent = yesPct.toFixed(1) + '%';
-  if (noVal)  noVal.textContent  = noPct.toFixed(1) + '%';
+  if (noVal)  noVal.textContent  = noPct2.toFixed(1) + '%';
 
   // Dip tracker stats
   if (el('dip-best'))    el('dip-best').textContent    = gaugeState.bestDip !== null ? gaugeState.bestDip.toFixed(1) + '%' : '—';
@@ -1825,7 +1842,7 @@ async function pollOrderbook() {
     if (!r.ok) {
       console.warn('[Gauge] orderbook fetch failed:', r.status);
       // ── Fallback: render gauge at 50% so needle is visible ──────────────
-      if (gaugeState.entryPct === null) renderGauge(50);
+      if (gaugeState.entryPct === null) renderGauge(50, 50, 50);
       return;
     }
     const data = await r.json();
@@ -1834,43 +1851,86 @@ async function pollOrderbook() {
       console.warn('[Gauge] orderbook unavailable:', data.error,
                    '— slug:', gaugeState.slug || 'none yet');
       // ── Fallback: render gauge at 50% so it's visually alive ─────────────
-      if (gaugeState.entryPct === null) renderGauge(50);
+      if (gaugeState.entryPct === null) renderGauge(50, 50, 50);
       return;
     }
 
-    // ── Step 3: extract YES% from response ───────────────────────────────
-    let yesPct = null;
+    // ── Step 3: extract the CORRECT ask price for the signal direction ─────────
+    //
+    // KEY CONCEPT (Limitless CLOB):
+    //   Every market has TWO separate orderbooks: YES (UP) and NO (DOWN).
+    //   Each has Bids (buy orders) and Asks (sell orders).
+    //   When YOU buy a token you pay the best ASK — the lowest ask price.
+    //   That is your real execution price, NOT the midpoint.
+    //
+    //   UP   signal → bot bought UP   token (YES) → track _yes_ask_pct
+    //   DOWN signal → bot bought DOWN token (NO)  → track _no_ask_pct
+    //
+    //   Best dip = lowest that ask price reached during the candle.
+    //   At 20¢ ask: pay $0.20/share, win $1.00 → 5x payout.
+    //   The old code used midpoint which is NOT what you pay.
 
-    if (data._yes_pct != null && !isNaN(parseFloat(data._yes_pct))) {
-      yesPct = parseFloat(data._yes_pct);
-    } else if (data.adjustedMidpoint != null) {
-      const v = parseFloat(data.adjustedMidpoint);
-      yesPct = v > 1 ? v : v * 100;
-    } else if (data.midpoint != null) {
-      const v = parseFloat(data.midpoint);
-      yesPct = v > 1 ? v : v * 100;
-    } else if (data.lastTradePrice != null) {
-      const v = parseFloat(data.lastTradePrice);
-      yesPct = v > 1 ? v : v * 100;
-    } else if (Array.isArray(data.asks) && data.asks.length > 0) {
-      const v = parseFloat(Array.isArray(data.asks[0]) ? data.asks[0][0] : data.asks[0]);
-      yesPct = v > 1 ? v : v * 100;
-    } else if (Array.isArray(data.bids) && data.bids.length > 0) {
-      const v = parseFloat(Array.isArray(data.bids[0]) ? data.bids[0][0] : data.bids[0]);
-      yesPct = v > 1 ? v : v * 100;
+    const _dir = gaugeState.direction; // 'UP' or 'DOWN'
+    let signalAskPct = null;
+    let rawYesAskPct = null;
+    let rawNoAskPct  = null;
+
+    if (_dir === 'UP') {
+      if (data._yes_ask_pct != null && !isNaN(parseFloat(data._yes_ask_pct))) {
+        signalAskPct = parseFloat(data._yes_ask_pct);
+        rawYesAskPct = signalAskPct;
+        rawNoAskPct  = data._no_ask_pct != null ? parseFloat(data._no_ask_pct) : null;
+      }
+    } else {
+      if (data._no_ask_pct != null && !isNaN(parseFloat(data._no_ask_pct))) {
+        signalAskPct = parseFloat(data._no_ask_pct);
+        rawNoAskPct  = signalAskPct;
+        rawYesAskPct = data._yes_ask_pct != null ? parseFloat(data._yes_ask_pct) : null;
+      }
     }
 
-    if (yesPct !== null && !isNaN(yesPct)) {
-      console.log('[Gauge] tick yesPct=', yesPct.toFixed(1),
-                  'dir=', gaugeState.direction, 'slug=', gaugeState.slug);
-      renderGauge(Math.min(100, Math.max(0, yesPct)));
+    // Fallback: _yes_pct from server (ask or midpoint, server's choice)
+    if (signalAskPct === null && data._yes_pct != null) {
+      const yp = parseFloat(data._yes_pct);
+      if (!isNaN(yp)) {
+        rawYesAskPct = yp;
+        rawNoAskPct  = data._no_ask_pct != null ? parseFloat(data._no_ask_pct) : (100 - yp);
+        signalAskPct = _dir === 'UP' ? rawYesAskPct : rawNoAskPct;
+        console.warn('[Gauge] Using _yes_pct fallback — DOWN signals may be approximate.');
+      }
+    }
+
+    // Last resort: raw midpoint fields
+    if (signalAskPct === null) {
+      const mp = data.adjustedMidpoint ?? data.midpoint ?? data.lastTradePrice;
+      if (mp != null) {
+        const v = parseFloat(mp);
+        if (!isNaN(v)) {
+          rawYesAskPct = v > 1 ? v : v * 100;
+          rawNoAskPct  = 100 - rawYesAskPct;
+          signalAskPct = _dir === 'UP' ? rawYesAskPct : rawNoAskPct;
+          console.warn('[Gauge] Using raw midpoint as last resort — not real ask price.');
+        }
+      }
+    }
+
+    if (signalAskPct !== null && !isNaN(signalAskPct)) {
+      const clamped = Math.min(99.9, Math.max(0.1, signalAskPct));
+      const payoutX = (100 / clamped).toFixed(2);
+      console.log(
+        `[Gauge] tick dir=${_dir} signalAsk=${clamped.toFixed(1)}¢`
+        + ` yesAsk=${rawYesAskPct != null ? rawYesAskPct.toFixed(1) : '?'}¢`
+        + ` noAsk=${rawNoAskPct != null ? rawNoAskPct.toFixed(1) : '?'}¢`
+        + ` payout=${payoutX}x source=${data._source || 'unknown'}`
+      );
+      renderGauge(clamped, rawYesAskPct, rawNoAskPct);
     } else {
-      console.warn('[Gauge] no price in orderbook response — keys:', Object.keys(data));
-      if (gaugeState.entryPct === null) renderGauge(50);
+      console.warn('[Gauge] no usable ask price — keys:', Object.keys(data));
+      if (gaugeState.entryPct === null) renderGauge(50, 50, 50);
     }
   } catch(e) {
     console.error('[Gauge] pollOrderbook error:', e);
-    if (gaugeState.entryPct === null) renderGauge(50);
+    if (gaugeState.entryPct === null) renderGauge(50, 50, 50);
   }
 }
 
@@ -2025,9 +2085,15 @@ function connectLimitlessWS(slug) {
         const yes = parseFloat(prices.yes || prices.YES || prices['0'] || 0);
         if (!yes || isNaN(yes)) return;
 
-        const yesPct = yes > 1 ? yes : yes * 100;
-        console.log('[GaugeWS] live tick yesPct=', yesPct.toFixed(2));
-        renderGauge(Math.min(100, Math.max(0, yesPct)));
+        // WS gives us the YES token price — derive direction-correct ask
+        const yesAskFromWS = yes > 1 ? yes : yes * 100;
+        const noAskFromWS  = 100 - yesAskFromWS; // complement — WS only streams YES side
+        const signalAskFromWS = gaugeState.direction === 'UP' ? yesAskFromWS : noAskFromWS;
+        console.log('[GaugeWS] live tick dir=', gaugeState.direction,
+                    'yesAsk=', yesAskFromWS.toFixed(2),
+                    'signalAsk=', signalAskFromWS.toFixed(2),
+                    'payout=', (100/Math.max(0.1,signalAskFromWS)).toFixed(2) + 'x');
+        renderGauge(Math.min(99.9, Math.max(0.1, signalAskFromWS)), yesAskFromWS, noAskFromWS);
       } catch(e) {}
     };
 

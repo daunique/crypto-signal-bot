@@ -368,49 +368,106 @@ def create_app():
                         ob.get("midpoint"),
                         ob.get("lastTradePrice"))
 
-            # Normalise: extract the YES midpoint and expose it clearly
-            midpoint = (
-                ob.get("adjustedMidpoint")
-                or ob.get("midpoint")
-                or ob.get("lastTradePrice")
-            )
-            # Best bid/ask for YES token
-            bids = ob.get("bids") or []
-            asks = ob.get("asks") or []
+            # ── Parse orderbook entries ────────────────────────────────────
+            # Limitless returns one orderbook per token (YES or NO).
+            # The response may contain:
+            #   { bids, asks }                   → single-side (YES token)
+            #   { yes: {bids,asks}, no: {bids,asks} } → dual-side
+            # We need the BEST ASK (lowest ask) for each token because
+            # that is the actual execution price when buying.
+            # Best dip tracking must use the ask, not the midpoint.
 
             def _parse_price(entry):
-                """Handle both [price, size] arrays and plain floats."""
+                """Handle [price, size] arrays, plain floats, or dicts."""
                 if isinstance(entry, (list, tuple)) and len(entry) > 0:
                     return float(entry[0])
+                if isinstance(entry, dict):
+                    return float(entry.get("price", entry.get("p", 0)) or 0)
                 try:
                     return float(entry)
                 except Exception:
                     return None
 
-            best_bid = _parse_price(bids[0]) if bids else None
-            best_ask = _parse_price(asks[0]) if asks else None
+            def _best_ask(asks_list):
+                """Lowest ask price from a list = cheapest entry for a buyer."""
+                prices = []
+                for e in (asks_list or []):
+                    p = _parse_price(e)
+                    if p is not None and p > 0:
+                        prices.append(p)
+                return min(prices) if prices else None
 
-            logger.info("[orderbook] best_bid=%s best_ask=%s midpoint=%s",
-                        best_bid, best_ask, midpoint)
+            def _best_bid(bids_list):
+                """Highest bid price from a list."""
+                prices = []
+                for e in (bids_list or []):
+                    p = _parse_price(e)
+                    if p is not None and p > 0:
+                        prices.append(p)
+                return max(prices) if prices else None
 
-            # Derive YES% from best available price source
-            yes_price = None
-            if midpoint is not None:
-                yes_price = float(midpoint)
-            elif best_ask is not None:
-                yes_price = best_ask
-            elif best_bid is not None:
-                yes_price = best_bid
+            # Handle both response shapes
+            yes_ob = ob.get("yes") or {}
+            no_ob  = ob.get("no")  or {}
 
-            ob["_slug"]       = slug
-            ob["_yes_price"]  = yes_price
-            ob["_yes_pct"]    = round(yes_price * 100, 2) if yes_price is not None else None
-            ob["_source"]     = ("adjustedMidpoint" if ob.get("adjustedMidpoint") is not None
-                                  else "midpoint" if ob.get("midpoint") is not None
-                                  else "best_ask" if best_ask is not None else "best_bid")
+            if yes_ob and no_ob:
+                # Dual-side shape: { yes: {bids,asks}, no: {bids,asks} }
+                yes_best_ask = _best_ask(yes_ob.get("asks"))
+                yes_best_bid = _best_bid(yes_ob.get("bids"))
+                no_best_ask  = _best_ask(no_ob.get("asks"))
+                no_best_bid  = _best_bid(no_ob.get("bids"))
+            else:
+                # Single-side shape (YES token only) — NO ask = 1 - YES bid
+                yes_best_ask = _best_ask(ob.get("asks"))
+                yes_best_bid = _best_bid(ob.get("bids"))
+                # NO token price is complement: buying NO = paying (1 - YES_bid)
+                no_best_ask  = round(1.0 - yes_best_bid, 6) if yes_best_bid is not None else None
+                no_best_bid  = round(1.0 - yes_best_ask, 6) if yes_best_ask is not None else None
 
-            logger.info("[orderbook] Returning _yes_pct=%s _source=%s",
-                        ob["_yes_pct"], ob["_source"])
+            # Midpoint for reference only (NOT used for dip tracking)
+            midpoint = (
+                ob.get("adjustedMidpoint")
+                or ob.get("midpoint")
+                or ob.get("lastTradePrice")
+            )
+
+            logger.info(
+                "[orderbook] yes_ask=%s yes_bid=%s no_ask=%s no_bid=%s midpoint=%s slug=%s",
+                yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, midpoint, slug
+            )
+
+            # ── Expose clean fields for the frontend gauge ─────────────────
+            # _yes_ask_pct : cheapest price to BUY YES token right now (cents on $1)
+            # _no_ask_pct  : cheapest price to BUY NO  token right now (cents on $1)
+            # _midpoint_pct: market midpoint for reference
+            # _yes_pct     : kept for backward compat — same as _yes_ask_pct or midpoint fallback
+            #
+            # Gauge logic:
+            #   UP   signal → bot bought UP (YES) token → track _yes_ask_pct
+            #   DOWN signal → bot bought DOWN (NO)  token → track _no_ask_pct
+            #   "Best dip" = the lowest that ask price reached = cheapest limit entry seen
+
+            yes_ask_pct = round(yes_best_ask * 100, 2) if yes_best_ask is not None else None
+            no_ask_pct  = round(no_best_ask  * 100, 2) if no_best_ask  is not None else None
+            mid_pct     = round(float(midpoint) * 100, 2) if midpoint is not None else None
+
+            # _yes_pct: backward compat — prefer real ask, fall back to midpoint
+            legacy_yes_pct = yes_ask_pct if yes_ask_pct is not None else mid_pct
+
+            ob["_slug"]          = slug
+            ob["_yes_ask_pct"]   = yes_ask_pct
+            ob["_no_ask_pct"]    = no_ask_pct
+            ob["_yes_bid_pct"]   = round(yes_best_bid * 100, 2) if yes_best_bid is not None else None
+            ob["_no_bid_pct"]    = round(no_best_bid  * 100, 2) if no_best_bid  is not None else None
+            ob["_midpoint_pct"]  = mid_pct
+            ob["_yes_pct"]       = legacy_yes_pct   # kept for any older dashboard code
+            ob["_source"]        = "ask" if yes_best_ask is not None else (
+                                   "midpoint" if midpoint is not None else "none")
+
+            logger.info(
+                "[orderbook] yes_ask_pct=%s no_ask_pct=%s mid_pct=%s source=%s",
+                yes_ask_pct, no_ask_pct, mid_pct, ob["_source"]
+            )
             return jsonify(ob), 200
 
         except Exception as _e:
