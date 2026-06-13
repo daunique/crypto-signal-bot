@@ -119,7 +119,7 @@ class Settings(db.Model):
     poly_max_price       = db.Column(db.Float,   default=0.50)  # Polymarket max contract price
     max_contract_price   = db.Column(db.Float, default=0.50)
     min_confidence       = db.Column(db.Float, default=0.0)   # 0.0 = disabled; per-pair thresholds in PAIR_CONFIG are the real gates
-    no_execute_pairs     = db.Column(db.Text, default='["XRP-USDT"]')  # JSON list: signal fires but NO live order placed
+    no_execute_pairs     = db.Column(db.Text, default='[]')  # JSON list: signal fires but NO live order placed
     cooldown_log         = db.Column(db.Text, default='[]')   # JSON list of cooldown events [{ts,pair,reason,candles,tier}]
     updated_at           = db.Column(db.DateTime, default=datetime.utcnow)
 

@@ -176,7 +176,7 @@ def create_app():
                 mode=os.environ.get("DEFAULT_MODE", "shadow"),
                 position_size=float(os.environ.get("DEFAULT_POSITION_SIZE", "10")),
                 min_confidence=0.0,
-                no_execute_pairs='["XRP-USDT"]',
+                no_execute_pairs='[]',
                 cooldown_log='[]',
             ))
             db.session.commit()
@@ -190,10 +190,19 @@ def create_app():
                 _existing.min_confidence = 0.0
                 _changed = True
                 logger.info("[APP] Migration: min_confidence reset to 0.0 (per-pair gates active)")
-            if _existing and not _existing.no_execute_pairs:
-                _existing.no_execute_pairs = '["XRP-USDT"]'
-                _changed = True
-                logger.info("[APP] Migration: no_execute_pairs seeded with XRP-USDT")
+            # v3.1: XRP-USDT reactivated for live trade with invert=True in PAIR_CONFIG.
+            # Clear no_execute_pairs if it still contains XRP-USDT from previous deploy.
+            if _existing and _existing.no_execute_pairs:
+                import json as _nep_clr_j
+                try:
+                    _nep_list = _nep_clr_j.loads(_existing.no_execute_pairs)
+                    if 'XRP-USDT' in _nep_list:
+                        _nep_list.remove('XRP-USDT')
+                        _existing.no_execute_pairs = _nep_clr_j.dumps(_nep_list)
+                        _changed = True
+                        logger.info("[APP] Migration: XRP-USDT removed from no_execute_pairs — now live with invert=True")
+                except Exception:
+                    pass
             if _changed:
                 db.session.commit()
         if not ShadowBalance.query.first():
