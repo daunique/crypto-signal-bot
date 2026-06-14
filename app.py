@@ -176,7 +176,7 @@ def create_app():
                 mode=os.environ.get("DEFAULT_MODE", "shadow"),
                 position_size=float(os.environ.get("DEFAULT_POSITION_SIZE", "10")),
                 min_confidence=0.0,
-                no_execute_pairs='[]',
+                no_execute_pairs='["XRP-USDT"]',
                 cooldown_log='[]',
             ))
             db.session.commit()
@@ -190,17 +190,18 @@ def create_app():
                 _existing.min_confidence = 0.0
                 _changed = True
                 logger.info("[APP] Migration: min_confidence reset to 0.0 (per-pair gates active)")
-            # v3.1: XRP-USDT reactivated for live trade with invert=True in PAIR_CONFIG.
-            # Clear no_execute_pairs if it still contains XRP-USDT from previous deploy.
-            if _existing and _existing.no_execute_pairs:
+            # v3.2: XRP-USDT disabled from live execution — signal fires but no order placed.
+            # Ensure XRP-USDT is in no_execute_pairs on existing deployments.
+            if _existing:
                 import json as _nep_clr_j
                 try:
-                    _nep_list = _nep_clr_j.loads(_existing.no_execute_pairs)
-                    if 'XRP-USDT' in _nep_list:
-                        _nep_list.remove('XRP-USDT')
+                    _nep_raw  = _existing.no_execute_pairs or '[]'
+                    _nep_list = _nep_raw if isinstance(_nep_raw, list) else _nep_clr_j.loads(_nep_raw)
+                    if 'XRP-USDT' not in _nep_list:
+                        _nep_list.append('XRP-USDT')
                         _existing.no_execute_pairs = _nep_clr_j.dumps(_nep_list)
                         _changed = True
-                        logger.info("[APP] Migration: XRP-USDT removed from no_execute_pairs — now live with invert=True")
+                        logger.info("[APP] Migration: XRP-USDT added to no_execute_pairs — live execution disabled")
                 except Exception:
                     pass
             if _changed:

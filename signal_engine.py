@@ -63,7 +63,7 @@ PAIR_CONFIG = {
     "BTC-USDT":  {"threshold": 0.72, "tier": "A", "invert": False},
     "ETH-USDT":  {"threshold": 0.58, "tier": "A", "invert": False},
     "SOL-USDT":  {"threshold": 0.65, "tier": "B", "invert": False},
-    "XRP-USDT":  {"threshold": 0.65, "tier": "B", "invert": True},   # inverted: UP signal → trade DOWN, DOWN signal → trade UP
+    "XRP-USDT":  {"threshold": 0.65, "tier": "B", "invert": True},   # inverted + no-execute: signal fires normally, NO live order placed
     "BNB-USDT":  {"threshold": 0.72, "tier": "A", "invert": False},
     "DOGE-USDT": {"threshold": 0.65, "tier": "B", "invert": False},
 }

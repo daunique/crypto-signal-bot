@@ -601,22 +601,17 @@ input[type=number]:focus{border-color:var(--accent)}
         <div class="toggle live-mode" id="tgl-live" onclick="toggleSetting('mode')"></div>
       </div>
       <div class="toggle-row">
-        <div><div class="tgl-lbl">Martingale</div><div class="tgl-sub">Increase stake by step after each loss, reset on win</div></div>
+        <div>
+          <div class="tgl-lbl">Martingale</div>
+          <div class="tgl-sub">Increase stake after each loss using the sequence below, reset on win</div>
+        </div>
         <div class="toggle" id="tgl-mart" onclick="toggleSetting('martingale')"></div>
-      </div>
-      <div class="toggle-row">
-        <div><div class="tgl-lbl">Loss Cooldown</div><div class="tgl-sub">Sit out 2 candles after 2 consecutive losses</div></div>
-        <div class="toggle" id="tgl-cooldown" onclick="toggleSetting('cooldown')"></div>
-      </div>
-      <div class="toggle-row">
-        <div><div class="tgl-lbl">Family Rotation</div><div class="tgl-sub">Rotate between token families: BTC+ETH → DOGE+SOL → XRP+BNB</div></div>
-        <div class="toggle" id="tgl-family" onclick="toggleSetting('family')"></div>
       </div>
 
       <div class="form-group" style="margin-top:16px">
         <label class="form-lbl">Martingale Sequence ($)</label>
         <input type="text" id="inp-seq" value="1,1.5,2,3,4.5,6.7" placeholder="e.g. 1,1.5,2,3,4.5" style="font-family:monospace"/>
-        <div class="form-hint">Comma-separated stakes per loss step. Decimals OK (1dp). Last value repeats if streak exceeds list length.</div>
+        <div class="form-hint">Comma-separated stakes per loss step. Last value repeats if streak exceeds list length.</div>
       </div>
       <div class="form-group">
         <label class="form-lbl">Loss Cap (hard reset)</label>
@@ -627,6 +622,15 @@ input[type=number]:focus{border-color:var(--accent)}
         <label class="form-lbl">Current Loss Streak</label>
         <div id="mart-streak-disp" style="font-size:1.4rem;font-weight:800;color:var(--down)">0</div>
         <div class="form-hint">Resets to 0 on next win or when cap is reached</div>
+      </div>
+
+      <!-- Info block: removed controls explanation -->
+      <div style="margin-top:16px;padding:10px 12px;background:rgba(123,179,247,0.06);border:1px solid rgba(123,179,247,0.18);border-radius:8px;font-size:0.68rem;color:var(--text2);line-height:1.7">
+        <div style="font-weight:700;color:var(--text);margin-bottom:4px">ℹ️ Signal Engine v3 — auto-managed controls</div>
+        <div><b style="color:var(--text)">Confidence thresholds</b> — set per-pair in PAIR_CONFIG (BTC/BNB: 72%, ETH: 58%, others: 65%). No global slider needed.</div>
+        <div style="margin-top:3px"><b style="color:var(--text)">Family rotation</b> — handled automatically inside the signal engine on every candle. No toggle needed.</div>
+        <div style="margin-top:3px"><b style="color:var(--text)">Loss cooldown</b> — the cluster escalator in the engine raises the confidence bar after 3 consecutive same-direction signals. Automatic.</div>
+        <div style="margin-top:3px"><b style="color:var(--text)">Pair inversion</b> — XRP-USDT trades the opposite direction of its signal automatically (set in PAIR_CONFIG).</div>
       </div>
     </div>
     <!-- Platform execution toggles -->
@@ -720,16 +724,7 @@ input[type=number]:focus{border-color:var(--accent)}
         <input type="number" id="inp-cp" value="0.50" min="0.01" max="0.50" step="0.01"/>
         <div class="form-hint">Limitless max is $0.50 per contract</div>
       </div>
-      <div class="form-group">
-        <label class="form-lbl">Min ML Confidence</label>
-        <input type="range" id="rng-conf" min="0.55" max="0.75" step="0.01" value="0.58" oninput="document.getElementById('conf-disp').textContent=Math.round(this.value*100)+'%'"/>
-        <div style="display:flex;justify-content:space-between;margin-top:5px">
-          <span style="font-size:0.7rem;color:var(--text2)">55%</span>
-          <span style="font-weight:800;color:var(--accent)" id="conf-disp">58%</span>
-          <span style="font-size:0.7rem;color:var(--text2)">75%</span>
-        </div>
-        <div class="form-hint">Higher = fewer but stronger signals</div>
-      </div>
+
     </div>
   </div>
 
@@ -780,7 +775,7 @@ input[type=number]:focus{border-color:var(--accent)}
 // STATE
 // ═══════════════════════════════════
 let state = {
-  settings: {mode:'shadow',position_size:10,use_martingale:false,martingale_multiplier:2,max_contract_price:0.50,min_confidence:0.58},
+  settings: {mode:'shadow',position_size:10,use_martingale:false,max_contract_price:0.50},
   signalsPage: 1,
   perfChart: null,
   histChart: null,
@@ -979,14 +974,16 @@ async function loadPairStats() {
     const d = await r.json();
     const tbody = document.getElementById('pair-tbody');
     if (!tbody) return;
-    const TIER_C = {A:'var(--win)',B:'var(--warn)',C:'var(--text2)'};
+    // Family A = BTC/ETH/BNB (threshold 72%) — high confidence gate
+    // Family B = SOL/XRP/DOGE (threshold 65%) — mid confidence gate
+    const FAMILY_C = {A:'var(--win)',B:'var(--warn)'};
     tbody.innerHTML = Object.entries(d).map(([sym,s]) => {
       const wr = s.win_rate;
       const wrC = wr===null?'var(--accent)':wr>=60?'var(--win)':wr>=50?'var(--warn)':'var(--loss)';
       const status = wr===null?'—':wr>=60?'✅ Strong':wr>=55?'⚡ Good':wr>=50?'⚠️ Weak':'❌ Poor';
       return `<tr>
         <td style="font-weight:700">${sym}</td>
-        <td style="color:${TIER_C[s.tier]||'var(--text2)'};font-weight:700">Tier ${s.tier}</td>
+        <td style="color:${FAMILY_C[s.tier]||'var(--text2)'};font-weight:700">Family ${s.tier}</td>
         <td style="color:var(--accent2)">${(s.threshold*100).toFixed(0)}%</td>
         <td style="color:var(--win)">${s.wins}</td>
         <td style="color:var(--loss)">${s.losses}</td>
@@ -1360,8 +1357,6 @@ function applySettingsUI() {
   const s = state.settings;
   document.getElementById('tgl-live').classList.toggle('on', s.mode==='live');
   document.getElementById('tgl-mart').classList.toggle('on', !!s.use_martingale);
-  document.getElementById('tgl-cooldown').classList.toggle('on', !!s.use_cooldown);
-  document.getElementById('tgl-family').classList.toggle('on', !!s.use_family_rotation);
   document.getElementById('tgl-limitless').classList.toggle('on',
     s.use_limitless !== undefined ? !!s.use_limitless : true);
   document.getElementById('tgl-polymarket').classList.toggle('on', !!s.use_polymarket);
@@ -1427,9 +1422,7 @@ function applySettingsUI() {
   const streakEl = document.getElementById('mart-streak-disp');
   if(streakEl){ streakEl.textContent = streak; streakEl.style.color = streak>0?'var(--down)':'var(--win)'; }
   document.getElementById('inp-cp').value   = s.max_contract_price||0.50;
-  const conf = s.min_confidence||0.58;
-  document.getElementById('rng-conf').value = conf;
-  document.getElementById('conf-disp').textContent = Math.round(conf*100)+'%';
+  // min_confidence is managed per-pair in PAIR_CONFIG — no UI slider needed
   // Stop loss
   const sl = s.stop_loss_balance || '';
   document.getElementById('inp-stoploss').value = sl || '';
@@ -1442,8 +1435,7 @@ function applySettingsUI() {
 function toggleSetting(type) {
   if (type==='mode')       state.settings.mode = state.settings.mode==='live'?'shadow':'live';
   if (type==='martingale') state.settings.use_martingale   = !state.settings.use_martingale;
-  if (type==='cooldown')   state.settings.use_cooldown     = !state.settings.use_cooldown;
-  if (type==='family')     state.settings.use_family_rotation = !state.settings.use_family_rotation;
+
   applySettingsUI();
 }
 function quickToggleMode() { toggleSetting('mode'); saveSettings(); }
@@ -1459,14 +1451,11 @@ async function saveSettings() {
     martingale_sequence:   document.getElementById('inp-seq').value.trim(),
     martingale_cap:        parseInt(document.getElementById('inp-cap').value),
     max_contract_price:    parseFloat(document.getElementById('inp-cp').value),
-    min_confidence:        parseFloat(document.getElementById('rng-conf').value),
     use_limitless:         document.getElementById('tgl-limitless').classList.contains('on'),
     use_polymarket:        document.getElementById('tgl-polymarket').classList.contains('on'),
     poly_position_size:    parseFloat(document.getElementById('inp-poly-size').value || 10),
     poly_max_price:        parseFloat(document.getElementById('inp-poly-max-price').value || 0.50),
-    use_cooldown:          !!state.settings.use_cooldown,
     stop_loss_balance:     slVal,
-    use_family_rotation:   !!state.settings.use_family_rotation,
   };
   try {
     const r = await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});

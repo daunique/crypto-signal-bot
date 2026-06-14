@@ -173,27 +173,6 @@ def job_generate_signal():
                 except Exception as _sle:
                     logger.warning('[GENERATE] Stop-loss check error: %s — proceeding', _sle)
 
-            # ── SOL-USDT 2-hour cooldown ────────────────────────────────────────
-            # After any SOL signal fires, suppress SOL from the candidate pool
-            # for 8 candles (2 hours). SOL is only re-eligible if 2 hours have
-            # passed since the last SOL signal AND it qualifies at that time.
-            _sol_blocked = False
-            try:
-                _last_sol = Signal.query.filter(
-                    Signal.symbol == "SOL-USDT"
-                ).order_by(Signal.candle_open_time.desc()).first()
-                if _last_sol:
-                    _now_utc   = datetime.now(timezone.utc).replace(tzinfo=None)
-                    _sol_age   = _now_utc - _last_sol.candle_open_time
-                    if _sol_age < timedelta(hours=2):
-                        _sol_blocked = True
-                        _sol_mins_left = int((timedelta(hours=2) - _sol_age).total_seconds() / 60)
-                        logger.info(
-                            f"[GENERATE] SOL-USDT on 2-hour cooldown — "
-                            f"{_sol_mins_left}m remaining since last signal"
-                        )
-            except Exception as _se:
-                logger.warning(f"[GENERATE] SOL cooldown check error: {_se}")
 
             # ── Per-pair loss cooldown ───────────────────────────────────────────
             _pair_cooldown_excludes = []
@@ -220,58 +199,57 @@ def job_generate_signal():
             #   Family A: BTC-USDT + ETH-USDT
             #   Family B: DOGE-USDT + SOL-USDT
             #   Family C: XRP-USDT + BNB-USDT
-            # When use_family_rotation is ON: after a signal fires from one family,
-            # the next signal must come from a different family (rotates A→B→C→A).
-            # Falls through to all families if preferred ones have no qualifying signal.
+            # Family rotation is always active — rotates A→B→C→A.
+            # Falls through (skips candle) if no signal qualifies outside excluded family.
             _preferred_families = None
             _FAMILY_MAP = {
                 "BTC-USDT":  "A", "ETH-USDT":  "A",
                 "DOGE-USDT": "B", "SOL-USDT":  "B",
                 "XRP-USDT":  "C", "BNB-USDT":  "C",
             }
-            _use_fam_rotation = bool(getattr(settings, 'use_family_rotation', False))
-            _excluded_family  = None   # hard-excluded family this candle
-            if _use_fam_rotation:
-                try:
-                    # Look at the last RESOLVED signal (WIN/LOSS/UNKNOWN) to determine
-                    # which family just fired. Ignoring PENDING avoids re-reading the
-                    # same signal while it's waiting to resolve and always blocking A.
-                    _last_resolved = Signal.query.filter(
-                        Signal.outcome.in_(['WIN', 'LOSS', 'UNKNOWN'])
-                    ).order_by(Signal.candle_open_time.desc()).first()
+            # Family rotation is ALWAYS ON — no toggle needed.
+            # After a signal fires from a family, the next candle must come
+            # from a different family. Prevents consecutive BTC/ETH spam.
+            # Families: A = BTC+ETH | B = DOGE+SOL | C = XRP+BNB
+            _excluded_family = None
+            try:
+                # Look at last signal overall (including PENDING — covers the
+                # 15-min window while the current signal is waiting to resolve).
+                _last_resolved = Signal.query.filter(
+                    Signal.outcome.in_(['WIN', 'LOSS', 'UNKNOWN'])
+                ).order_by(Signal.candle_open_time.desc()).first()
 
-                    # Also check last signal overall (including PENDING) — if it's
-                    # from the same family as last resolved, use it too (covers live
-                    # mode where a signal fires and sits PENDING for 15 min).
-                    _last_any = Signal.query.order_by(
-                        Signal.candle_open_time.desc()
-                    ).first()
+                _last_any = Signal.query.order_by(
+                    Signal.candle_open_time.desc()
+                ).first()
 
-                    # Use the more recent of the two
-                    _ref_sig = None
-                    if _last_any and _last_resolved:
-                        _ref_sig = _last_any if (
-                            _last_any.candle_open_time >= _last_resolved.candle_open_time
-                        ) else _last_resolved
-                    else:
-                        _ref_sig = _last_any or _last_resolved
+                # Use the more recent of the two
+                _ref_sig = None
+                if _last_any and _last_resolved:
+                    _ref_sig = _last_any if (
+                        _last_any.candle_open_time >= _last_resolved.candle_open_time
+                    ) else _last_resolved
+                else:
+                    _ref_sig = _last_any or _last_resolved
 
-                    if _ref_sig:
-                        _excl = _FAMILY_MAP.get(_ref_sig.symbol)
-                        _excluded_families  = [_excl] if _excl else None
-                        _preferred_families = [f for f in ['A','B','C'] if f != _excl]
-                        logger.info(
-                            '[GENERATE] Family rotation ON | last signal=%s family=%s — '
-                            'EXCLUDING family %s, eligible families=%s',
-                            _ref_sig.symbol, _excluded_families,
-                            _excluded_families, _preferred_families
-                        )
-                    else:
-                        logger.info('[GENERATE] Family rotation ON | no previous signal — all families eligible')
-                except Exception as _fe:
-                    logger.warning('[GENERATE] Family rotation check error: %s', _fe)
-            else:
-                logger.debug('[GENERATE] Family rotation OFF — all families eligible')
+                if _ref_sig:
+                    _excl = _FAMILY_MAP.get(_ref_sig.symbol)
+                    _excluded_families  = [_excl] if _excl else None
+                    _preferred_families = [f for f in ['A', 'B', 'C'] if f != _excl]
+                    logger.info(
+                        '[GENERATE] Family rotation | last=%s family=%s → '
+                        'excluding family %s | eligible=%s',
+                        _ref_sig.symbol, _excl,
+                        _excluded_families, _preferred_families
+                    )
+                else:
+                    _excluded_families  = None
+                    _preferred_families = None
+                    logger.info('[GENERATE] Family rotation | no previous signal — all families eligible')
+            except Exception as _fe:
+                logger.warning('[GENERATE] Family rotation check error: %s — allowing all families', _fe)
+                _excluded_families  = None
+                _preferred_families = None
 
             # ── Rule 2: Directional Saturation Filter ────────────────────────
             # If the same direction has lost ≥3 times in the last 6 signals,
@@ -301,7 +279,7 @@ def job_generate_signal():
                 _blocked_directions = {}
 
             # Get signal from engine first — it computes the correct candle boundary
-            _exclude_list = list(set((['SOL-USDT'] if _sol_blocked else []) + _pair_cooldown_excludes)) or None
+            _exclude_list = _pair_cooldown_excludes or None
             sig = pick_best_signal(
                 min_confidence=min_conf,
                 exclude=_exclude_list,
@@ -423,11 +401,11 @@ def job_generate_signal():
             _no_execute = []
             try:
                 import json as _nep_j
-                _nep_raw = getattr(settings, 'no_execute_pairs', '[]') or '[]'
+                _nep_raw = getattr(settings, 'no_execute_pairs', '["XRP-USDT"]') or '["XRP-USDT"]'
                 _no_execute = _nep_raw if isinstance(_nep_raw, list) else _nep_j.loads(_nep_raw)
             except Exception as _nepe:
                 logger.warning('[GENERATE] no_execute_pairs read error: %s', _nepe)
-                _no_execute = []
+                _no_execute = ['XRP-USDT']
 
             _is_no_execute_pair = sig['symbol'] in _no_execute
             if _is_no_execute_pair:
