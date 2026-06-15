@@ -127,6 +127,15 @@ _CLUSTER_THRESHOLD    = 3
 _CLUSTER_CONF_PENALTY = 0.08
 _pair_consec: dict    = {}
 
+# ── System-level directional cool-down state ─────────────────────────────────
+# After 2 consecutive system-level losses in the same direction,
+# that direction is blocked for 2 candles across ALL pairs.
+_dir_loss_streak:    dict = {'UP': 0, 'DOWN': 0}
+_dir_blocked_until:  dict = {'UP': 0, 'DOWN': 0}
+_system_bar_counter: int  = 0
+DIR_BLOCK_THRESHOLD  = 2
+DIR_BLOCK_DURATION   = 2
+
 # ── Model storage ─────────────────────────────────────────────────────────────
 _models:     dict = {}
 _scalers:    dict = {}
@@ -936,6 +945,17 @@ def pick_best_signal(min_confidence: float = None,
         "XRP-USDT":  "C", "BNB-USDT":  "C",
     }
 
+    global _system_bar_counter
+    _system_bar_counter += 1
+
+    # ── System-level directional block ────────────────────────────────────────
+    _currently_blocked_dirs = set()
+    for _dir in ['UP', 'DOWN']:
+        if _system_bar_counter <= _dir_blocked_until.get(_dir, 0):
+            _currently_blocked_dirs.add(_dir)
+            logger.warning('[DIR_BLOCK] %s direction blocked candle bar=%d expires=%d',
+                           _dir, _system_bar_counter, _dir_blocked_until[_dir])
+
     active_symbols = [s for s in SYMBOLS if not (exclude and s in exclude)]
     candidates     = []
 
@@ -957,6 +977,17 @@ def pick_best_signal(min_confidence: float = None,
     if not candidates:
         logger.info("[ENGINE] No qualifying signals this candle")
         return None
+
+    # ── Filter out blocked directions ────────────────────────────────────────
+    if _currently_blocked_dirs:
+        before     = len(candidates)
+        candidates = [s for s in candidates if s['direction'] not in _currently_blocked_dirs]
+        if before - len(candidates):
+            logger.warning('[DIR_BLOCK] Removed %d candidate(s) in blocked dirs %s',
+                           before - len(candidates), _currently_blocked_dirs)
+        if not candidates:
+            logger.warning('[DIR_BLOCK] All candidates blocked — skipping candle')
+            return None
 
     # min_confidence global floor (0.0 = disabled)
     if min_confidence:
@@ -1010,14 +1041,42 @@ def pick_best_signal(min_confidence: float = None,
 # PAIR STATS & CONFIG ACCESSORS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def record_outcome(symbol: str, outcome: str):
+def record_outcome(symbol: str, outcome: str, direction: str = None):
+    # Updates pair stats AND system-level directional block on LOSS.
     if symbol not in _pair_stats:
         _pair_stats[symbol] = {'wins': 0, 'losses': 0, 'signals': 0}
     _pair_stats[symbol]['signals'] += 1
     if outcome == 'WIN':
-        _pair_stats[symbol]['wins']   += 1
+        _pair_stats[symbol]['wins'] += 1
+        if direction:
+            _dir_loss_streak[direction] = 0
+            logger.debug('[DIR_BLOCK] %s WIN -> %s streak reset', symbol, direction)
     elif outcome == 'LOSS':
         _pair_stats[symbol]['losses'] += 1
+        if direction:
+            _dir_loss_streak[direction] = _dir_loss_streak.get(direction, 0) + 1
+            streak = _dir_loss_streak[direction]
+            logger.info('[DIR_BLOCK] %s LOSS | %s streak now %d', symbol, direction, streak)
+            if streak >= DIR_BLOCK_THRESHOLD:
+                _dir_blocked_until[direction] = _system_bar_counter + DIR_BLOCK_DURATION
+                _dir_loss_streak[direction]   = 0
+                logger.warning(
+                    '[DIR_BLOCK] %s direction BLOCKED for %d candles '
+                    '(expires bar %d)',
+                    direction, DIR_BLOCK_DURATION, _dir_blocked_until[direction]
+                )
+
+
+def get_direction_block_status() -> dict:
+    return {
+        'dir_loss_streak':   dict(_dir_loss_streak),
+        'dir_blocked_until': dict(_dir_blocked_until),
+        'system_bar':        _system_bar_counter,
+        'currently_blocked': {
+            d: _system_bar_counter <= _dir_blocked_until.get(d, 0)
+            for d in ['UP', 'DOWN']
+        }
+    }
 
 
 def get_pair_stats() -> dict:
