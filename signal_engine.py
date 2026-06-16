@@ -1,1101 +1,878 @@
 """
-Signal Engine v4 — Per-Pair Optimized Strategy
+signal_engine.py — ML Signal Engine
 ═══════════════════════════════════════════════════════════════════════════════
-Backtested on 15m OHLCV data (Jan 2025 – Jun 2026) across all 6 pairs.
+SYSTEM ROLE
+───────────
+This module is the brain of btcbot. It is imported by three consumers:
 
-Per-pair validated strategies:
-  BTC-USDT  : RSI7<25 + WR%<-90          → 60.47% WR | 11.4/day
-  ETH-USDT  : RSI7<30 + BB%<8%           → 60.27% WR | 16.7/day
-  SOL-USDT  : RSI7<20 + 2-bar cooldown   → 58.56% WR | 10.6/day
-  XRP-USDT  : RSI7<30 + BB%<8% + VOL>1.2 → 58.52% WR |  9.9/day
-  DOGE-USDT : RSI7<25 + WR%<-95 + CALM   → 58.31% WR |  5.1/day
-  BNB-USDT  : RSI7<10 + BB%<5% + CALM    → 56.96% WR |  3.0/day
+  1. main.py / wsgi.py  → calls retrain_all(limit=300) once at startup in a
+                          daemon thread to warm up all 6 models before the
+                          first scheduler tick arrives.
 
-System simulation (pick_best + family rotation, Jan–May 2026):
-  WR: 59.40% | 20.7 signals/day | MaxWin: 11 | MaxLoss: 9
-  Monthly min: 56.7% (Feb) | Days ≥55%: 68% of trading days
+  2. scheduler.py       → calls:
+       • pick_best_signal(...)  every :00/:15/:30/:45+1s  (generate job)
+       • fetch_okx_candles(sym) every :00/:15/:30/:45+0s  (resolve job — gets
+                                                           exact OKX OHLC for
+                                                           WIN/LOSS verdict)
+       • record_outcome(sym, outcome)  after each resolve  (per-pair tracker)
+       • retrain_all(limit=960)  every 4 hours             (retrain job)
+       • _models dict / SYMBOLS  (readiness guard in _models_ready())
 
-Architecture changes from v3:
-  1. Per-pair signal gates — each pair has its own indicator combination
-  2. Gate logic runs BEFORE ML ensemble inference
-  3. SOL uses in-engine 2-bar cooldown (no external dependency)
-  4. DOGE/BNB use ATR-calm filter (atr_ratio < 1.8)
-  5. XRP adds VOL>1.2x filter
-  6. Momentum regime tightening is pair-threshold-aware (+8pts on RSI)
-  7. Hour 07 UTC blocked universally (45-51% WR across 4/6 pairs)
-  8. Hours 14-17 UTC get +5pts RSI penalty (consistently below 55%)
-  9. Cluster escalator still active (direction streak ≥3 → +0.08 conf)
+  3. app.py             → calls:
+       • get_pair_stats()    for /api/stats/pairs route
+       • get_pair_config()   for /api/stats/pairs route
+       • SYMBOLS             for /api/prices live-price fetcher
+
+SIGNAL FLOW (per 15-minute candle boundary)
+───────────────────────────────────────────
+  :XX:00  scheduler.resolve fires   → resolves previous PENDING signal
+  :XX:01  scheduler.generate fires  → calls pick_best_signal()
+                                        ↓
+                                      fetch_okx_candles(sym, limit=120)
+                                        for each SYMBOL
+                                        ↓
+                                      _build_features(df)   → 40+ indicators
+                                        ↓
+                                      _models[sym].predict_proba(X[-1])
+                                        → bull_prob, bear_prob
+                                        ↓
+                                      apply PAIR_CONFIG thresholds + filters
+                                        ↓
+                                      rank candidates by confidence
+                                      apply family / exclude / direction filters
+                                        ↓
+                                      return best signal dict  (or None)
+
+PAIR_CONFIG  (one entry per symbol)
+────────────────────────────────────
+  threshold   float   minimum ML confidence to fire a signal
+  tier        str     "T1" (vol spike ≥1.5×) or "T2" (standard)
+  family      str     "A" | "B" | "C"  — used by family-rotation in scheduler
+  invert      bool    when True the trade direction is flipped by scheduler.py
+                      (signal_direction stored as raw ML direction; scheduler
+                       reads sig['invert'] and flips before placing the order)
+  weight      float   tie-break multiplier when two candidates have equal conf
+
+PUBLIC API
+──────────
+  SYMBOLS             list[str]   the 6 trading pairs
+  _models             dict        {sym: fitted Pipeline}  — inspected by
+                                  scheduler._models_ready()
+  fetch_okx_candles(sym, limit)   → pd.DataFrame  (OHLCV + timestamp)
+  retrain_all(limit)              → None  (fits all 6 models)
+  pick_best_signal(...)           → dict | None
+  record_outcome(sym, outcome)    → None  (updates in-memory win tracker)
+  get_pair_stats()                → dict  {sym: {wins, losses, win_rate}}
+  get_pair_config()               → dict  {sym: PAIR_CONFIG entry}
+
+DEBUGGING NOTES
+───────────────
+  • If _models_ready() returns False at generate time, the generate job skips
+    the candle. This happens only during the first ~30s after cold start while
+    retrain_all runs in _bg() thread (main.py).
+
+  • fetch_okx_candles returns an EMPTY DataFrame on OKX error. The resolve job
+    retries up to 5× (1s apart) before giving up on a symbol for that tick.
+
+  • _build_features drops NaN rows before returning X. With limit=120 the
+    first ~30 rows may be NaN-heavy (EMA200 needs 200 bars — use limit≥300
+    for training, 120 is fine for live inference since models were trained on
+    300+ bars and EMAs are already warm from prior candles).
+
+  • record_outcome / get_pair_stats use the in-memory _pair_outcomes dict.
+    This resets on process restart. The authoritative win/loss counts are in
+    the Signal DB table (queried directly by app.py's /api/stats/pairs route).
+
+  • XRP-USDT, DOGE-USDT, ETH-USDT: all three are in Settings.no_execute_pairs
+    by default (v3.4). They generate signals, resolve outcomes, and appear in
+    stats/dashboard tracking but NEVER place a live order (scheduler.py
+    _is_no_execute_pair guard). Re-activating any of them requires removing the
+    symbol from no_execute_pairs in the Settings dashboard.
+    XRP:  invert=False (v3.3 — inverse direction removed).
+    DOGE: added to no_execute_pairs in v3.4 (walk-forward WR 52.6% — below
+          live-execution confidence threshold).
+    ETH:  added to no_execute_pairs in v3.4 (walk-forward WR 59.1% — model
+          quality acceptable but daily WR variance too high for live orders).
+
+  • Family rotation lives entirely in scheduler.py. signal_engine only
+    exposes sig['family'] and PAIR_CONFIG so the scheduler can enforce it.
+
+  • The invert flag lives in PAIR_CONFIG and is forwarded through the signal
+    dict as sig['invert']. The actual direction flip is done in scheduler.py
+    just before execute_order() is called — signal_direction in the DB always
+    stores the RAW ML direction, never the flipped one.
 """
+
+import logging
+import time
+from datetime import datetime, timezone, timedelta
 
 import numpy as np
 import pandas as pd
 import requests
-import logging
-from datetime import datetime, timezone
-
-from sklearn.ensemble import (RandomForestClassifier,
-                               GradientBoostingClassifier,
-                               ExtraTreesClassifier)
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 logger = logging.getLogger(__name__)
 
-OKX_BASE = "https://www.okx.com"
-SYMBOLS  = ["BTC-USDT","ETH-USDT","SOL-USDT","XRP-USDT","BNB-USDT","DOGE-USDT"]
+# ══════════════════════════════════════════════════════════════════════════════
+# CONSTANTS
+# ══════════════════════════════════════════════════════════════════════════════
 
-# ── Per-pair backtested config ────────────────────────────────────────────────
-#
-# signal_gate:  'bb'     → RSI + BB% gate
-#               'wr'     → RSI + Williams %R gate
-#               'cd'     → RSI only with internal cooldown
-#               'vol_bb' → RSI + BB% + volume gate
-#
-# rsi_long / rsi_short : RSI7 threshold for long / short entry
-# gate_long / gate_short: secondary gate threshold (BB% or WR%)
-# calm_only: True → only fire when ATR ratio < 1.8 (non-momentum regime)
-# vol_min:   minimum vol_ratio required (e.g. 1.2 for XRP)
-# cooldown:  bars between signals for 'cd' gate pairs (SOL)
-# threshold: ML ensemble confidence threshold for this pair
-# tier:      family group A/B/C for rotation
-# invert:    True → execution direction is flipped from signal direction
-#
+OKX_BASE = "https://www.okx.com"
+OKX_CANDLES_EP = f"{OKX_BASE}/api/v5/market/candles"
+
+SYMBOLS = [
+    "BTC-USDT",
+    "ETH-USDT",
+    "SOL-USDT",
+    "XRP-USDT",
+    "BNB-USDT",
+    "DOGE-USDT",
+]
+
+# ── Per-pair configuration ────────────────────────────────────────────────────
+# threshold : minimum ML probability for the winning direction to fire a signal
+# tier      : used for cooldown duration in scheduler (T1=1 candle, T2=2 candles)
+# family    : A/B/C — family rotation in scheduler prevents back-to-back same family
+# invert    : when True, scheduler flips UP→DOWN / DOWN→UP before order placement
+#             XRP-USDT: invert=False (v3.3 — inverse signal direction removed)
+# weight    : tie-break multiplier; higher = preferred when confidences are equal
+# ─────────────────────────────────────────────────────────────────────────────
 PAIR_CONFIG = {
     "BTC-USDT": {
-        "signal_gate": "wr",
-        "rsi_long":    25,    "rsi_short":   75,
-        "gate_long":   -90,   "gate_short":  -10,  # WR thresholds
-        "calm_only":   False, "vol_min":     None,
-        "cooldown":    None,
-        "threshold":   0.68,  "tier": "A",  "invert": False,
+        "threshold": 0.58,
+        "tier":      "T2",
+        "family":    "A",
+        "invert":    False,
+        "weight":    1.0,
     },
     "ETH-USDT": {
-        "signal_gate": "bb",
-        "rsi_long":    30,    "rsi_short":   70,
-        "gate_long":   0.08,  "gate_short":  0.92, # BB% thresholds
-        "calm_only":   False, "vol_min":     None,
-        "cooldown":    None,
-        "threshold":   0.58,  "tier": "A",  "invert": False,
+        "threshold": 0.58,
+        "tier":      "T2",
+        "family":    "A",
+        "invert":    False,
+        "weight":    1.0,
     },
     "SOL-USDT": {
-        "signal_gate": "cd",
-        "rsi_long":    20,    "rsi_short":   80,
-        "gate_long":   None,  "gate_short":  None,
-        "calm_only":   False, "vol_min":     None,
-        "cooldown":    2,     # 2-bar internal cooldown
-        "threshold":   0.62,  "tier": "B",  "invert": False,
-    },
-    "XRP-USDT": {
-        "signal_gate": "vol_bb",
-        "rsi_long":    30,    "rsi_short":   70,
-        "gate_long":   0.08,  "gate_short":  0.92, # BB% thresholds
-        "calm_only":   False, "vol_min":     1.2,  # VOL filter
-        "cooldown":    None,
-        "threshold":   0.62,  "tier": "C",  "invert": True,
+        "threshold": 0.57,
+        "tier":      "T2",
+        "family":    "B",
+        "invert":    False,
+        "weight":    1.05,
     },
     "DOGE-USDT": {
-        "signal_gate": "wr",
-        "rsi_long":    25,    "rsi_short":   75,
-        "gate_long":   -95,   "gate_short":  -5,   # WR thresholds
-        "calm_only":   True,  "vol_min":     None, # ATR calm required
-        "cooldown":    None,
-        "threshold":   0.62,  "tier": "B",  "invert": False,
+        "threshold": 0.57,
+        "tier":      "T2",
+        "family":    "B",
+        "invert":    False,
+        "weight":    1.0,
+    },
+    # XRP-USDT:
+    #   invert=False  — raw ML direction is traded as-is (v3.3: inverse removed)
+    #   no_execute    — live orders suppressed via Settings.no_execute_pairs
+    #                   (signal fires + resolves normally, order never placed)
+    "XRP-USDT": {
+        "threshold": 0.58,
+        "tier":      "T1",
+        "family":    "C",
+        "invert":    False,   # ← v3.3: inverse direction FALSE
+        "weight":    1.1,
     },
     "BNB-USDT": {
-        "signal_gate": "bb",
-        "rsi_long":    10,    "rsi_short":   90,
-        "gate_long":   0.05,  "gate_short":  0.95, # BB% thresholds (tighter)
-        "calm_only":   True,  "vol_min":     None, # ATR calm required
-        "cooldown":    None,
-        "threshold":   0.65,  "tier": "C",  "invert": False,
+        "threshold": 0.57,
+        "tier":      "T2",
+        "family":    "C",
+        "invert":    False,
+        "weight":    1.05,
     },
 }
 
-# ── Hour penalties ─────────────────────────────────────────────────────────────
-# Hour 07 UTC: 45-51% WR across 4/6 pairs → hard block
-# Hours 14-17 UTC: consistently 51-54% → RSI tightened +5pts
-BLOCKED_HOURS   = {7}
-PENALISED_HOURS = {14, 15, 16, 17}  # +5pts added to RSI thresholds
-HOUR_RSI_PENALTY = 5
-
-# ── Momentum regime ────────────────────────────────────────────────────────────
-_MOMENTUM_ATR_MULT  = 1.8   # 4H ATR > this × 24H median ATR → momentum
-_MOMENTUM_MOVE_PCT  = 0.03  # ±3% net move over 4H → momentum
-_MOMENTUM_RSI_DELTA = 8     # tighten RSI thresholds by this many points
-
-# ── Cluster escalator ─────────────────────────────────────────────────────────
-_CLUSTER_THRESHOLD    = 3
-_CLUSTER_CONF_PENALTY = 0.08
-_pair_consec: dict    = {}
-
-# ── System-level directional cool-down state ─────────────────────────────────
-# After 2 consecutive system-level losses in the same direction,
-# that direction is blocked for 2 candles across ALL pairs.
-_dir_loss_streak:    dict = {'UP': 0, 'DOWN': 0}
-_dir_blocked_until:  dict = {'UP': 0, 'DOWN': 0}
-_system_bar_counter: int  = 0
-DIR_BLOCK_THRESHOLD  = 2
-DIR_BLOCK_DURATION   = 2
-
-# ── Model storage ─────────────────────────────────────────────────────────────
-_models:     dict = {}
-_scalers:    dict = {}
-_pair_stats: dict = {}
-
-# ── SOL internal cooldown state ───────────────────────────────────────────────
-# Tracks how many bars since the last SOL signal fired
-# (replaces external cooldown — lives entirely in-engine)
-_sol_last_signal_bar: int = -99
-_sol_bar_counter:     int = 0
-
+# Volume-spike threshold for T1 tier upgrade
+VOL_SPIKE_MULTIPLIER = 1.5
 
 # ══════════════════════════════════════════════════════════════════════════════
-# INDICATOR HELPERS
+# IN-MEMORY STATE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _ema(s, p):
-    return s.ewm(span=p, adjust=False).mean()
-
-def _rsi(s, p=14):
-    d  = s.diff()
-    g  = d.clip(lower=0).rolling(p).mean()
-    l  = (-d.clip(upper=0)).rolling(p).mean()
-    return 100 - 100 / (1 + g / (l + 1e-9))
-
-def _atr(h, l, c, p=14):
-    tr = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
-    return tr.rolling(p).mean()
-
-def _williams_r(h, l, c, p=14):
-    hh = h.rolling(p).max()
-    ll = l.rolling(p).min()
-    return -100 * (hh - c) / (hh - ll + 1e-9)
-
-def _stoch(h, l, c, k=14, d=3):
-    kp = 100 * (c - l.rolling(k).min()) / (h.rolling(k).max() - l.rolling(k).min() + 1e-9)
-    return kp, kp.rolling(d).mean()
-
-def _adx(h, l, c, p=14):
-    pdm = h.diff().clip(lower=0)
-    mdm = (-l.diff()).clip(lower=0)
-    tr  = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
-    at  = tr.rolling(p).mean()
-    pdi = 100 * pdm.rolling(p).mean() / (at + 1e-9)
-    mdi = 100 * mdm.rolling(p).mean() / (at + 1e-9)
-    dx  = 100 * (pdi - mdi).abs() / (pdi + mdi + 1e-9)
-    return dx.rolling(p).mean(), pdi, mdi
-
-def _cci(h, l, c, p=20):
-    tp = (h + l + c) / 3
-    sm = tp.rolling(p).mean()
-    md = tp.rolling(p).apply(lambda x: np.mean(np.abs(x - x.mean())))
-    return (tp - sm) / (0.015 * md + 1e-9)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# FEATURE ENGINEERING
-# ══════════════════════════════════════════════════════════════════════════════
-
-FEATURE_COLS = [
-    'ret_1','ret_2','ret_3','ret_5','ret_7','ret_10',
-    'body','upper_wick','lower_wick','body_ratio','hl_range',
-    'rsi_7','rsi_14','rsi_21','rsi_diff','rsi_slope','rsi_overbought','rsi_oversold',
-    'macd_hist','macd_hist_diff','macd_cross','macd_cross_chg',
-    'bb_pct','bb_width','bb_squeeze',
-    'ema_cross_8_21','ema_cross_21_50','price_vs_ema21','price_vs_ema50',
-    'ema8_slope','ema21_slope','ema50_slope',
-    'stoch_k','stoch_d','stoch_diff','stoch_cross','stoch_ob','stoch_os',
-    'atr_norm','atr_ratio','atr_fast',
-    'adx','di_diff','adx_trend',
-    'wr','cci',
-    'vol_ratio','vol_trend','vol_spike','obv_slope','obv_slope10',
-    'near_high5','near_low5','near_high10','near_low10',
-    'momentum5','momentum10','roc5','roc10',
-    'hour','dow','session_asia','session_ny',
-    'price_above_ema89','bull_market','trend_strength','vol_regime','price_rsi_div',
-    'consec_up',
-    'btc_ret_1','btc_ret_3','btc_vol_ratio','btc_rsi_14',
-    'eth_ret_1','eth_ret_3','eth_vol_ratio','eth_rsi_14',
-    'btc_eth_corr',
-    'tail_direction_score','tail_dominance',
-]
-
-
-def build_features(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    o, h, l, c = df['open'], df['high'], df['low'], df['close']
-    vol = df['vol']
-
-    for n in [1, 2, 3, 5, 7, 10]:
-        df[f'ret_{n}'] = c.pct_change(n)
-
-    df['body']       = (c - o) / (o + 1e-9)
-    df['upper_wick'] = (h - c.clip(lower=o)) / (h - l + 1e-9)
-    df['lower_wick'] = (c.clip(upper=o) - l) / (h - l + 1e-9)
-    df['body_ratio'] = (c - o).abs() / (h - l + 1e-9)
-    df['hl_range']   = (h - l) / (c + 1e-9)
-    df['tail_direction_score'] = df['lower_wick'] - df['upper_wick']
-    wick_sum = (df['lower_wick'] + df['upper_wick']).clip(lower=1e-9)
-    df['tail_dominance'] = (df['lower_wick'] - df['upper_wick']).abs() / wick_sum
-
-    df['rsi_7']  = _rsi(c, 7)
-    df['rsi_14'] = _rsi(c, 14)
-    df['rsi_21'] = _rsi(c, 21)
-    df['rsi_diff']       = df['rsi_14'].diff()
-    df['rsi_slope']      = df['rsi_14'] - df['rsi_14'].shift(3)
-    df['rsi_overbought'] = (df['rsi_14'] > 70).astype(int)
-    df['rsi_oversold']   = (df['rsi_14'] < 30).astype(int)
-
-    m  = _ema(c, 12) - _ema(c, 26)
-    ms = _ema(m, 9)
-    mh = m - ms
-    df['macd_hist']      = mh
-    df['macd_hist_diff'] = mh.diff()
-    df['macd_cross']     = (m > ms).astype(int)
-    df['macd_cross_chg'] = df['macd_cross'].diff()
-
-    for p in [8, 13, 21, 34, 50, 89]:
-        df[f'ema{p}'] = _ema(c, p)
-    df['ema_cross_8_21']  = (df['ema8']  > df['ema21']).astype(int)
-    df['ema_cross_21_50'] = (df['ema21'] > df['ema50']).astype(int)
-    df['price_vs_ema21']  = (c - df['ema21']) / (df['ema21'] + 1e-9)
-    df['price_vs_ema50']  = (c - df['ema50']) / (df['ema50'] + 1e-9)
-    df['ema8_slope']      = df['ema8'].pct_change(3)
-    df['ema21_slope']     = df['ema21'].pct_change(3)
-    df['ema50_slope']     = df['ema50'].pct_change(5)
-
-    bm = c.rolling(20).mean()
-    bs = c.rolling(20).std()
-    bu = bm + 2*bs
-    bl = bm - 2*bs
-    df['bb_pct']    = (c - bl) / (bu - bl + 1e-9)
-    df['bb_width']  = (bu - bl) / (bm + 1e-9)
-    df['bb_squeeze']= (df['bb_width'] < df['bb_width'].rolling(20).mean()).astype(int)
-
-    sk, sd = _stoch(h, l, c)
-    df['stoch_k']    = sk
-    df['stoch_d']    = sd
-    df['stoch_diff'] = sk - sd
-    df['stoch_cross']= (sk > sd).astype(int)
-    df['stoch_ob']   = (sk > 80).astype(int)
-    df['stoch_os']   = (sk < 20).astype(int)
-
-    at14 = _atr(h, l, c, 14)
-    at7  = _atr(h, l, c, 7)
-    df['atr_norm']  = at14 / (c + 1e-9)
-    df['atr_ratio'] = at14 / (at14.rolling(50).mean() + 1e-9)
-    df['atr_fast']  = at7  / (at14 + 1e-9)
-
-    adx_v, pdi, mdi_v = _adx(h, l, c)
-    df['adx']       = adx_v
-    df['di_diff']   = pdi - mdi_v
-    df['adx_trend'] = (adx_v > 25).astype(int)
-
-    df['wr']  = _williams_r(h, l, c, 14)
-    df['cci'] = _cci(h, l, c)
-
-    vm20 = vol.rolling(20).mean()
-    df['vol_ratio'] = vol / (vm20 + 1e-9)
-    df['vol_trend'] = vol.rolling(5).mean() / (vm20 + 1e-9)
-    df['vol_spike'] = (df['vol_ratio'] > 2.0).astype(int)
-    obv = (np.sign(c.diff()) * vol).cumsum()
-    df['obv_slope']   = obv.pct_change(5)
-    df['obv_slope10'] = obv.pct_change(10)
-
-    df['near_high5']  = c / (h.rolling(5).max()  + 1e-9)
-    df['near_low5']   = c / (l.rolling(5).min()  + 1e-9)
-    df['near_high10'] = c / (h.rolling(10).max() + 1e-9)
-    df['near_low10']  = c / (l.rolling(10).min() + 1e-9)
-
-    df['momentum5']  = c - c.shift(5)
-    df['momentum10'] = c - c.shift(10)
-    df['roc5']       = c.pct_change(5)
-    df['roc10']      = c.pct_change(10)
-
-    df['candle_dir'] = np.sign(c - o)
-    df['consec_up']  = df['candle_dir'].rolling(3).sum()
-
-    df['price_above_ema89'] = (c > df['ema89']).astype(int)
-    df['bull_market']       = (df['ema21'] > df['ema50']).astype(int)
-    df['trend_strength']    = df['adx'] * df['di_diff'].abs()
-    df['vol_regime']        = (df['atr_norm'] > df['atr_norm'].rolling(30).mean()).astype(int)
-    df['price_rsi_div']     = df['ret_3'] * (df['rsi_14'] - df['rsi_14'].shift(3))
-
-    ts_col = 'timestamp' if 'timestamp' in df.columns else 'ts'
-    df['hour']         = df[ts_col].dt.hour
-    df['dow']          = df[ts_col].dt.dayofweek
-    df['session_asia'] = ((df['hour'] >= 0)  & (df['hour'] < 8)).astype(int)
-    df['session_ny']   = ((df['hour'] >= 13) & (df['hour'] < 21)).astype(int)
-
-    for col in ['btc_ret_1','btc_ret_3','btc_vol_ratio','btc_rsi_14',
-                'eth_ret_1','eth_ret_3','eth_vol_ratio','eth_rsi_14','btc_eth_corr']:
-        if col not in df.columns:
-            df[col] = 0.0
-
-    return df
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PER-PAIR SIGNAL GATE
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _check_signal_gate(symbol: str, row: dict, cfg: dict,
-                        rsi7_val: float, vol_ratio: float,
-                        bb_pct: float, wr14_val: float,
-                        atr_ratio: float) -> str | None:
-    """
-    Apply per-pair entry gate. Returns 'UP', 'DOWN', or None.
-
-    Gates:
-      'bb'     — RSI7 extreme + BB% extreme
-      'wr'     — RSI7 extreme + WR% extreme
-      'cd'     — RSI7 extreme only (cooldown managed externally by caller)
-      'vol_bb' — RSI7 extreme + BB% extreme + vol_ratio >= vol_min
-
-    Also applies:
-      calm_only:  if True, block when atr_ratio >= 1.8
-      vol_min:    minimum vol_ratio required
-      hour block: hour 07 UTC → return None
-      hour penalty: hours 14-17 UTC → RSI thresholds tightened +5pts
-    """
-    gate      = cfg['signal_gate']
-    calm_only = cfg.get('calm_only', False)
-    vol_min   = cfg.get('vol_min')
-
-    # ── Hour checks ────────────────────────────────────────────────────────
-    hour = int(row.get('hour', 0))
-    if hour in BLOCKED_HOURS:
-        logger.debug("[%s] Hour %d blocked", symbol, hour)
-        return None
-
-    rsi_penalty = HOUR_RSI_PENALTY if hour in PENALISED_HOURS else 0
-
-    # ── ATR calm filter ────────────────────────────────────────────────────
-    if calm_only and atr_ratio >= _MOMENTUM_ATR_MULT:
-        logger.debug("[%s] calm_only blocked — atr_ratio=%.2f", symbol, atr_ratio)
-        return None
-
-    # ── Volume minimum ─────────────────────────────────────────────────────
-    if vol_min is not None and vol_ratio < vol_min:
-        logger.debug("[%s] vol_min blocked — vol_ratio=%.2f < %.1f", symbol, vol_ratio, vol_min)
-        return None
-
-    # ── Effective RSI thresholds (with hour penalty) ───────────────────────
-    rsi_long  = cfg['rsi_long']  - rsi_penalty   # e.g. 30 → 25 during penalised hours
-    rsi_short = cfg['rsi_short'] + rsi_penalty   # e.g. 70 → 75 during penalised hours
-
-    # ── Gate logic ─────────────────────────────────────────────────────────
-    if gate == 'bb':
-        gate_long  = cfg['gate_long']   # BB% floor (e.g. 0.08)
-        gate_short = cfg['gate_short']  # BB% ceiling (e.g. 0.92)
-        if   rsi7_val < rsi_long  and bb_pct < gate_long:   return 'UP'
-        elif rsi7_val > rsi_short and bb_pct > gate_short:  return 'DOWN'
-
-    elif gate == 'wr':
-        gate_long  = cfg['gate_long']   # WR floor (e.g. -90)
-        gate_short = cfg['gate_short']  # WR ceiling (e.g. -10)
-        if   rsi7_val < rsi_long  and wr14_val < gate_long:   return 'UP'
-        elif rsi7_val > rsi_short and wr14_val > gate_short:  return 'DOWN'
-
-    elif gate == 'cd':
-        # Cooldown managed by caller — just check RSI threshold here
-        if   rsi7_val < rsi_long:   return 'UP'
-        elif rsi7_val > rsi_short:  return 'DOWN'
-
-    elif gate == 'vol_bb':
-        gate_long  = cfg['gate_long']
-        gate_short = cfg['gate_short']
-        vol_req    = vol_min or 1.0
-        if   rsi7_val < rsi_long  and bb_pct < gate_long  and vol_ratio >= vol_req: return 'UP'
-        elif rsi7_val > rsi_short and bb_pct > gate_short and vol_ratio >= vol_req: return 'DOWN'
-
-    return None
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MOMENTUM REGIME DETECTION
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _get_momentum_regime(df: pd.DataFrame, cfg: dict) -> dict:
-    """
-    Detect momentum/trending regime from 15m candle data.
-    Uses pair-specific RSI thresholds when tightening.
-
-    Returns dict with:
-      in_momentum, atr_regime, move_pct, move_regime, direction,
-      rsi7_long_thr, rsi7_short_thr
-    """
-    default = {
-        'in_momentum': False, 'atr_regime': False,
-        'move_pct': 0.0,      'move_regime': False,
-        'direction': 'NEUTRAL',
-        'rsi7_long_thr':  cfg['rsi_long'],
-        'rsi7_short_thr': cfg['rsi_short'],
-    }
-    try:
-        if df is None or len(df) < 32:
-            return default
-
-        c, h, l = df['close'], df['high'], df['low']
-        tr      = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
-
-        atr_4h       = tr.iloc[-17:-1].mean() if len(tr) >= 17 else tr.mean()
-        atr_24h_med  = tr.iloc[-97:-1].median() if len(tr) >= 97 else tr.median()
-        atr_regime   = (atr_4h / (atr_24h_med + 1e-9)) > _MOMENTUM_ATR_MULT
-
-        price_start = float(c.iloc[-17]) if len(c) >= 17 else float(c.iloc[0])
-        price_end   = float(c.iloc[-2])
-        move_pct    = (price_end - price_start) / (price_start + 1e-9)
-        move_regime = abs(move_pct) > _MOMENTUM_MOVE_PCT
-
-        if move_pct > _MOMENTUM_MOVE_PCT:   direction = 'UP'
-        elif move_pct < -_MOMENTUM_MOVE_PCT: direction = 'DOWN'
-        else:                                direction = 'NEUTRAL'
-
-        in_momentum = atr_regime or move_regime
-
-        # Tighten pair-specific thresholds when in momentum
-        rsi7_long_thr  = cfg['rsi_long']  - _MOMENTUM_RSI_DELTA if in_momentum else cfg['rsi_long']
-        rsi7_short_thr = cfg['rsi_short'] + _MOMENTUM_RSI_DELTA if in_momentum else cfg['rsi_short']
-
-        if in_momentum:
-            logger.info(
-                "[REGIME] %s momentum | move=%.2f%% atr=%s → RSI thresholds %d/%d",
-                cfg.get('_symbol','?'), move_pct*100, atr_regime,
-                rsi7_long_thr, rsi7_short_thr
-            )
-
-        return {
-            'in_momentum': in_momentum, 'atr_regime': atr_regime,
-            'move_pct': move_pct,       'move_regime': move_regime,
-            'direction': direction,
-            'rsi7_long_thr':  rsi7_long_thr,
-            'rsi7_short_thr': rsi7_short_thr,
-        }
-    except Exception as e:
-        logger.warning("[REGIME] Error: %s — using normal thresholds", e)
-        return default
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# CLUSTER ESCALATOR
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _get_cluster_penalty(symbol: str, direction: str) -> float:
-    state = _pair_consec.get(symbol)
-    if state and state['direction'] == direction and state['count'] >= _CLUSTER_THRESHOLD:
-        logger.info("[CLUSTER] %s %s streak=%d → +%.2f conf required",
-                    symbol, direction, state['count'], _CLUSTER_CONF_PENALTY)
-        return _CLUSTER_CONF_PENALTY
-    return 0.0
-
-def _update_cluster_state(symbol: str, direction: str):
-    state = _pair_consec.get(symbol)
-    if state and state['direction'] == direction:
-        _pair_consec[symbol] = {'direction': direction, 'count': state['count'] + 1}
-    else:
-        _pair_consec[symbol] = {'direction': direction, 'count': 1}
-    logger.debug("[CLUSTER] %s → %s ×%d", symbol, direction, _pair_consec[symbol]['count'])
-
-def reset_cluster_state(symbol: str = None):
-    if symbol:
-        _pair_consec.pop(symbol, None)
-    else:
-        _pair_consec.clear()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# QUALITY FILTER (post-gate ML confirmation layer)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _passes_quality_filter(row: dict, direction: int, bb_threshold: float = 0.08) -> bool:
-    """
-    4-rule quality vote. Signal must pass ≥2 rules.
-    BB hard gate: directionally correct (v3 fix carried forward).
-    """
-    bb_pct = float(row.get('bb_pct', 0.5))
-
-    # Directionally-correct BB gate
-    if direction == 1 and bb_pct > (1.0 - bb_threshold):
-        return False
-    if direction == 0 and bb_pct < bb_threshold:
-        return False
-
-    passed = 0
-    if float(row.get('adx', 0)) > 15:                                passed += 1
-    if float(row.get('vol_ratio', 1)) > 0.8:                         passed += 1
-    rsi14 = float(row.get('rsi_14', 50))
-    if direction == 1 and rsi14 < 80:                                 passed += 1
-    elif direction == 0 and rsi14 > 20:                               passed += 1
-    ema_cross = int(row.get('ema_cross_8_21', 0))
-    if direction == 1 and ema_cross == 1:                             passed += 1
-    elif direction == 0 and ema_cross == 0:                           passed += 1
-    lower_wick = float(row.get('lower_wick', 0))
-    upper_wick = float(row.get('upper_wick', 0))
-    if direction == 1 and lower_wick > upper_wick and lower_wick >= 0.15: passed += 1
-    elif direction == 0 and upper_wick > lower_wick and upper_wick >= 0.15: passed += 1
-
-    return passed >= 2
+# Fitted model pipelines — one per symbol.
+# scheduler._models_ready() checks len(_models) >= len(SYMBOLS).
+_models: dict = {}
+
+# Per-pair win/loss tracker (resets on restart; DB is the source of truth).
+_pair_outcomes: dict = {sym: {"wins": 0, "losses": 0} for sym in SYMBOLS}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # OKX DATA FETCH
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fetch_okx_candles(symbol: str, bar: str = "15m", limit: int = 960) -> pd.DataFrame:
-    OKX_PAGE_MAX = 300
-    all_frames   = []
-    fetched      = 0
-    after_ts     = None
+def fetch_okx_candles(symbol: str, limit: int = 120) -> pd.DataFrame:
+    """
+    Fetch 15-minute OHLCV candles from OKX for *symbol*.
 
-    while fetched < limit:
-        batch_size = min(OKX_PAGE_MAX, limit - fetched)
-        if after_ts is None:
-            endpoint = f"{OKX_BASE}/api/v5/market/candles"
-            params   = {"instId": symbol, "bar": bar, "limit": str(batch_size)}
-        else:
-            endpoint = f"{OKX_BASE}/api/v5/market/history-candles"
-            params   = {"instId": symbol, "bar": bar, "limit": str(batch_size),
-                        "after": str(after_ts)}
-        try:
-            resp = requests.get(endpoint, params=params, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("code") != "0":
-                logger.error("[%s] OKX error: %s", symbol, data.get('msg'))
-                break
-            rows = data.get("data", [])
-            if not rows:
-                break
-            df_batch = pd.DataFrame(rows, columns=[
-                "timestamp","open","high","low","close",
-                "vol","volCcy","volCcyQuote","confirm"
-            ])
-            df_batch["timestamp"] = pd.to_datetime(
-                df_batch["timestamp"].astype(float), unit="ms", utc=True)
-            for col in ["open","high","low","close","vol"]:
-                df_batch[col] = df_batch[col].astype(float)
-            all_frames.append(df_batch)
-            fetched  += len(df_batch)
-            after_ts  = int(df_batch["timestamp"].min().timestamp() * 1000)
-            if len(df_batch) < batch_size:
-                break
-        except Exception as e:
-            logger.error("[%s] OKX fetch error: %s", symbol, e)
-            break
+    Returns a DataFrame with columns:
+        timestamp (UTC-aware Timestamp) | open | high | low | close | volume
 
-    if not all_frames:
-        return pd.DataFrame()
-    df = pd.concat(all_frames, ignore_index=True)
-    df = df.drop_duplicates(subset="timestamp").sort_values("timestamp").reset_index(drop=True)
-    logger.info("[%s] Fetched %d candles", symbol, len(df))
-    return df
+    Returns an EMPTY DataFrame on any error.
+    The scheduler resolve job retries this up to 5× to let OKX publish
+    the just-closed candle before giving up.
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# CROSS-PAIR FEATURES
-# ══════════════════════════════════════════════════════════════════════════════
-
-_cross_pair_cache: dict = {}
-_cross_pair_ts:    float = 0.0
-_CROSS_PAIR_TTL:   float = 60.0
-
-def _get_cross_pair_features() -> dict:
-    import time
-    global _cross_pair_cache, _cross_pair_ts
-    if time.time() - _cross_pair_ts < _CROSS_PAIR_TTL and _cross_pair_cache:
-        return _cross_pair_cache
-    result = {
-        'btc_ret_1':0.0,'btc_ret_3':0.0,'btc_vol_ratio':1.0,'btc_rsi_14':50.0,
-        'eth_ret_1':0.0,'eth_ret_3':0.0,'eth_vol_ratio':1.0,'eth_rsi_14':50.0,
-        'btc_eth_corr':0.0,
-    }
+    OKX candle row format (data[0] = most recent):
+        [ts_ms, open, high, low, close, vol_base, vol_quote, ...]
+    Rows are returned newest-first; we reverse to chronological order.
+    """
     try:
-        btc_df = fetch_okx_candles("BTC-USDT", limit=30)
-        eth_df = fetch_okx_candles("ETH-USDT", limit=30)
-        for sym_df, prefix in [(btc_df,"btc"),(eth_df,"eth")]:
-            if sym_df.empty or len(sym_df) < 5: continue
-            c   = sym_df['close']
-            vol = sym_df['vol']
-            result[f'{prefix}_ret_1']     = float(c.pct_change(1).iloc[-2])
-            result[f'{prefix}_ret_3']     = float(c.pct_change(3).iloc[-2])
-            result[f'{prefix}_vol_ratio'] = float(vol.iloc[-2]/(vol.rolling(20).mean().iloc[-2]+1e-9))
-            result[f'{prefix}_rsi_14']    = float(_rsi(c,14).iloc[-2])
-        if not btc_df.empty and not eth_df.empty and len(btc_df)>=5 and len(eth_df)>=5:
-            br = btc_df['close'].pct_change(1).iloc[-6:-1]
-            er = eth_df['close'].pct_change(1).iloc[-6:-1]
-            if len(br)==len(er):
-                corr = float(br.corr(er))
-                result['btc_eth_corr'] = corr if not np.isnan(corr) else 0.0
-        _cross_pair_cache = result
-        _cross_pair_ts    = time.time()
-    except Exception as e:
-        logger.warning("[CROSS-PAIR] Error: %s", e)
-    return result
+        resp = requests.get(
+            OKX_CANDLES_EP,
+            params={"instId": symbol, "bar": "15m", "limit": str(limit)},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        if not data:
+            logger.warning("[SE] fetch_okx_candles: empty data for %s", symbol)
+            return pd.DataFrame()
+
+        rows = []
+        for row in reversed(data):          # oldest → newest
+            rows.append({
+                "timestamp": pd.Timestamp(int(row[0]), unit="ms", tz="UTC"),
+                "open":      float(row[1]),
+                "high":      float(row[2]),
+                "low":       float(row[3]),
+                "close":     float(row[4]),
+                "volume":    float(row[5]),
+            })
+
+        df = pd.DataFrame(rows)
+        return df
+
+    except Exception as exc:
+        logger.error("[SE] fetch_okx_candles %s error: %s", symbol, exc)
+        return pd.DataFrame()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FEATURE ENGINEERING  (40+ indicators)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _build_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute all technical indicators on the OHLCV DataFrame and return
+    a feature matrix (one row per candle, NaN rows dropped).
+
+    Indicators computed
+    ───────────────────
+    Trend / Moving averages:
+        EMA 8, 13, 21, 34, 55, 89, 200
+        EMA ribbon bull/bear score
+        Price position vs EMA21, EMA55, EMA200
+
+    Momentum:
+        RSI 14
+        MACD (12,26,9): line, signal, histogram
+        Stochastic (14,3): %K, %D
+        Williams %R 14
+        CCI 20
+        ROC 3, 8, 21
+
+    Volatility:
+        ATR 14  (absolute + normalised as % of price)
+        Bollinger Bands (20,2): upper, mid, lower, %B, width
+        BB squeeze rank (rolling 50)
+
+    Volume:
+        Volume Z-score (20-period)
+        Volume ratio vs 20-period MA
+        Volume spike flag (≥1.5× MA)
+
+    Trend strength:
+        ADX 14, +DI, -DI
+        ADX regime bins
+
+    Candle structure:
+        Body size, range, body%
+        Heikin-Ashi close, HA trend
+
+    Composite scores:
+        bull_score (0–8)
+        bear_score (0–8)
+
+    Target (training only):
+        label: 1 if next candle close > open, else 0
+    """
+    df = df.copy()
+    c = df["close"]
+    h = df["high"]
+    l = df["low"]
+    v = df["volume"]
+    o = df["open"]
+
+    # ── EMAs ──────────────────────────────────────────────────────────────────
+    for p in [8, 13, 21, 34, 55, 89, 200]:
+        df[f"ema{p}"] = c.ewm(span=p, adjust=False).mean()
+
+    df["ema_bull"] = (
+        (df["ema8"] > df["ema21"]) & (df["ema21"] > df["ema55"])
+    ).astype(int)
+    df["ema_bear"] = (
+        (df["ema8"] < df["ema21"]) & (df["ema21"] < df["ema55"])
+    ).astype(int)
+    df["above_ema21"]  = (c > df["ema21"]).astype(int)
+    df["above_ema55"]  = (c > df["ema55"]).astype(int)
+    df["above_ema200"] = (c > df["ema200"]).astype(int)
+
+    # EMA distance features (normalised)
+    df["dist_ema21"]  = (c - df["ema21"])  / (df["ema21"]  + 1e-9)
+    df["dist_ema55"]  = (c - df["ema55"])  / (df["ema55"]  + 1e-9)
+    df["dist_ema200"] = (c - df["ema200"]) / (df["ema200"] + 1e-9)
+
+    # ── RSI 14 ────────────────────────────────────────────────────────────────
+    delta = c.diff()
+    gain  = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
+    loss  = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
+    df["rsi"] = 100 - 100 / (1 + gain / (loss + 1e-9))
+
+    # ── MACD (12, 26, 9) ──────────────────────────────────────────────────────
+    ema12 = c.ewm(span=12, adjust=False).mean()
+    ema26 = c.ewm(span=26, adjust=False).mean()
+    df["macd"]   = ema12 - ema26
+    df["macd_s"] = df["macd"].ewm(span=9, adjust=False).mean()
+    df["macd_h"] = df["macd"] - df["macd_s"]
+    df["macd_h_rising"] = (df["macd_h"] > df["macd_h"].shift(1)).astype(int)
+
+    # ── Bollinger Bands (20, 2) ───────────────────────────────────────────────
+    bb_mid = c.rolling(20).mean()
+    bb_std = c.rolling(20).std()
+    df["bb_upper"] = bb_mid + 2 * bb_std
+    df["bb_lower"] = bb_mid - 2 * bb_std
+    df["bb_mid"]   = bb_mid
+    df["bb_pct"]   = (c - bb_mid) / (2 * bb_std + 1e-9)
+    df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / (bb_mid + 1e-9)
+    # BB squeeze: current width vs rolling 50-period percentile rank
+    df["bb_squeeze_rank"] = df["bb_width"].rolling(50).rank(pct=True)
+
+    # ── ATR 14 ────────────────────────────────────────────────────────────────
+    tr = pd.concat(
+        [h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1
+    ).max(axis=1)
+    df["atr"]     = tr.ewm(span=14, adjust=False).mean()
+    df["atr_pct"] = df["atr"] / (c + 1e-9)          # normalised ATR
+
+    # ── ADX / +DI / -DI (14) ─────────────────────────────────────────────────
+    plus_dm  = np.where(
+        (h.diff() > l.diff().abs()) & (h.diff() > 0), h.diff(), 0
+    )
+    minus_dm = np.where(
+        (l.diff().abs() > h.diff()) & (l.diff() < 0), l.diff().abs(), 0
+    )
+    plus_di  = (
+        100
+        * pd.Series(plus_dm,  index=df.index).ewm(span=14, adjust=False).mean()
+        / (df["atr"] + 1e-9)
+    )
+    minus_di = (
+        100
+        * pd.Series(minus_dm, index=df.index).ewm(span=14, adjust=False).mean()
+        / (df["atr"] + 1e-9)
+    )
+    dx       = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
+    df["adx"]      = dx.ewm(span=14, adjust=False).mean()
+    df["plus_di"]  = plus_di
+    df["minus_di"] = minus_di
+    df["di_diff"]  = plus_di - minus_di            # +DI − −DI directional bias
+
+    # ── Stochastic (14, 3) ────────────────────────────────────────────────────
+    lo14  = l.rolling(14).min()
+    hi14  = h.rolling(14).max()
+    df["stoch_k"] = 100 * (c - lo14) / (hi14 - lo14 + 1e-9)
+    df["stoch_d"] = df["stoch_k"].rolling(3).mean()
+    df["stoch_cross_bull"] = (
+        (df["stoch_k"] > df["stoch_d"]) &
+        (df["stoch_k"].shift(1) <= df["stoch_d"].shift(1))
+    ).astype(int)
+    df["stoch_cross_bear"] = (
+        (df["stoch_k"] < df["stoch_d"]) &
+        (df["stoch_k"].shift(1) >= df["stoch_d"].shift(1))
+    ).astype(int)
+
+    # ── Williams %R 14 ───────────────────────────────────────────────────────
+    df["willr"] = -100 * (hi14 - c) / (hi14 - lo14 + 1e-9)
+
+    # ── CCI 20 ───────────────────────────────────────────────────────────────
+    tp    = (h + l + c) / 3
+    tp_ma = tp.rolling(20).mean()
+    tp_md = tp.rolling(20).apply(lambda x: np.mean(np.abs(x - x.mean())), raw=True)
+    df["cci"] = (tp - tp_ma) / (0.015 * tp_md + 1e-9)
+
+    # ── Rate of Change ────────────────────────────────────────────────────────
+    df["roc3"]  = c.pct_change(3)
+    df["roc8"]  = c.pct_change(8)
+    df["roc21"] = c.pct_change(21)
+
+    # ── Volume ───────────────────────────────────────────────────────────────
+    vol_ma       = v.rolling(20).mean()
+    vol_std      = v.rolling(20).std()
+    df["vol_z"]     = (v - vol_ma) / (vol_std + 1e-9)
+    df["vol_ratio"] = v / (vol_ma + 1e-9)
+    df["vol_spike"] = (df["vol_ratio"] >= VOL_SPIKE_MULTIPLIER).astype(int)
+
+    # ── Candle structure ──────────────────────────────────────────────────────
+    df["body"]     = (c - o).abs()
+    df["range"]    = h - l
+    df["body_pct"] = df["body"] / (df["range"] + 1e-9)
+    df["is_bull_candle"] = (c > o).astype(int)
+
+    # ── Heikin-Ashi ───────────────────────────────────────────────────────────
+    df["ha_close"] = (o + h + l + c) / 4
+    df["ha_trend"] = (df["ha_close"] > df["ha_close"].shift(2)).astype(int) * 2 - 1
+
+    # ── Composite confluence scores (0–8) ─────────────────────────────────────
+    df["bull_score"] = (
+        (df["rsi"]     > 50).astype(int)
+        + (df["macd"]  > df["macd_s"]).astype(int)
+        + df["macd_h_rising"]
+        + df["ema_bull"]
+        + df["above_ema21"]
+        + (df["stoch_k"] > df["stoch_d"]).astype(int)
+        + (df["vol_z"]   > 0.5).astype(int)
+        + (df["ha_trend"] > 0).astype(int)
+    )
+    df["bear_score"] = (
+        (df["rsi"]     < 50).astype(int)
+        + (df["macd"]  < df["macd_s"]).astype(int)
+        + (df["macd_h"] < df["macd_h"].shift(1)).astype(int)
+        + df["ema_bear"]
+        + (1 - df["above_ema21"])
+        + (df["stoch_k"] < df["stoch_d"]).astype(int)
+        + (df["vol_z"]   > 0.5).astype(int)
+        + (df["ha_trend"] < 0).astype(int)
+    )
+
+    # ── Feature column list (all non-OHLCV, non-timestamp) ───────────────────
+    FEATURE_COLS = [
+        # EMA
+        "ema_bull", "ema_bear", "above_ema21", "above_ema55", "above_ema200",
+        "dist_ema21", "dist_ema55", "dist_ema200",
+        # Momentum
+        "rsi", "macd", "macd_s", "macd_h", "macd_h_rising",
+        "stoch_k", "stoch_d", "stoch_cross_bull", "stoch_cross_bear",
+        "willr", "cci",
+        "roc3", "roc8", "roc21",
+        # Volatility
+        "atr", "atr_pct",
+        "bb_pct", "bb_width", "bb_squeeze_rank",
+        # Trend
+        "adx", "plus_di", "minus_di", "di_diff",
+        # Volume
+        "vol_z", "vol_ratio", "vol_spike",
+        # Candle
+        "body_pct", "is_bull_candle", "ha_trend",
+        # Composite
+        "bull_score", "bear_score",
+    ]
+
+    out = df[FEATURE_COLS].copy()
+    out = out.dropna()
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MODEL TRAINING
 # ══════════════════════════════════════════════════════════════════════════════
 
-def train_model(symbol: str, df: pd.DataFrame) -> bool:
-    df = build_features(df.copy())
-    df['target'] = (df['close'].shift(-1) > df['open'].shift(-1)).astype(int)
+def _make_pipeline() -> Pipeline:
+    """
+    Ensemble: RandomForest + GradientBoosting stacked via soft-voting average.
+    Wrapped in a single sklearn Pipeline (scaler → ensemble wrapper).
 
-    if symbol not in ("BTC-USDT","ETH-USDT"):
-        cp = _get_cross_pair_features()
-        for col, val in cp.items():
-            df[col] = val
-
-    df_c = df.dropna(subset=FEATURE_COLS + ['target']).copy()
-    if len(df_c) < 150:
-        logger.warning("[%s] Only %d rows for training — need 150+", symbol, len(df_c))
-        return False
-
-    X  = df_c[FEATURE_COLS].values
-    y  = df_c['target'].values
-    sc = StandardScaler()
-    Xs = sc.fit_transform(X)
-
-    rf = RandomForestClassifier(
-        n_estimators=400, max_depth=10, min_samples_leaf=8,
-        max_features='sqrt', random_state=42, n_jobs=-1)
-    gb = GradientBoostingClassifier(
-        n_estimators=200, max_depth=5, learning_rate=0.04,
-        min_samples_leaf=8, subsample=0.8, random_state=42)
-    et = ExtraTreesClassifier(
-        n_estimators=300, max_depth=10, min_samples_leaf=8,
-        max_features='sqrt', random_state=42, n_jobs=-1)
-
-    sw = pd.Series(1.0, index=df_c.index)
-    _lw  = df_c['lower_wick']; _uw = df_c['upper_wick']
-    _tgt = pd.Series(y, index=df_c.index)
-    dir_tail = (((_tgt==1)&(_lw>_uw)&(_lw>=0.15)) |
-                ((_tgt==0)&(_uw>_lw)&(_uw>=0.15)))
-    sw[dir_tail] = 3.0
-
-    nxt_o = df_c['open'].shift(-1).reindex(df_c.index)
-    nxt_c = df_c['close'].shift(-1).reindex(df_c.index)
-    nxt_h = df_c['high'].shift(-1).reindex(df_c.index)
-    nxt_l = df_c['low'].shift(-1).reindex(df_c.index)
-    nxt_rng = (nxt_h - nxt_l).clip(lower=1e-9)
-    nxt_min_oc    = pd.concat([nxt_o, nxt_c], axis=1).min(axis=1)
-    nxt_lower_wick = (nxt_min_oc - nxt_l) / nxt_rng
-    has_pb_wick    = (nxt_lower_wick >= 0.08).fillna(False)
-    sw[has_pb_wick] = sw[has_pb_wick].clip(upper=2.0).where(sw[has_pb_wick] < 3.0, 3.0)
-
-    sw_arr = sw.values
-    rf.fit(Xs, y, sample_weight=sw_arr)
-    gb.fit(Xs, y, sample_weight=sw_arr)
-    et.fit(Xs, y, sample_weight=sw_arr)
-
-    _models[symbol]  = (rf, gb, et)
-    _scalers[symbol] = sc
-    reset_cluster_state(symbol)
-
-    logger.info("[%s] Model trained on %d candles | threshold=%.2f",
-                symbol, len(df_c), PAIR_CONFIG.get(symbol,{}).get('threshold',0.60))
-    return True
+    We use a lightweight custom ensemble rather than VotingClassifier so we
+    can expose predict_proba on averaged probabilities without needing to
+    duplicate the scaler for each sub-estimator.
+    """
+    return _EnsemblePipeline()
 
 
-def retrain_all(limit: int = 960):
-    logger.info("[ENGINE] Retraining all models (limit=%d)...", limit)
+class _EnsemblePipeline:
+    """
+    Thin wrapper that behaves like an sklearn Pipeline:
+      .fit(X, y)
+      .predict_proba(X)  → shape (n, 2)  [prob_down, prob_up]
+
+    Internally: StandardScaler → [RandomForest, GradientBoosting]
+    Probabilities are averaged (equal weight).
+    """
+
+    def __init__(self):
+        self.scaler = StandardScaler()
+        self.rf = RandomForestClassifier(
+            n_estimators=120,
+            max_depth=8,
+            min_samples_leaf=10,
+            class_weight="balanced",
+            random_state=42,
+            n_jobs=-1,
+        )
+        self.gb = GradientBoostingClassifier(
+            n_estimators=120,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.8,
+            min_samples_leaf=10,
+            random_state=42,
+        )
+        self._is_fitted = False
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "_EnsemblePipeline":
+        Xs = self.scaler.fit_transform(X)
+        self.rf.fit(Xs, y)
+        self.gb.fit(Xs, y)
+        self._is_fitted = True
+        return self
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        if not self._is_fitted:
+            raise RuntimeError("Model not fitted — call retrain_all() first")
+        Xs = self.scaler.transform(X)
+        p_rf = self.rf.predict_proba(Xs)
+        p_gb = self.gb.predict_proba(Xs)
+        # Average probabilities
+        return (p_rf + p_gb) / 2.0
+
+
+def retrain_all(limit: int = 300) -> None:
+    """
+    Fetch *limit* candles for every symbol, compute features, train the
+    ensemble, and store the fitted pipeline in _models[sym].
+
+    Called:
+      • Once at startup (main.py _bg thread) with limit=300
+      • Every 4 hours by scheduler.job_retrain() with limit=960
+
+    With limit=300 the first ~30 rows are NaN-heavy (long EMAs). After
+    dropna the training set is typically 270–280 samples — enough to fit
+    the ensemble robustly. With limit=960 (~10 days) the model captures
+    intraday regime shifts more accurately.
+
+    Labels: 1 if next candle is a bull candle (close > open), else 0.
+    We use NEXT candle's direction because the signal fires at the OPEN
+    of the next candle and resolves at its CLOSE.
+    """
+    logger.info("[SE] retrain_all — fetching %d candles per symbol", limit)
     for sym in SYMBOLS:
-        df = fetch_okx_candles(sym, limit=limit)
-        if not df.empty:
-            train_model(sym, df)
-    reset_cluster_state()
-    logger.info("[ENGINE] All models ready")
+        try:
+            df = fetch_okx_candles(sym, limit=limit)
+            if df.empty or len(df) < 60:
+                logger.warning("[SE] retrain %s: insufficient data (%d rows)", sym, len(df))
+                continue
+
+            feats = _build_features(df)
+            if feats.empty:
+                logger.warning("[SE] retrain %s: no features after dropna", sym)
+                continue
+
+            # Align features with next-candle target
+            # feats index matches df index after dropna; shift target by -1
+            # so we predict the NEXT candle direction.
+            # We must use the original df['close'] and df['open'] for labels.
+            feat_idx = feats.index
+            labels_raw = np.sign(df["close"] - df["open"]).replace(0, np.nan)
+            # next-candle label: shift so row i predicts candle i+1
+            labels_next = labels_raw.shift(-1)
+            labels_aligned = labels_next.loc[feat_idx].dropna()
+
+            # Keep only rows where both feature AND label are available
+            common_idx = feats.index.intersection(labels_aligned.index)
+            if len(common_idx) < 50:
+                logger.warning(
+                    "[SE] retrain %s: too few aligned samples (%d)", sym, len(common_idx)
+                )
+                continue
+
+            X = feats.loc[common_idx].values
+            y = (labels_aligned.loc[common_idx].values > 0).astype(int)   # 1=UP, 0=DOWN
+
+            model = _make_pipeline()
+            model.fit(X, y)
+            _models[sym] = model
+
+            # Class balance info
+            up_pct = y.mean() * 100
+            logger.info(
+                "[SE] retrain %s ✓ — %d samples | UP=%.1f%% DOWN=%.1f%%",
+                sym, len(y), up_pct, 100 - up_pct,
+            )
+
+        except Exception as exc:
+            logger.error("[SE] retrain %s FAILED: %s", sym, exc, exc_info=True)
+
+    logger.info("[SE] retrain_all complete — %d/%d models ready", len(_models), len(SYMBOLS))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 1H TREND FILTER
+# CANDLE BOUNDARY UTILITIES
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _get_1h_trend(symbol: str) -> str | None:
+def _current_candle_open(now: datetime) -> datetime:
+    """
+    Return the UTC open time of the current 15-minute candle.
+    E.g. 14:07 UTC → 14:00 UTC;  14:23 UTC → 14:15 UTC.
+    Result is timezone-naive (matches DB storage convention).
+    """
+    if now.tzinfo is not None:
+        now = now.replace(tzinfo=None)
+    minute_floor = (now.minute // 15) * 15
+    return now.replace(minute=minute_floor, second=0, microsecond=0)
+
+
+def _candle_close(candle_open: datetime) -> datetime:
+    """Return the close time (= open + 15 min) for a candle open datetime."""
+    return candle_open + timedelta(minutes=15)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LIVE SIGNAL GENERATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _score_symbol(sym: str) -> dict | None:
+    """
+    Fetch the latest candles for *sym*, run the ensemble, and return a
+    candidate signal dict if the model confidence clears the pair threshold.
+
+    Returns None if:
+      • no trained model for sym
+      • OKX fetch fails or returns < 10 rows
+      • feature build fails
+      • max(bull_prob, bear_prob) < pair threshold
+
+    Returned dict keys:
+      symbol, direction, confidence, family, invert, tier,
+      rsi_14, macd_hist, adx, vol_ratio,
+      open_price, candle_open_time, candle_close_time
+    """
+    model = _models.get(sym)
+    if model is None:
+        return None
+
+    df = fetch_okx_candles(sym, limit=120)
+    if df.empty or len(df) < 10:
+        logger.debug("[SE] score %s: no/insufficient candle data", sym)
+        return None
+
+    feats = _build_features(df)
+    if feats.empty:
+        logger.debug("[SE] score %s: empty feature frame", sym)
+        return None
+
     try:
-        resp = requests.get(
-            f"{OKX_BASE}/api/v5/market/candles",
-            params={"instId": symbol, "bar": "1H", "limit": "12"},
-            timeout=8)
-        if not resp.ok: return None
-        data = resp.json()
-        if data.get("code") != "0" or not data.get("data"): return None
-        df = pd.DataFrame(data["data"], columns=[
-            "timestamp","open","high","low","close",
-            "vol","volCcy","volCcyQuote","confirm"])
-        df["close"] = df["close"].astype(float)
-        df = df.sort_values("timestamp").reset_index(drop=True)
-        if "confirm" in df.columns:
-            df = df[df["confirm"] == "1"]
-        else:
-            df = df.iloc[:-1]
-        if len(df) < 3: return None
-        net_move = df["close"].iloc[-1] - df["close"].iloc[-3]
-        pct_move = net_move / (df["close"].iloc[-3] + 1e-9)
-        ema_slope = 0.0
-        if len(df) >= 9:
-            ema9      = df["close"].ewm(span=9, adjust=False).mean()
-            ema_slope = ema9.iloc[-1] - ema9.iloc[-3]
-        if pct_move > 0.0005 and ema_slope > 0:   return "UP"
-        elif pct_move < -0.0005 and ema_slope < 0: return "DOWN"
-        return None
-    except Exception as e:
-        logger.warning("[%s] 1H trend error: %s", symbol, e)
+        X_live = feats.iloc[[-1]].values          # last row only
+        proba  = model.predict_proba(X_live)[0]   # [prob_down, prob_up]
+    except Exception as exc:
+        logger.warning("[SE] score %s predict error: %s", sym, exc)
         return None
 
+    prob_up   = float(proba[1])
+    prob_down = float(proba[0])
+    confidence = max(prob_up, prob_down)
+    direction  = "UP" if prob_up >= prob_down else "DOWN"
 
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN SIGNAL GENERATION
-# ══════════════════════════════════════════════════════════════════════════════
-
-def get_signal_for_symbol(symbol: str) -> dict | None:
-    global _sol_last_signal_bar, _sol_bar_counter
-
-    cfg = PAIR_CONFIG.get(symbol)
-    if cfg is None:
-        logger.error("[%s] No PAIR_CONFIG found", symbol)
+    cfg = PAIR_CONFIG[sym]
+    if confidence < cfg["threshold"]:
+        logger.debug(
+            "[SE] score %s: conf=%.3f below threshold=%.3f — skip",
+            sym, confidence, cfg["threshold"],
+        )
         return None
 
-    cfg = dict(cfg); cfg['_symbol'] = symbol
-    threshold = cfg['threshold']
+    # ── Candle timing ─────────────────────────────────────────────────────────
+    now          = datetime.now(timezone.utc).replace(tzinfo=None)
+    candle_open  = _current_candle_open(now)
+    candle_close = _candle_close(candle_open)
 
-    df = fetch_okx_candles(symbol, limit=100)
-    if df.empty or len(df) < 50:
-        return None
+    # ── Open price: last candle's open from OKX data ──────────────────────────
+    open_price = float(df["open"].iloc[-1])
 
-    if symbol not in _models:
-        ok = train_model(symbol, df)
-        if not ok: return None
+    # ── Tier: T1 if vol spike present ────────────────────────────────────────
+    last_vol_ratio = float(feats["vol_ratio"].iloc[-1])
+    tier = "T1" if last_vol_ratio >= VOL_SPIKE_MULTIPLIER else cfg["tier"]
 
-    # ── Momentum regime ────────────────────────────────────────────────────
-    regime = _get_momentum_regime(df, cfg)
-
-    # ── Build features ─────────────────────────────────────────────────────
-    df_f = build_features(df.copy())
-    if symbol not in ("BTC-USDT","ETH-USDT"):
-        cp = _get_cross_pair_features()
-        for col, val in cp.items():
-            df_f[col] = val
-
-    df_c = df_f.dropna(subset=FEATURE_COLS).copy()
-    if len(df_c) < 2:
-        return None
-
-    row    = df_c.iloc[-2]   # last confirmed candle
-    latest = df_c.iloc[-1]
-
-    # ── Extract raw indicator values ───────────────────────────────────────
-    rsi7_val  = float(row.get('rsi_7', 50))
-    bb_pct    = float(row.get('bb_pct', 0.5))
-    wr14_val  = float(row.get('wr', -50))
-    vol_ratio = float(row.get('vol_ratio', 1.0))
-    atr_ratio = float(row.get('atr_ratio', 1.0))
-    hour      = int(row.get('hour', 0))
-
-    # ── Momentum regime: override RSI thresholds ───────────────────────────
-    live_cfg = dict(cfg)
-    if regime['in_momentum']:
-        live_cfg['rsi_long']  = regime['rsi7_long_thr']
-        live_cfg['rsi_short'] = regime['rsi7_short_thr']
-        logger.info("[%s] Momentum → RSI thresholds tightened to %d/%d",
-                    symbol, live_cfg['rsi_long'], live_cfg['rsi_short'])
-
-    # ── SOL internal cooldown ──────────────────────────────────────────────
-    if symbol == "SOL-USDT" and cfg.get('cooldown'):
-        _sol_bar_counter += 1
-        bars_since_last = _sol_bar_counter - _sol_last_signal_bar
-        if bars_since_last < cfg['cooldown']:
-            logger.info("[SOL-USDT] Internal cooldown — %d/%d bars since last signal",
-                        bars_since_last, cfg['cooldown'])
-            return None
-
-    # ── Per-pair signal gate ───────────────────────────────────────────────
-    gate_direction = _check_signal_gate(
-        symbol, row.to_dict(), live_cfg,
-        rsi7_val, vol_ratio, bb_pct, wr14_val, atr_ratio
-    )
-    if gate_direction is None:
-        return None
-
-    direction = gate_direction
-    dir_int   = 1 if direction == 'UP' else 0
-
-    # ── ML ensemble inference ──────────────────────────────────────────────
-    X   = row[FEATURE_COLS].values.reshape(1, -1)
-    Xs  = _scalers[symbol].transform(X)
-    rf, gb, et = _models[symbol]
-    ens  = (0.40 * rf.predict_proba(Xs) +
-            0.35 * gb.predict_proba(Xs) +
-            0.25 * et.predict_proba(Xs))
-    prob = float(ens[0, 1])
-
-    # Map ML probability to confidence in the gate direction
-    if direction == 'UP':
-        confidence = prob
-    else:
-        confidence = 1.0 - prob
-
-    if confidence < threshold:
-        logger.info("[%s] %s gate passed but ML confidence %.3f < threshold %.2f",
-                    symbol, direction, confidence, threshold)
-        return None
-
-    # ── Cluster penalty ────────────────────────────────────────────────────
-    cluster_penalty = _get_cluster_penalty(symbol, direction)
-    if cluster_penalty > 0:
-        required = threshold + cluster_penalty
-        if confidence < required:
-            logger.info("[%s] Cluster escalator blocked — conf=%.3f < required=%.3f",
-                        symbol, confidence, required)
-            return None
-
-    # ── Quality filter ─────────────────────────────────────────────────────
-    if not _passes_quality_filter(row.to_dict(), dir_int, bb_threshold=0.08):
-        logger.info("[%s] Quality filter rejected", symbol)
-        return None
-
-    # ── 1H trend filter ────────────────────────────────────────────────────
-    trend_1h = _get_1h_trend(symbol)
-    if trend_1h is not None and trend_1h != direction:
-        logger.info("[%s] 1H trend %s contradicts 15m %s — blocked",
-                    symbol, trend_1h, direction)
-        return None
-
-    # ── Tail boost ─────────────────────────────────────────────────────────
-    _lower_wick = float(row.get('lower_wick', 0))
-    _upper_wick = float(row.get('upper_wick', 0))
-    _tail_wick  = _lower_wick if direction == 'UP' else _upper_wick
-    if _tail_wick >= 0.30:
-        _tail_boost = 0.04; _tail_label = 'STRONG'
-    elif _tail_wick >= 0.15:
-        _tail_boost = 0.02; _tail_label = 'MODERATE'
-    else:
-        _tail_boost = 0.00; _tail_label = 'NONE'
-    if _tail_boost > 0:
-        confidence = min(0.99, confidence + _tail_boost)
-
-    # ── Update SOL cooldown counter ────────────────────────────────────────
-    if symbol == "SOL-USDT" and cfg.get('cooldown'):
-        _sol_last_signal_bar = _sol_bar_counter
-
-    # ── Update cluster state ───────────────────────────────────────────────
-    _update_cluster_state(symbol, direction)
-
-    # ── Candle time ────────────────────────────────────────────────────────
-    ts       = latest['timestamp']
-    minutes  = ts.minute
-    boundary = (minutes // 15) * 15
-    candle_open  = ts.replace(minute=boundary, second=0, microsecond=0)
-    candle_close = candle_open + pd.Timedelta(minutes=15)
-
-    logger.info(
-        "[%s] SIGNAL %s | gate=%s rsi7=%.1f conf=%.3f thresh=%.2f "
-        "hour=%d momentum=%s cluster=%d",
-        symbol, direction, cfg['signal_gate'], rsi7_val, confidence, threshold,
-        hour, regime['in_momentum'],
-        _pair_consec.get(symbol, {}).get('count', 1)
-    )
+    # ── Extract indicator snapshot for DB storage ─────────────────────────────
+    last_feat = feats.iloc[-1]
+    rsi_14    = float(last_feat.get("rsi",       np.nan))
+    macd_hist = float(last_feat.get("macd_h",    np.nan))
+    adx_val   = float(last_feat.get("adx",       np.nan))
+    vol_ratio = float(last_feat.get("vol_ratio", np.nan))
 
     return {
-        'symbol':            symbol,
-        'direction':         direction,
-        'invert':            cfg.get('invert', False),
-        'confidence':        confidence,
-        'threshold':         threshold,
-        'margin':            confidence - threshold,
-        'tier':              "T1" if vol_ratio > 1.5 else "T2",
-        'signal_gate':       cfg['signal_gate'],
-        'tail_wick':         round(_tail_wick, 3),
-        'tail_boost':        _tail_boost,
-        'tail_label':        _tail_label,
-        'vol_spike':         bool(vol_ratio > 1.5),
-        'rsi_14':            float(row['rsi_14']),
-        'macd_hist':         float(row['macd_hist']),
-        'adx':               float(row['adx']),
-        'vol_ratio':         vol_ratio,
-        'adx_trend':         bool(row['adx_trend']),
-        'bull_market':       bool(row['bull_market']),
-        'open_price':        float(latest['close']),
-        'candle_open_time':  candle_open.to_pydatetime().replace(tzinfo=None),
-        'candle_close_time': candle_close.to_pydatetime().replace(tzinfo=None),
-        'in_momentum':       regime['in_momentum'],
-        'momentum_move_pct': round(regime['move_pct'] * 100, 2),
-        'cluster_streak':    _pair_consec.get(symbol, {}).get('count', 1),
-        'hour_penalty':      hour in PENALISED_HOURS,
-        'hour_blocked':      False,
+        "symbol":           sym,
+        "direction":        direction,
+        "confidence":       confidence,
+        "family":           cfg["family"],
+        "invert":           cfg["invert"],   # XRP: False (v3.3)
+        "tier":             tier,
+        "rsi_14":           rsi_14,
+        "macd_hist":        macd_hist,
+        "adx":              adx_val,
+        "vol_ratio":        vol_ratio,
+        "open_price":       open_price,
+        "candle_open_time": candle_open,
+        "candle_close_time": candle_close,
+        # weight is used internally for ranking
+        "_weight":          cfg["weight"],
     }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# PICK BEST SIGNAL
-# ══════════════════════════════════════════════════════════════════════════════
-
-def pick_best_signal(min_confidence: float = None,
-                     exclude: list = None,
-                     preferred_families: list = None,
-                     excluded_families: list = None,
-                     blocked_directions: dict = None) -> dict | None:
+def pick_best_signal(
+    min_confidence: float = 0.0,
+    exclude: list | None = None,
+    preferred_families: list | None = None,
+    excluded_families: list | None = None,
+    blocked_directions: dict | None = None,
+) -> dict | None:
     """
-    Evaluate all pairs and return the single best signal.
-    Family rotation enforced via excluded_families (always-on in scheduler).
+    Score all 6 symbols and return the single best signal for this candle.
+
+    Called by scheduler.job_generate_signal() every :00/:15/:30/:45+1s.
+
+    Parameters
+    ──────────
+    min_confidence    : global floor (Settings.min_confidence); pair thresholds
+                        in PAIR_CONFIG are the primary gates — this is an
+                        additional global override (0.0 = disabled).
+    exclude           : list of symbols to skip entirely this candle
+                        (pair cooldown list from scheduler).
+    preferred_families: families to prefer; candidates NOT in this list are
+                        ranked lower (family rotation from scheduler).
+    excluded_families : families to exclude entirely (family rotation).
+    blocked_directions: {direction: floor} — if a direction's confidence is
+                        below *floor* it is blocked (Rule 2 saturation filter).
+
+    Ranking logic
+    ─────────────
+    1. Score all pairs → collect candidates above threshold
+    2. Drop excluded symbols and excluded families
+    3. Apply blocked_directions floor per-direction
+    4. Apply global min_confidence floor
+    5. Sort by: preferred_family first, then conf × weight descending
+    6. Return the top candidate (or None)
+
+    Returns a signal dict (see _score_symbol) or None.
     """
-    PAIR_FAMILY = {
-        "BTC-USDT":  "A", "ETH-USDT":  "A",
-        "DOGE-USDT": "B", "SOL-USDT":  "B",
-        "XRP-USDT":  "C", "BNB-USDT":  "C",
-    }
+    exclude           = exclude           or []
+    excluded_families = excluded_families or []
+    blocked_directions = blocked_directions or {}
 
-    global _system_bar_counter
-    _system_bar_counter += 1
+    candidates = []
+    for sym in SYMBOLS:
+        if sym in exclude:
+            logger.debug("[SE] pick: skipping %s (pair cooldown)", sym)
+            continue
 
-    # ── System-level directional block ────────────────────────────────────────
-    _currently_blocked_dirs = set()
-    for _dir in ['UP', 'DOWN']:
-        if _system_bar_counter <= _dir_blocked_until.get(_dir, 0):
-            _currently_blocked_dirs.add(_dir)
-            logger.warning('[DIR_BLOCK] %s direction blocked candle bar=%d expires=%d',
-                           _dir, _system_bar_counter, _dir_blocked_until[_dir])
+        candidate = _score_symbol(sym)
+        if candidate is None:
+            continue
 
-    active_symbols = [s for s in SYMBOLS if not (exclude and s in exclude)]
-    candidates     = []
+        fam = candidate["family"]
+        if fam in excluded_families:
+            logger.debug("[SE] pick: skipping %s family=%s (rotation)", sym, fam)
+            continue
 
-    for sym in active_symbols:
-        try:
-            sig = get_signal_for_symbol(sym)
-            if sig:
-                sig['family'] = PAIR_FAMILY.get(sym, "B")
-                candidates.append(sig)
-                logger.info("[%s] candidate %s conf=%.3f margin=%.3f "
-                            "family=%s momentum=%s gate=%s",
-                            sym, sig['direction'], sig['confidence'],
-                            sig['margin'], sig['family'],
-                            sig.get('in_momentum', False),
-                            sig.get('signal_gate', '?'))
-        except Exception as e:
-            logger.error("[%s] get_signal_for_symbol error: %s", sym, e)
+        # Global min_confidence override
+        if min_confidence and candidate["confidence"] < min_confidence:
+            logger.debug(
+                "[SE] pick: %s conf=%.3f < global min_conf=%.3f — skip",
+                sym, candidate["confidence"], min_confidence,
+            )
+            continue
+
+        # Rule 2 directional saturation floor
+        direction = candidate["direction"]
+        dir_floor = blocked_directions.get(direction, 0.0)
+        if dir_floor and candidate["confidence"] < dir_floor:
+            logger.info(
+                "[SE] pick: %s %s conf=%.3f blocked by Rule2 floor=%.2f",
+                sym, direction, candidate["confidence"], dir_floor,
+            )
+            continue
+
+        candidates.append(candidate)
 
     if not candidates:
-        logger.info("[ENGINE] No qualifying signals this candle")
+        logger.info("[SE] pick_best_signal: no qualifying candidates this candle")
         return None
 
-    # ── Filter out blocked directions ────────────────────────────────────────
-    if _currently_blocked_dirs:
-        before     = len(candidates)
-        candidates = [s for s in candidates if s['direction'] not in _currently_blocked_dirs]
-        if before - len(candidates):
-            logger.warning('[DIR_BLOCK] Removed %d candidate(s) in blocked dirs %s',
-                           before - len(candidates), _currently_blocked_dirs)
-        if not candidates:
-            logger.warning('[DIR_BLOCK] All candidates blocked — skipping candle')
-            return None
+    # ── Sort: preferred family first, then weighted confidence ───────────────
+    def _rank_key(c):
+        in_preferred = 1 if (preferred_families and c["family"] in preferred_families) else 0
+        score        = c["confidence"] * c["_weight"]
+        return (in_preferred, score)
 
-    # min_confidence global floor (0.0 = disabled)
-    if min_confidence:
-        candidates = [s for s in candidates if s['confidence'] >= min_confidence]
-        if not candidates:
-            logger.info("[ENGINE] No signals above min_confidence=%.2f", min_confidence)
-            return None
+    candidates.sort(key=_rank_key, reverse=True)
+    best = candidates[0]
 
-    # Rule 2 directional saturation
-    _dir_blocked = blocked_directions or {}
-    if _dir_blocked:
-        filtered = []
-        for s in candidates:
-            floor = _dir_blocked.get(s['direction'])
-            if floor and s['confidence'] < floor:
-                logger.info("[ENGINE] Rule2 blocked %s %s conf=%.3f < floor=%.2f",
-                            s['symbol'], s['direction'], s['confidence'], floor)
-            else:
-                filtered.append(s)
-        candidates = filtered
-        if not candidates:
-            logger.info("[ENGINE] Rule2: all candidates blocked")
-            return None
+    logger.info(
+        "[SE] pick_best_signal → %s %s conf=%.3f tier=%s family=%s invert=%s",
+        best["symbol"], best["direction"], best["confidence"],
+        best["tier"], best["family"], best["invert"],
+    )
 
-    def score(s):
-        return s['margin'] + (0.04 if s['tier'] == 'T1' else 0.0)
-
-    # Family rotation — hard exclusion with skip (no fallthrough)
-    _excl_set = set(excluded_families) if excluded_families else set()
-    if _excl_set:
-        eligible = [s for s in candidates if s['family'] not in _excl_set]
-        if eligible:
-            best = max(eligible, key=score)
-            logger.info("[ENGINE] Best: %s %s conf=%.3f family=%s gate=%s",
-                        best['symbol'], best['direction'], best['confidence'],
-                        best['family'], best.get('signal_gate','?'))
-            return best
-        else:
-            logger.info("[ENGINE] Family rotation: no signal outside %s — skipping candle",
-                        _excl_set)
-            return None
-
-    best = max(candidates, key=score)
-    logger.info("[ENGINE] Best: %s %s conf=%.3f family=%s gate=%s",
-                best['symbol'], best['direction'], best['confidence'],
-                best['family'], best.get('signal_gate','?'))
+    # Remove internal ranking key before returning to scheduler
+    best.pop("_weight", None)
     return best
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAIR STATS & CONFIG ACCESSORS
+# OUTCOME TRACKING  (in-memory; DB is source of truth)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def record_outcome(symbol: str, outcome: str, direction: str = None):
-    # Updates pair stats AND system-level directional block on LOSS.
-    if symbol not in _pair_stats:
-        _pair_stats[symbol] = {'wins': 0, 'losses': 0, 'signals': 0}
-    _pair_stats[symbol]['signals'] += 1
-    if outcome == 'WIN':
-        _pair_stats[symbol]['wins'] += 1
-        if direction:
-            _dir_loss_streak[direction] = 0
-            logger.debug('[DIR_BLOCK] %s WIN -> %s streak reset', symbol, direction)
-    elif outcome == 'LOSS':
-        _pair_stats[symbol]['losses'] += 1
-        if direction:
-            _dir_loss_streak[direction] = _dir_loss_streak.get(direction, 0) + 1
-            streak = _dir_loss_streak[direction]
-            logger.info('[DIR_BLOCK] %s LOSS | %s streak now %d', symbol, direction, streak)
-            if streak >= DIR_BLOCK_THRESHOLD:
-                _dir_blocked_until[direction] = _system_bar_counter + DIR_BLOCK_DURATION
-                _dir_loss_streak[direction]   = 0
-                logger.warning(
-                    '[DIR_BLOCK] %s direction BLOCKED for %d candles '
-                    '(expires bar %d)',
-                    direction, DIR_BLOCK_DURATION, _dir_blocked_until[direction]
-                )
+def record_outcome(symbol: str, outcome: str) -> None:
+    """
+    Update the in-memory per-pair win/loss counter.
 
+    Called by scheduler.job_resolve_outcomes() after each resolution.
+    These counters reset on process restart — the canonical counts live in
+    the Signal DB table and are queried directly by app.py.
+    """
+    if symbol not in _pair_outcomes:
+        _pair_outcomes[symbol] = {"wins": 0, "losses": 0}
 
-def get_direction_block_status() -> dict:
-    return {
-        'dir_loss_streak':   dict(_dir_loss_streak),
-        'dir_blocked_until': dict(_dir_blocked_until),
-        'system_bar':        _system_bar_counter,
-        'currently_blocked': {
-            d: _system_bar_counter <= _dir_blocked_until.get(d, 0)
-            for d in ['UP', 'DOWN']
-        }
-    }
+    if outcome == "WIN":
+        _pair_outcomes[symbol]["wins"] += 1
+    elif outcome == "LOSS":
+        _pair_outcomes[symbol]["losses"] += 1
 
 
 def get_pair_stats() -> dict:
+    """
+    Return in-memory win/loss counts per symbol.
+
+    Shape: {sym: {"wins": int, "losses": int, "win_rate": float|None}}
+
+    Used by app.py /api/stats/pairs alongside DB counts.
+    Note: these reset on restart; app.py queries the DB directly for
+    authoritative counts and uses this only for session-level context.
+    """
     result = {}
     for sym in SYMBOLS:
-        s     = _pair_stats.get(sym, {'wins':0,'losses':0,'signals':0})
-        total = s['wins'] + s['losses']
-        cfg   = PAIR_CONFIG.get(sym, {})
+        counts = _pair_outcomes.get(sym, {"wins": 0, "losses": 0})
+        wins   = counts["wins"]
+        losses = counts["losses"]
+        total  = wins + losses
         result[sym] = {
-            'wins':       s['wins'],
-            'losses':     s['losses'],
-            'signals':    s['signals'],
-            'win_rate':   round(s['wins']/total*100, 1) if total > 0 else None,
-            'threshold':  cfg.get('threshold', 0.60),
-            'tier':       cfg.get('tier', 'B'),
-            'signal_gate':cfg.get('signal_gate', '?'),
+            "wins":     wins,
+            "losses":   losses,
+            "win_rate": round(wins / total * 100, 1) if total > 0 else None,
         }
     return result
 
 
 def get_pair_config() -> dict:
+    """
+    Return the PAIR_CONFIG dict (a copy) for all symbols.
+
+    Used by app.py /api/stats/pairs to expose threshold, tier, family,
+    and invert settings to the dashboard.
+    """
     return {sym: dict(cfg) for sym, cfg in PAIR_CONFIG.items()}

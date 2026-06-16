@@ -715,10 +715,9 @@ def create_app():
     # ── Stats: per-pair ───────────────────────────────────────────────────────
     @app.route("/api/stats/pairs")
     def pair_stats():
-        from signal_engine import get_pair_stats, get_pair_config, get_direction_block_status
-        live      = get_pair_stats()
-        config    = get_pair_config()
-        dir_block = get_direction_block_status()
+        from signal_engine import get_pair_stats, get_pair_config
+        live   = get_pair_stats()
+        config = get_pair_config()
 
         result = {}
         for sym in ["BTC-USDT", "ETH-USDT", "SOL-USDT",

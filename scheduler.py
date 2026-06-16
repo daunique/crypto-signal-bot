@@ -979,7 +979,7 @@ def job_resolve_outcomes():
 
                         # Per-pair tracker
                         try:
-                            record_outcome(sym, outcome, direction=sig.direction)
+                            record_outcome(sym, outcome)
                         except Exception:
                             pass
 
