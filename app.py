@@ -166,7 +166,7 @@ def create_app():
             ("poly_position_size",   "REAL DEFAULT 10.0"),
             ("poly_max_price",       "REAL DEFAULT 0.5"),
             # v3 additions
-            ("no_execute_pairs",     "TEXT DEFAULT '[\"XRP-USDT\"]'"),
+            ("no_execute_pairs",     "TEXT DEFAULT '[\"DOGE-USDT\",\"ETH-USDT\"]'"),
             ("cooldown_log",         "TEXT DEFAULT '[]'"),
         ]:
             _add_column("settings", _col, _def)
@@ -176,7 +176,7 @@ def create_app():
                 mode=os.environ.get("DEFAULT_MODE", "shadow"),
                 position_size=float(os.environ.get("DEFAULT_POSITION_SIZE", "10")),
                 min_confidence=0.0,
-                no_execute_pairs='["XRP-USDT"]',
+                no_execute_pairs='["DOGE-USDT", "ETH-USDT"]',
                 cooldown_log='[]',
             ))
             db.session.commit()
@@ -190,18 +190,28 @@ def create_app():
                 _existing.min_confidence = 0.0
                 _changed = True
                 logger.info("[APP] Migration: min_confidence reset to 0.0 (per-pair gates active)")
-            # v3.2: XRP-USDT disabled from live execution — signal fires but no order placed.
-            # Ensure XRP-USDT is in no_execute_pairs on existing deployments.
+            # v3.4: XRP-USDT re-enabled for live execution. DOGE-USDT and ETH-USDT
+            # disabled from live execution (walk-forward WR below threshold).
+            # Migrate existing Settings rows: remove XRP, add DOGE + ETH.
             if _existing:
                 import json as _nep_clr_j
                 try:
                     _nep_raw  = _existing.no_execute_pairs or '[]'
                     _nep_list = _nep_raw if isinstance(_nep_raw, list) else _nep_clr_j.loads(_nep_raw)
-                    if 'XRP-USDT' not in _nep_list:
-                        _nep_list.append('XRP-USDT')
-                        _existing.no_execute_pairs = _nep_clr_j.dumps(_nep_list)
+                    if 'XRP-USDT' in _nep_list:
+                        _nep_list.remove('XRP-USDT')
                         _changed = True
-                        logger.info("[APP] Migration: XRP-USDT added to no_execute_pairs — live execution disabled")
+                        logger.info("[APP] Migration v3.4: XRP-USDT removed from no_execute_pairs — live execution ENABLED")
+                    if 'DOGE-USDT' not in _nep_list:
+                        _nep_list.append('DOGE-USDT')
+                        _changed = True
+                        logger.info("[APP] Migration v3.4: DOGE-USDT added to no_execute_pairs — live execution disabled")
+                    if 'ETH-USDT' not in _nep_list:
+                        _nep_list.append('ETH-USDT')
+                        _changed = True
+                        logger.info("[APP] Migration v3.4: ETH-USDT added to no_execute_pairs — live execution disabled")
+                    if _changed:
+                        _existing.no_execute_pairs = _nep_clr_j.dumps(_nep_list)
                 except Exception:
                     pass
             if _changed:

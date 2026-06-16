@@ -401,11 +401,11 @@ def job_generate_signal():
             _no_execute = []
             try:
                 import json as _nep_j
-                _nep_raw = getattr(settings, 'no_execute_pairs', '["XRP-USDT"]') or '["XRP-USDT"]'
+                _nep_raw = getattr(settings, 'no_execute_pairs', '["DOGE-USDT", "ETH-USDT"]') or '["DOGE-USDT", "ETH-USDT"]'
                 _no_execute = _nep_raw if isinstance(_nep_raw, list) else _nep_j.loads(_nep_raw)
             except Exception as _nepe:
                 logger.warning('[GENERATE] no_execute_pairs read error: %s', _nepe)
-                _no_execute = ['XRP-USDT']
+                _no_execute = ['DOGE-USDT', 'ETH-USDT']
 
             _is_no_execute_pair = sig['symbol'] in _no_execute
             if _is_no_execute_pair:

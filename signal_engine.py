@@ -83,16 +83,20 @@ DEBUGGING NOTES
     This resets on process restart. The authoritative win/loss counts are in
     the Signal DB table (queried directly by app.py's /api/stats/pairs route).
 
-  • XRP-USDT, DOGE-USDT, ETH-USDT: all three are in Settings.no_execute_pairs
-    by default (v3.4). They generate signals, resolve outcomes, and appear in
-    stats/dashboard tracking but NEVER place a live order (scheduler.py
-    _is_no_execute_pair guard). Re-activating any of them requires removing the
+  • DOGE-USDT, ETH-USDT: both are in Settings.no_execute_pairs by default
+    (v3.4). They generate signals, resolve outcomes, and appear in stats/
+    dashboard tracking but NEVER place a live order (scheduler.py
+    _is_no_execute_pair guard). Re-activating either requires removing the
     symbol from no_execute_pairs in the Settings dashboard.
-    XRP:  invert=False (v3.3 — inverse direction removed).
-    DOGE: added to no_execute_pairs in v3.4 (walk-forward WR 52.6% — below
+    DOGE: excluded from live execution in v3.4 (walk-forward WR 52.6% — below
           live-execution confidence threshold).
-    ETH:  added to no_execute_pairs in v3.4 (walk-forward WR 59.1% — model
+    ETH:  excluded from live execution in v3.4 (walk-forward WR 59.1% — model
           quality acceptable but daily WR variance too high for live orders).
+
+  • XRP-USDT: LIVE — re-enabled for live order placement in v3.4.
+    invert=False (v3.3 — inverse direction removed and kept off).
+    Signals fire, resolve, and place real orders on Limitless + Polymarket.
+    family=C, tier=T1, threshold=0.58, weight=1.1.
 
   • Family rotation lives entirely in scheduler.py. signal_engine only
     exposes sig['family'] and PAIR_CONFIG so the scheduler can enforce it.
