@@ -94,19 +94,58 @@ def create_app():
         _is_pg = "postgresql" in str(app.config["SQLALCHEMY_DATABASE_URI"])
 
         def _add_column(table, col, coldef):
-            from sqlalchemy import text
+            """
+            Add a column only if it does not already exist.
+
+            On PostgreSQL: check information_schema.columns first — this is an
+            instant catalog lookup that never acquires a table lock and never
+            times out.  Only issue the ALTER TABLE when the column is genuinely
+            absent.  Each DDL statement runs in its own autocommit connection so
+            a statement timeout on one column cannot block or roll back the rest.
+
+            On SQLite: fall through to the old try/catch approach (no
+            information_schema, but SQLite never has statement-timeout issues).
+            """
+            from sqlalchemy import text as _t
             try:
-                with db.engine.connect() as _c:
-                    if _is_pg:
-                        _c.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {coldef}"))
-                    else:
-                        _c.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {coldef}"))
-                    _c.commit()
-                    logger.info(f"[APP] Migration: added {table}.{col}")
+                if _is_pg:
+                    # ── Fast existence check (zero locks, instant) ─────────────
+                    with db.engine.connect() as _chk:
+                        _row = _chk.execute(_t(
+                            "SELECT 1 FROM information_schema.columns "
+                            "WHERE table_name=:tbl AND column_name=:col"
+                        ), {"tbl": table, "col": col}).fetchone()
+                    if _row:
+                        return  # column already exists — skip DDL entirely
+
+                    # ── Issue DDL on a fresh autocommit connection ─────────────
+                    # isolation_level=AUTOCOMMIT means no implicit transaction
+                    # wraps the ALTER TABLE, so statement_timeout only applies
+                    # to this single statement and a timeout here does not
+                    # leave an open transaction that blocks subsequent work.
+                    with db.engine.connect().execution_options(
+                        isolation_level="AUTOCOMMIT"
+                    ) as _ac:
+                        # Raise statement_timeout to 30 s for this ALTER TABLE.
+                        # Render's default is often 5–10 s; we need more headroom
+                        # for tables with many rows.
+                        _ac.execute(_t("SET LOCAL statement_timeout = '30s'"))
+                        _ac.execute(_t(
+                            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {coldef}"
+                        ))
+                    logger.info("[APP] Migration: added %s.%s", table, col)
+
+                else:
+                    # SQLite path — unchanged
+                    with db.engine.connect() as _c:
+                        _c.execute(_t(f"ALTER TABLE {table} ADD COLUMN {col} {coldef}"))
+                        _c.commit()
+                    logger.info("[APP] Migration: added %s.%s", table, col)
+
             except Exception as _e:
                 _em = str(_e).lower()
                 if "duplicate column" not in _em and "already exists" not in _em:
-                    logger.warning(f"[APP] Migration warning ({table}.{col}): {_e}")
+                    logger.warning("[APP] Migration warning (%s.%s): %s", table, col, _e)
 
         # signals table
         for _col, _def in [
@@ -126,27 +165,30 @@ def create_app():
 
         # ── Type-fix: limitless_fill / poly_fill may have been created as
         # DOUBLE PRECISION in older deployments. Coerce to VARCHAR(10).
-        # Safe no-op if already the correct type.
+        # Uses the same autocommit + SET LOCAL statement_timeout pattern.
         if _is_pg:
             from sqlalchemy import text as _text
             for _fix_col in ("limitless_fill", "poly_fill"):
                 try:
-                    with db.engine.connect() as _c:
-                        _row = _c.execute(_text(
+                    with db.engine.connect() as _chk:
+                        _row = _chk.execute(_text(
                             "SELECT data_type FROM information_schema.columns "
                             "WHERE table_name='signals' AND column_name=:col"
                         ), {"col": _fix_col}).fetchone()
-                        if _row and _row[0] != "character varying":
-                            _c.execute(_text(
+                    if _row and _row[0] != "character varying":
+                        with db.engine.connect().execution_options(
+                            isolation_level="AUTOCOMMIT"
+                        ) as _ac:
+                            _ac.execute(_text("SET LOCAL statement_timeout = '30s'"))
+                            _ac.execute(_text(
                                 f"ALTER TABLE signals ALTER COLUMN {_fix_col} "
                                 f"TYPE VARCHAR(10) USING "
                                 f"CASE WHEN {_fix_col} IS NULL THEN 'NEUTRAL' "
                                 f"     ELSE 'NEUTRAL' END"
                             ))
-                            _c.commit()
-                            logger.info(
-                                "[APP] Migration: fixed signals.%s type → VARCHAR(10)", _fix_col
-                            )
+                        logger.info(
+                            "[APP] Migration: fixed signals.%s type → VARCHAR(10)", _fix_col
+                        )
                 except Exception as _tfe:
                     logger.warning("[APP] Type-fix migration (%s): %s", _fix_col, _tfe)
 
