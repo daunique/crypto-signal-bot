@@ -12,9 +12,10 @@ from app import app, socketio
 def _bg():
     with app.app_context():
         try:
+            # v4.0: rule-based engine — retrain_all is a no-op stub
             from signal_engine import retrain_all
-            retrain_all(limit=300)
-            logger.info("[INIT] Models ready")
+            retrain_all(limit=300)   # no-op, returns instantly
+            logger.info("[INIT] Rule-based signal engine v4.0 — ready immediately")
         except Exception as e:
             logger.error(f"[INIT] {e}")
 

@@ -27,12 +27,14 @@ from app import app, socketio
 def _background_init():
     with app.app_context():
         try:
-            logger.info("[INIT] Training ML models for all 6 pairs...")
-            from signal_engine import retrain_all
-            retrain_all(limit=960)
-            logger.info("[INIT] All models ready — signals enabled")
+            # v4.0: rule-based engine — no ML training needed.
+            # retrain_all() is a no-op stub; call it for log continuity only.
+            logger.info("[INIT] Rule-based signal engine v4.0 — no training required")
+            from signal_engine import retrain_all, _models, SYMBOLS
+            retrain_all(limit=960)   # no-op, returns instantly
+            logger.info("[INIT] Signal engine ready — %d pairs armed", len(_models))
         except Exception as e:
-            logger.error(f"[INIT] Model training failed: {e}")
+            logger.error(f"[INIT] Signal engine init failed: {e}")
 
 
 def _start_scheduler():
