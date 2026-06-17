@@ -115,8 +115,12 @@ def create_app():
             ("limitless_fill", "VARCHAR(10) DEFAULT 'NEUTRAL'"),
             # v2 additions
             ("best_entry_pct", "REAL"),
-            ("poly_order_id",  "VARCHAR(120)"),
-            ("poly_fill",      "VARCHAR(10) DEFAULT 'NEUTRAL'"),
+            ("poly_order_id",           "VARCHAR(120)"),
+            ("poly_fill",               "VARCHAR(10) DEFAULT 'NEUTRAL'"),
+            # v3.4 additions — trade placement + execution timestamps
+            ("placed_at",              "TIMESTAMP"),
+            ("limitless_executed_at",  "TIMESTAMP"),
+            ("limitless_fill_price",   "REAL"),
         ]:
             _add_column("signals", _col, _def)
 
@@ -720,7 +724,29 @@ def create_app():
         records = DailyStats.query.filter(
             DailyStats.date >= cutoff
         ).order_by(DailyStats.date.desc()).all()
-        return jsonify([r.to_dict() for r in records])
+
+        # Augment each daily record with Limitless fill counts from the signals table
+        result = []
+        for r in records:
+            row = r.to_dict()
+            try:
+                day_start = datetime.combine(r.date, datetime.min.time())
+                day_end   = datetime.combine(r.date, datetime.max.time())
+                # All live signals that day (have a real order_id, not shadow)
+                day_sigs = Signal.query.filter(
+                    Signal.candle_open_time >= day_start,
+                    Signal.candle_open_time <= day_end,
+                    Signal.mode == "live",
+                ).all()
+                ltl_total  = sum(1 for s in day_sigs if s.order_id and not str(s.order_id).startswith("shadow_"))
+                ltl_filled = sum(1 for s in day_sigs if s.limitless_fill == "FILLED")
+                row["limitless_total"]  = ltl_total
+                row["limitless_filled"] = ltl_filled
+            except Exception:
+                row["limitless_total"]  = None
+                row["limitless_filled"] = None
+            result.append(row)
+        return jsonify(result)
 
     # ── Stats: per-pair ───────────────────────────────────────────────────────
     @app.route("/api/stats/pairs")

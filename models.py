@@ -30,8 +30,11 @@ class Signal(db.Model):
     telegram_sent     = db.Column(db.Boolean, default=False)
     limitless_fill    = db.Column(db.String(10), default='NEUTRAL')
     best_entry_pct    = db.Column(db.Float, default=None)
-    poly_order_id     = db.Column(db.String(120), default=None) # Polymarket order ID
-    poly_fill         = db.Column(db.String(10),  default='NEUTRAL') # FILLED/UNFILLED/NEUTRAL  # FILLED, UNFILLED, NEUTRAL
+    poly_order_id          = db.Column(db.String(120), default=None) # Polymarket order ID
+    poly_fill              = db.Column(db.String(10),  default='NEUTRAL') # FILLED/UNFILLED/NEUTRAL  # FILLED, UNFILLED, NEUTRAL
+    placed_at              = db.Column(db.DateTime, default=None)          # UTC timestamp when order was submitted to Limitless
+    limitless_executed_at  = db.Column(db.DateTime, default=None)          # UTC timestamp when Limitless confirmed on-chain fill
+    limitless_fill_price   = db.Column(db.Float,    default=None)          # Actual fill price confirmed by Limitless (contracts price)
 
     def to_dict(self):
         return {
@@ -58,8 +61,11 @@ class Signal(db.Model):
             'contract_price':    self.contract_price,
             'limitless_fill':    self.limitless_fill or 'NEUTRAL',
             'best_entry_pct':    round(self.best_entry_pct, 1) if self.best_entry_pct is not None else None,
-            'poly_order_id':     self.poly_order_id,
-            'poly_fill':         self.poly_fill or 'NEUTRAL',
+            'poly_order_id':          self.poly_order_id,
+            'poly_fill':              self.poly_fill or 'NEUTRAL',
+            'placed_at':              self.placed_at.isoformat() if self.placed_at else None,
+            'limitless_executed_at':  self.limitless_executed_at.isoformat() if self.limitless_executed_at else None,
+            'limitless_fill_price':   round(self.limitless_fill_price, 4) if self.limitless_fill_price is not None else None,
         }
 
 

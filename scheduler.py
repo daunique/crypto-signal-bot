@@ -558,6 +558,7 @@ def job_generate_signal():
                 telegram_sent     = False,
                 poly_order_id     = _poly_order_id,
                 poly_fill         = ("PENDING" if _poly_order_id else "NEUTRAL"),
+                placed_at         = datetime.utcnow() if order_id else None,  # set when a real order was submitted
             )
             db.session.add(signal_obj)
             db.session.commit()
@@ -1065,6 +1066,16 @@ def job_resolve_outcomes():
                                             _sig_rec.limitless_fill = "NEUTRAL"
                                         else:
                                             _sig_rec.limitless_fill = "FILLED" if _was_filled else "UNFILLED"
+                                            if _was_filled:
+                                                from datetime import datetime as _dt
+                                                _sig_rec.limitless_executed_at = _dt.utcnow()
+                                                # Persist fill price: use recorded contract_price as best proxy
+                                                # (Limitless fill_check returns matched price when available)
+                                                _fill_price = _fill_check.get("fill_price") or _fill_check.get("price")
+                                                if _fill_price:
+                                                    _sig_rec.limitless_fill_price = float(_fill_price)
+                                                elif _sig_rec.contract_price:
+                                                    _sig_rec.limitless_fill_price = float(_sig_rec.contract_price)
 
                                         # Polymarket fill check (runs regardless of Limitless fill)
                                         if _sig_rec.poly_order_id and _sig_rec.poly_fill in (None, "PENDING", "NEUTRAL"):

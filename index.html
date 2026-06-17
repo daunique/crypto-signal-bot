@@ -291,6 +291,60 @@ input[type=number]:focus{border-color:var(--accent)}
     <div class="cd" id="candle-cd">--:--</div>
   </div>
 
+  <!-- Active Trade Panel -->
+  <div class="card" id="active-trade-card" style="display:none;border:1.5px solid var(--accent);background:linear-gradient(135deg,#0a1a0a,#0d1a0d)">
+    <div class="card-hdr">
+      <span class="card-title"><span class="live-dot"></span>Active Trade</span>
+      <span id="at-fill-badge" style="font-size:0.7rem;padding:2px 8px;border-radius:10px;background:#1a2a1a;color:var(--text2)">PENDING FILL</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+      <div>
+        <div style="font-size:0.65rem;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px">Pair</div>
+        <div style="font-size:1.1rem;font-weight:800;color:var(--accent)" id="at-pair">—</div>
+      </div>
+      <div>
+        <div style="font-size:0.65rem;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px">Direction</div>
+        <div style="font-size:1.1rem;font-weight:800" id="at-direction">—</div>
+      </div>
+      <div>
+        <div style="font-size:0.65rem;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px">Order Placed</div>
+        <div style="font-size:0.82rem;color:var(--text)" id="at-placed-at">—</div>
+      </div>
+      <div>
+        <div style="font-size:0.65rem;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px">Limitless Filled</div>
+        <div style="font-size:0.82rem" id="at-executed-at">—</div>
+      </div>
+      <div>
+        <div style="font-size:0.65rem;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px">Limit Price</div>
+        <div style="font-size:0.82rem;color:var(--text)" id="at-contract-price">—</div>
+      </div>
+      <div>
+        <div style="font-size:0.65rem;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px">Fill Price</div>
+        <div style="font-size:0.82rem;color:var(--accent)" id="at-fill-price">—</div>
+      </div>
+      <div>
+        <div style="font-size:0.65rem;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px">Contracts</div>
+        <div style="font-size:0.82rem;color:var(--text)" id="at-contracts">—</div>
+      </div>
+      <div>
+        <div style="font-size:0.65rem;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px">Position Size</div>
+        <div style="font-size:0.82rem;color:var(--text)" id="at-size">—</div>
+      </div>
+    </div>
+    <!-- Candle progress bar -->
+    <div style="margin-top:4px">
+      <div style="display:flex;justify-content:space-between;font-size:0.65rem;color:var(--text2);margin-bottom:4px">
+        <span id="at-open-time">Open —</span>
+        <span id="at-time-remain" style="color:var(--warn)">—</span>
+        <span id="at-close-time">Close —</span>
+      </div>
+      <div style="background:var(--surface2);border-radius:4px;height:6px;overflow:hidden">
+        <div id="at-progress-bar" style="height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:4px;width:0%;transition:width 1s linear"></div>
+      </div>
+    </div>
+    <div style="margin-top:10px;font-size:0.7rem;color:var(--text2)">Confidence: <span id="at-confidence" style="color:var(--accent)">—</span> &nbsp;·&nbsp; Tier: <span id="at-tier">—</span> &nbsp;·&nbsp; Order ID: <span id="at-order-id" style="font-size:0.65rem;color:var(--text2)">—</span></div>
+  </div>
+
   <!-- Prices -->
   <div class="prices-bar" id="prices-bar">
     <div class="price-chip"><span class="pc-sym">BTC</span><span class="pc-val" id="p-BTC-USDT">—</span><span class="pc-chg" id="c-BTC-USDT">—</span></div>
@@ -402,7 +456,7 @@ input[type=number]:focus{border-color:var(--accent)}
     <div class="card-hdr"><span class="card-title">Daily Breakdown</span></div>
     <div style="overflow-x:auto">
       <table class="tbl">
-        <thead><tr><th>Date</th><th>Signals</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Mode</th></tr></thead>
+        <thead><tr><th>Date</th><th>Signals</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Mode</th><th>Limitless</th></tr></thead>
         <tbody id="hist-tbody"></tbody>
       </table>
     </div>
@@ -654,6 +708,96 @@ async function loadPrices() {
 }
 
 // ═══════════════════════════════════
+// ACTIVE TRADE PANEL
+// ═══════════════════════════════════
+let _atTimer = null;
+
+function _fmtUtc(iso) {
+  if (!iso) return '—';
+  return new Date((iso.endsWith('Z')?iso:iso+'Z')).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit',timeZone:'UTC',hour12:false})+' UTC';
+}
+
+function _startCandleProgress(openIso, closeIso) {
+  const bar = document.getElementById('at-progress-bar');
+  const rem = document.getElementById('at-time-remain');
+  if (!bar || !openIso || !closeIso) return;
+  if (_atTimer) clearInterval(_atTimer);
+  _atTimer = setInterval(() => {
+    const now   = Date.now();
+    const open  = new Date((openIso.endsWith('Z')?openIso:openIso+'Z')).getTime();
+    const close = new Date((closeIso.endsWith('Z')?closeIso:closeIso+'Z')).getTime();
+    const total = close - open;
+    const elapsed = Math.max(0, now - open);
+    const pct = Math.min(100, (elapsed / total) * 100);
+    bar.style.width = pct + '%';
+    const secsLeft = Math.max(0, Math.round((close - now) / 1000));
+    const mm = String(Math.floor(secsLeft/60)).padStart(2,'0');
+    const ss = String(secsLeft % 60).padStart(2,'0');
+    rem.textContent = secsLeft > 0 ? `${mm}:${ss} remaining` : 'Candle closed';
+    if (secsLeft === 0 && _atTimer) { clearInterval(_atTimer); _atTimer = null; }
+  }, 1000);
+}
+
+function updateActiveTrade(sigs) {
+  const card = document.getElementById('active-trade-card');
+  if (!card) return;
+  // Find the most recent PENDING signal that has a real order (order_id not null, not shadow)
+  const pending = sigs.filter(s =>
+    (s.outcome||'PENDING').toUpperCase() === 'PENDING' &&
+    s.order_id && !String(s.order_id).startsWith('shadow_')
+  ).sort((a,b) => new Date(b.candle_open_time) - new Date(a.candle_open_time));
+
+  if (!pending.length) {
+    card.style.display = 'none';
+    if (_atTimer) { clearInterval(_atTimer); _atTimer = null; }
+    return;
+  }
+  const s = pending[0];
+  card.style.display = 'block';
+
+  // Direction
+  const dirEl = document.getElementById('at-direction');
+  if (dirEl) {
+    dirEl.textContent  = s.signal_direction === 'UP' ? '▲ UP' : '▼ DOWN';
+    dirEl.style.color  = s.signal_direction === 'UP' ? 'var(--win)' : 'var(--loss)';
+  }
+
+  // Fill badge
+  const badge = document.getElementById('at-fill-badge');
+  if (badge) {
+    const fill = (s.limitless_fill || 'NEUTRAL').toUpperCase();
+    if (fill === 'FILLED') {
+      badge.textContent = '✅ FILLED'; badge.style.background = '#0a2a0a'; badge.style.color = 'var(--win)';
+    } else if (fill === 'UNFILLED') {
+      badge.textContent = '⏳ UNFILLED'; badge.style.background = '#2a2a0a'; badge.style.color = 'var(--warn)';
+    } else {
+      badge.textContent = 'PENDING FILL'; badge.style.background = '#1a1a2a'; badge.style.color = 'var(--text2)';
+    }
+  }
+
+  const _set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+  _set('at-pair',          s.symbol || '—');
+  _set('at-placed-at',     _fmtUtc(s.placed_at));
+  _set('at-executed-at',   s.limitless_executed_at
+       ? `<span style="color:var(--win)">${_fmtUtc(s.limitless_executed_at)}</span>`
+       : '<span style="color:var(--text2)">Not yet</span>');
+  const exEl = document.getElementById('at-executed-at');
+  if (exEl) exEl.innerHTML = s.limitless_executed_at
+    ? `<span style="color:var(--win)">${_fmtUtc(s.limitless_executed_at)}</span>`
+    : '<span style="color:var(--text2)">Not yet</span>';
+  _set('at-contract-price', s.contract_price   != null ? `$${Number(s.contract_price).toFixed(4)}`   : '—');
+  _set('at-fill-price',     s.limitless_fill_price != null ? `$${Number(s.limitless_fill_price).toFixed(4)}` : '—');
+  _set('at-contracts',      s.contracts_bought != null ? Number(s.contracts_bought).toFixed(2)        : '—');
+  _set('at-size',           s.position_size    != null ? `$${Number(s.position_size).toFixed(2)}`     : '—');
+  _set('at-confidence',     s.ml_confidence    != null ? `${(Number(s.ml_confidence)*100).toFixed(1)}%` : '—');
+  _set('at-tier',           s.tier || '—');
+  _set('at-order-id',       s.order_id || '—');
+  _set('at-open-time',      `Open ${_fmtUtc(s.candle_open_time)}`);
+  _set('at-close-time',     `Close ${_fmtUtc(s.candle_close_time)}`);
+  _startCandleProgress(s.candle_open_time, s.candle_close_time);
+}
+
+// ═══════════════════════════════════
 // TODAY'S SIGNAL FEED
 // ═══════════════════════════════════
 async function loadTodaySignals() {
@@ -667,6 +811,7 @@ async function loadTodaySignals() {
       feed.innerHTML = '<div style="color:var(--text2);text-align:center;padding:28px;font-size:0.82rem">Waiting for next candle signal...</div>';
       return;
     }
+    updateActiveTrade(sigs);
     feed.innerHTML = sigs.map(s => {
       const dir  = s.signal_direction;
       const out  = (s.outcome||'PENDING').toLowerCase();
@@ -806,6 +951,12 @@ async function loadHistory() {
     document.getElementById('hist-tbody').innerHTML = data.map(d => {
       const wr = d.win_rate;
       const c  = wr>=60?'var(--win)':wr>=50?'var(--warn)':'var(--loss)';
+      // Limitless column: show count of FILLED orders that day (from daily_stats if available, else '—')
+      const ltlFilled = d.limitless_filled != null ? d.limitless_filled : null;
+      const ltlTotal  = d.limitless_total  != null ? d.limitless_total  : null;
+      const ltlCell   = ltlFilled != null
+        ? `<span style="color:var(--win);font-weight:700">${ltlFilled}</span><span style="color:var(--text2)">/${ltlTotal} filled</span>`
+        : '<span style="color:var(--text2);font-size:0.72rem">—</span>';
       return `<tr>
         <td style="font-weight:600">${d.date}</td>
         <td>${d.total_signals}</td>
@@ -813,8 +964,9 @@ async function loadHistory() {
         <td style="color:var(--loss)">${d.losses}</td>
         <td style="color:${c};font-weight:700">${wr.toFixed(1)}%</td>
         <td><span class="outcome-badge ${d.mode==='live'?'ob-loss':'ob-pending'}" style="padding:2px 8px">${d.mode}</span></td>
+        <td>${ltlCell}</td>
       </tr>`;
-    }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--text2);padding:20px">No history yet</td></tr>';
+    }).join('') || '<tr><td colspan="7" style="text-align:center;color:var(--text2);padding:20px">No history yet</td></tr>';
     // Chart
     const labels = data.map(d=>d.date.slice(5)).reverse();
     const wrs    = data.map(d=>d.win_rate).reverse();
