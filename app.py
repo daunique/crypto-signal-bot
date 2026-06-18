@@ -710,7 +710,22 @@ def create_app():
         records = DailyStats.query.filter(
             DailyStats.date >= cutoff
         ).order_by(DailyStats.date.desc()).all()
-        return jsonify([r.to_dict() for r in records])
+
+        result = []
+        for r in records:
+            d = r.to_dict()
+            # Count signals filled on Limitless that day (candle_open_time date match)
+            day_start = datetime.combine(r.date, datetime.min.time())
+            day_end   = day_start + timedelta(days=1)
+            executed_count = Signal.query.filter(
+                Signal.candle_open_time >= day_start,
+                Signal.candle_open_time <  day_end,
+                Signal.limitless_fill == "FILLED",
+            ).count()
+            d["executed_count"] = executed_count
+            result.append(d)
+
+        return jsonify(result)
 
     # ── Stats: per-pair ───────────────────────────────────────────────────────
     @app.route("/api/stats/pairs")
@@ -748,11 +763,13 @@ def create_app():
         date_filter = request.args.get("date_filter")  # today|yesterday|7d|30d
 
         best_dip    = request.args.get("best_dip")   # 5|10|20|30|40 (≤ threshold)
+        fill        = request.args.get("fill")        # FILLED|UNFILLED|NEUTRAL — Limitless fill status
 
         q = Signal.query
         if symbol:   q = q.filter(Signal.symbol == symbol)
         if outcome:  q = q.filter(Signal.outcome == outcome)
         if mode:     q = q.filter(Signal.mode == mode)
+        if fill:     q = q.filter(Signal.limitless_fill == fill.upper())
         if best_dip:
             try:
                 # Exclusive ranges — each bucket is independent, no overlap:

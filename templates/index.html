@@ -134,6 +134,30 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 
 /* ── Signal feed ── */
 .signal-feed{display:flex;flex-direction:column;gap:7px;max-height:420px;overflow-y:auto}
+.trade-activity{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+.trade-row{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:6px;background:var(--surface2);border:1px solid var(--border);font-size:0.72rem}
+.trade-row.placed{border-left:3px solid var(--accent2)}
+.trade-row.executed{border-left:3px solid var(--win);background:rgba(0,229,160,0.05)}
+.trade-row.unfilled{border-left:3px solid var(--loss);background:rgba(255,77,109,0.04)}
+.trade-row.pending{border-left:3px solid var(--warn)}
+.tr-pair{font-weight:700;color:var(--text);min-width:72px}
+.tr-dir{font-size:0.7rem;font-weight:700;padding:2px 6px;border-radius:3px}
+.tr-dir.up{background:rgba(0,229,160,0.15);color:var(--win)}
+.tr-dir.dn{background:rgba(255,77,109,0.15);color:var(--loss)}
+.tr-meta{color:var(--text2);font-family:'IBM Plex Mono',monospace;font-size:0.68rem}
+.tr-status{font-size:0.68rem;font-weight:700;padding:2px 7px;border-radius:3px;white-space:nowrap}
+.trs-placed{background:rgba(0,184,168,0.12);color:var(--accent2)}
+.trs-exec{background:rgba(0,229,160,0.15);color:var(--win)}
+.trs-unfilled{background:rgba(255,77,109,0.12);color:var(--loss)}
+.trs-pending{background:rgba(246,201,14,0.12);color:var(--warn)}
+.trs-noexec{background:rgba(90,106,130,0.15);color:var(--text2)}
+/* Executed trades history table */
+.exec-table{width:100%;border-collapse:collapse;font-size:0.71rem;font-family:'IBM Plex Mono',monospace}
+.exec-table th{text-align:left;color:var(--text2);padding:5px 8px;border-bottom:1px solid var(--border);font-weight:500;white-space:nowrap}
+.exec-table td{padding:5px 8px;border-bottom:1px solid rgba(30,40,64,.45);white-space:nowrap}
+.exec-table tr:hover td{background:rgba(255,255,255,.015)}
+.exec-table tr.ex-win td{background:rgba(0,229,160,.025)}
+.exec-table tr.ex-loss td{background:rgba(255,77,109,.025)}
 .signal-feed::-webkit-scrollbar{width:3px}
 .signal-feed::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
 .sig-card{
@@ -343,6 +367,24 @@ input[type=number]:focus{border-color:var(--accent)}
     </div>
   </div>
 
+  <!-- ══ TRADE ACTIVITY ══ -->
+  <div class="card" id="trade-activity-card">
+    <div class="card-hdr" style="flex-wrap:wrap;gap:6px">
+      <span class="card-title">⚡ Trade Activity</span>
+      <span style="font-size:0.68rem;color:var(--text2)">Placed = bot sent order · Executed = limit filled on-chain</span>
+    </div>
+    <!-- Legend -->
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px;font-size:0.65rem;color:var(--text2)">
+      <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent2);margin-right:3px"></span>Placed (GTC order sent)</span>
+      <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--win);margin-right:3px"></span>Executed (limit filled)</span>
+      <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--loss);margin-right:3px"></span>Unfilled (not matched)</span>
+      <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--text2);margin-right:3px"></span>Signal-only (no order)</span>
+    </div>
+    <div class="trade-activity" id="trade-activity-list">
+      <div style="color:var(--text2);text-align:center;padding:20px;font-size:0.78rem">No trades yet today</div>
+    </div>
+  </div>
+
   <!-- ══ LIVE SIGNAL GAUGE + BEST DIP TRACKER ══ -->
   <div class="card" id="gauge-card" style="display:none;overflow:hidden">
     <!-- Fixed header — never scrolls -->
@@ -542,7 +584,7 @@ input[type=number]:focus{border-color:var(--accent)}
 
 <!-- ══ HISTORY ══ -->
 <div class="page" id="page-history">
-  <div class="page-hdr"><h2>📜 History</h2><p>Daily performance breakdown</p></div>
+  <div class="page-hdr"><h2>📜 History</h2><p>Daily breakdown · executed trades on Limitless</p></div>
   <div class="g2">
     <div class="card">
       <div class="card-hdr"><span class="card-title">30-Day Win Rate</span></div>
@@ -555,14 +597,37 @@ input[type=number]:focus{border-color:var(--accent)}
         <div style="display:flex;justify-content:space-between"><span style="color:var(--text2);font-size:0.83rem">Wins</span><span id="h-wins" style="color:var(--win);font-weight:700">—</span></div>
         <div style="display:flex;justify-content:space-between"><span style="color:var(--text2);font-size:0.83rem">Losses</span><span id="h-losses" style="color:var(--loss);font-weight:700">—</span></div>
         <div style="display:flex;justify-content:space-between"><span style="color:var(--text2);font-size:0.83rem">Avg Win Rate</span><span id="h-wr" style="color:var(--accent);font-weight:700">—</span></div>
+        <div style="display:flex;justify-content:space-between"><span style="color:var(--text2);font-size:0.83rem">Executed Trades</span><span id="h-executed" style="color:var(--win);font-weight:700">—</span></div>
       </div>
     </div>
   </div>
+
+  <!-- ══ EXECUTED TRADES TABLE ══ -->
+  <div class="card">
+    <div class="card-hdr" style="flex-wrap:wrap;gap:6px">
+      <span class="card-title">✅ Executed Trades (Limitless Filled)</span>
+      <span style="font-size:0.68rem;color:var(--text2)">Only orders confirmed filled on-chain</span>
+    </div>
+    <div style="overflow-x:auto;max-height:380px;overflow-y:auto">
+      <table class="exec-table">
+        <thead><tr>
+          <th>Time</th><th>Pair</th><th>Dir</th><th>Entry¢</th>
+          <th>Contracts</th><th>Size $</th><th>Close $</th><th>Result</th><th>Payout</th>
+        </tr></thead>
+        <tbody id="exec-tbody">
+          <tr><td colspan="9" style="text-align:center;color:var(--text2);padding:20px">No executed trades yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div id="exec-summary" style="display:flex;gap:18px;flex-wrap:wrap;padding:10px 4px 2px;font-size:0.7rem;color:var(--text2);border-top:1px solid var(--border);margin-top:8px"></div>
+  </div>
+
+  <!-- Daily Breakdown -->
   <div class="card">
     <div class="card-hdr"><span class="card-title">Daily Breakdown</span></div>
     <div style="overflow-x:auto">
       <table class="tbl">
-        <thead><tr><th>Date</th><th>Signals</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Mode</th></tr></thead>
+        <thead><tr><th>Date</th><th>Signals</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Executed</th><th>Mode</th></tr></thead>
         <tbody id="hist-tbody"></tbody>
       </table>
     </div>
@@ -785,12 +850,14 @@ let state = {
 // WEBSOCKET
 // ═══════════════════════════════════
 const socket = io({transports:['websocket','polling'],reconnectionAttempts:10,reconnectionDelay:2000});
-socket.on('connect', () => { loadTodayStats(); loadTodaySignals(); });
+socket.on('connect', () => { loadTodayStats(); loadTodaySignals(); refreshTradeActivity(); });
 socket.on('new_signal', sig => {
+  refreshTradeActivity();
   loadTodaySignals(); loadTodayStats();
   toast(`📡 ${sig.symbol} ${sig.signal_direction} ${Number(sig.ml_confidence).toFixed(1)}%`, 'signal');
 });
 socket.on('signal_resolved', sig => {
+  refreshTradeActivity();
   loadTodaySignals(); loadTodayStats(); loadShadowBalance();
   loadSettings();
   const t = sig.outcome==='WIN' ? 'win' : 'loss';
@@ -844,10 +911,10 @@ function showPage(name, el) {
   if (mNav) mNav.classList.add('active');
   window.scrollTo(0,0);
   if (name==='signals')  loadSignals();
-  if (name==='history')  loadHistory();
+  if (name==='history') { loadHistory(); loadExecutedTrades(); }
   if (name==='shadow')   { loadShadowBalance(); loadShadowSignals(); }
   if (name==='settings') loadSettings();
-  if (name==='dashboard') loadPairStats();
+  if (name==='dashboard') { loadPairStats(); refreshTradeActivity(); }
 }
 
 // ═══════════════════════════════════
@@ -1248,6 +1315,189 @@ async function loadDipStats() {
 }
 
 // ═══════════════════════════════════
+// ── TRADE ACTIVITY (dashboard) ────────────────────────────────────────────────
+function renderTradeActivity(signals) {
+  const list = document.getElementById('trade-activity-list');
+  if (!list) return;
+  if (!signals || !signals.length) {
+    list.innerHTML = '<div style="color:var(--text2);text-align:center;padding:20px;font-size:0.78rem">No trades yet today</div>';
+    return;
+  }
+
+  // Derive no-execute pairs from current settings (e.g. XRP-USDT signal-only)
+  let noExecPairs = [];
+  try { noExecPairs = JSON.parse(state.settings?.no_execute_pairs || '[]'); } catch(e) {}
+
+  // Sort newest first by candle_open_time
+  const sorted = [...signals].sort((a,b) =>
+    new Date(b.candle_open_time||0) - new Date(a.candle_open_time||0)
+  );
+
+  list.innerHTML = sorted.map(s => {
+    const dir   = (s.signal_direction||'').toUpperCase();
+    const isUp  = dir === 'UP';
+    const fill  = (s.limitless_fill||'NEUTRAL').toUpperCase();
+    const noExec= noExecPairs.includes(s.symbol);
+    const mode  = (s.mode||'shadow').toLowerCase();
+    const out   = (s.outcome||'PENDING').toUpperCase();
+
+    // Trade placement status
+    let placedHtml = '';
+    if (mode === 'shadow') {
+      placedHtml = '<span class="tr-status trs-noexec">SHADOW</span>';
+    } else if (noExec) {
+      placedHtml = '<span class="tr-status trs-noexec">SIGNAL ONLY</span>';
+    } else {
+      placedHtml = '<span class="tr-status trs-placed">ORDER SENT</span>';
+    }
+
+    // Execution status (whether limit was filled on-chain)
+    let execHtml = '';
+    if (mode === 'shadow' || noExec) {
+      execHtml = '';  // no execution in shadow/signal-only
+    } else if (fill === 'FILLED') {
+      const cp = s.contract_price != null ? (parseFloat(s.contract_price)*100).toFixed(1)+'¢' : '—';
+      execHtml = `<span class="tr-status trs-exec">✓ FILLED @ ${cp}</span>`;
+    } else if (fill === 'UNFILLED') {
+      execHtml = '<span class="tr-status trs-unfilled">✗ UNFILLED</span>';
+    } else if (out === 'PENDING') {
+      execHtml = '<span class="tr-status trs-pending">Checking…</span>';
+    }
+
+    // Outcome
+    let outHtml = '';
+    if (out === 'WIN')  outHtml = '<span class="outcome-badge ob-win">WIN</span>';
+    else if (out==='LOSS') outHtml = '<span class="outcome-badge ob-loss">LOSS</span>';
+    else outHtml = '<span class="outcome-badge ob-pending">PENDING</span>';
+
+    // Time range
+    const ot = s.candle_open_time  ? new Date(s.candle_open_time+'Z').toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '—';
+    const ct = s.candle_close_time ? new Date(s.candle_close_time+'Z').toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '—';
+
+    // Fill class for row
+    const rowClass = fill==='FILLED'?'executed': fill==='UNFILLED'?'unfilled': mode==='shadow'||noExec?'placed':'placed';
+
+    return `<div class="trade-row ${rowClass}">
+      <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap">
+        <span class="tr-pair">${s.symbol||'?'}</span>
+        <span class="tr-dir ${isUp?'up':'dn'}">${isUp?'▲ UP':'▼ DOWN'}</span>
+        <span class="tr-meta">${ot}–${ct} UTC</span>
+        <span class="tr-meta">conf ${s.ml_confidence||'—'}%</span>
+        ${s.contracts_bought!=null?`<span class="tr-meta">${s.contracts_bought} cts</span>`:''}
+        ${s.position_size!=null?`<span class="tr-meta">$${parseFloat(s.position_size).toFixed(2)}</span>`:''}
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+        ${placedHtml}
+        ${execHtml}
+        ${outHtml}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// Called when signals list is refreshed (today + new_signal WS event)
+function refreshTradeActivity() {
+  fetch('/api/signals/today')
+    .then(r => r.json())
+    .then(d => renderTradeActivity(Array.isArray(d) ? d : (d.signals || [])))
+    .catch(() => {});
+}
+
+// ── EXECUTED TRADES TABLE (history page) ───────────────────────────────────
+function loadExecutedTrades() {
+  // Fetch all signals with limitless_fill=FILLED from the signals endpoint
+  fetch('/api/signals?per_page=200&fill=FILLED')
+    .then(r => r.json())
+    .then(data => {
+      const tbody   = document.getElementById('exec-tbody');
+      const summary = document.getElementById('exec-summary');
+      if (!tbody) return;
+
+      const rows = (data.signals || []).filter(s =>
+        (s.limitless_fill||'').toUpperCase() === 'FILLED'
+      );
+
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text2);padding:20px">No executed trades yet</td></tr>';
+        if (summary) summary.innerHTML = '';
+        return;
+      }
+
+      tbody.innerHTML = rows.map(s => {
+        const out   = (s.outcome||'PENDING').toUpperCase();
+        const dir   = (s.signal_direction||'').toUpperCase();
+        const isUp  = dir === 'UP';
+        const cp    = s.contract_price  != null ? (parseFloat(s.contract_price)*100).toFixed(1) : '—';
+        const cts   = s.contracts_bought!= null ? parseFloat(s.contracts_bought).toFixed(0) : '—';
+        const size  = s.position_size   != null ? '$'+parseFloat(s.position_size).toFixed(2) : '—';
+        const close = s.close_price     != null ? '$'+parseFloat(s.close_price).toFixed(4)   : '—';
+        const ot    = s.candle_open_time
+          ? new Date(s.candle_open_time+'Z').toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})
+          : '—';
+
+        // Estimated payout for wins
+        let payout = '—';
+        if (out==='WIN' && s.contract_price && s.contracts_bought && s.position_size) {
+          const payout_val = (parseFloat(s.contracts_bought) * 1.0);  // $1 per contract on win
+          const profit = payout_val - parseFloat(s.position_size);
+          payout = `<span style="color:var(--win)">+$${profit.toFixed(2)}</span>`;
+        } else if (out==='LOSS' && s.position_size) {
+          payout = `<span style="color:var(--loss)">-$${parseFloat(s.position_size).toFixed(2)}</span>`;
+        }
+
+        const rowClass = out==='WIN'?'ex-win':out==='LOSS'?'ex-loss':'';
+        const dirSpan  = isUp
+          ? '<span style="color:var(--win);font-weight:700">▲ UP</span>'
+          : '<span style="color:var(--loss);font-weight:700">▼ DOWN</span>';
+        const outSpan  = out==='WIN'
+          ? '<span class="outcome-badge ob-win">WIN</span>'
+          : out==='LOSS'
+          ? '<span class="outcome-badge ob-loss">LOSS</span>'
+          : '<span class="outcome-badge ob-pending">PENDING</span>';
+
+        return `<tr class="${rowClass}">
+          <td>${ot}</td>
+          <td style="font-weight:700">${s.symbol||'?'}</td>
+          <td>${dirSpan}</td>
+          <td style="color:var(--accent2)">${cp}¢</td>
+          <td>${cts}</td>
+          <td>${size}</td>
+          <td>${close}</td>
+          <td>${outSpan}</td>
+          <td>${payout}</td>
+        </tr>`;
+      }).join('');
+
+      // Summary bar
+      if (summary) {
+        const wins   = rows.filter(r=>(r.outcome||'').toUpperCase()==='WIN').length;
+        const losses = rows.filter(r=>(r.outcome||'').toUpperCase()==='LOSS').length;
+        const total  = wins + losses;
+        const wr     = total ? (wins/total*100).toFixed(1) : '—';
+        const totalPnl = rows.reduce((acc, s) => {
+          if ((s.outcome||'').toUpperCase()==='WIN' && s.contracts_bought && s.position_size) {
+            return acc + (parseFloat(s.contracts_bought) - parseFloat(s.position_size));
+          } else if ((s.outcome||'').toUpperCase()==='LOSS' && s.position_size) {
+            return acc - parseFloat(s.position_size);
+          }
+          return acc;
+        }, 0);
+        const pnlColor = totalPnl >= 0 ? 'var(--win)' : 'var(--loss)';
+        summary.innerHTML = `
+          <span><b style="color:var(--text)">${rows.length}</b> executed</span>
+          <span><b style="color:var(--win)">${wins}W</b> / <b style="color:var(--loss)">${losses}L</b></span>
+          <span>WR <b style="color:var(--accent)">${wr}%</b></span>
+          <span>P&L <b style="color:${pnlColor}">${totalPnl>=0?'+':''}$${totalPnl.toFixed(2)}</b></span>
+        `;
+      }
+
+      // Update h-executed counter
+      const hExec = document.getElementById('h-executed');
+      if (hExec) hExec.textContent = rows.length;
+    })
+    .catch(err => console.warn('[execTrades] fetch error:', err));
+}
+
 // HISTORY PAGE
 // ═══════════════════════════════════
 async function loadHistory() {
@@ -1270,9 +1520,10 @@ async function loadHistory() {
         <td style="color:var(--win)">${d.wins}</td>
         <td style="color:var(--loss)">${d.losses}</td>
         <td style="color:${c};font-weight:700">${wr.toFixed(1)}%</td>
+        <td style="color:var(--win);font-weight:700">${d.executed_count!=null?d.executed_count:'—'}</td>
         <td><span class="outcome-badge ${d.mode==='live'?'ob-loss':'ob-pending'}" style="padding:2px 8px">${d.mode}</span></td>
       </tr>`;
-    }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--text2);padding:20px">No history yet</td></tr>';
+    }).join('') || '<tr><td colspan="7" style="text-align:center;color:var(--text2);padding:20px">No history yet</td></tr>';
     // Chart
     const labels = data.map(d=>d.date.slice(5)).reverse();
     const wrs    = data.map(d=>d.win_rate).reverse();
@@ -1581,7 +1832,7 @@ async function init() {
 
 init();
 setInterval(loadPrices,    30000);
-setInterval(()=>{ loadTodayStats(); loadTodaySignals(); }, 15000);
+setInterval(()=>{ loadTodayStats(); loadTodaySignals(); refreshTradeActivity(); }, 15000);
 setInterval(loadPairStats, 300000);
 
 // ═══════════════════════════════════
@@ -2191,10 +2442,12 @@ function disconnectLimitlessWS() {
 
 // Hook into existing WebSocket events
 socket.on('new_signal', sig => {
+  refreshTradeActivity();
   if (sig.outcome === 'PENDING') startGaugeForSignal(sig);
 });
 
 socket.on('signal_resolved', sig => {
+  refreshTradeActivity();
   if (sig.id === gaugeState.signalId) stopGauge(sig.outcome);
 });
 
