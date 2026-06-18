@@ -367,21 +367,13 @@ input[type=number]:focus{border-color:var(--accent)}
     </div>
   </div>
 
-  <!-- ══ TRADE ACTIVITY ══ -->
-  <div class="card" id="trade-activity-card">
-    <div class="card-hdr" style="flex-wrap:wrap;gap:6px">
+  <!-- ══ TRADE ACTIVITY — current pending signal only ══ -->
+  <div class="card" id="trade-activity-card" style="display:none">
+    <div class="card-hdr">
       <span class="card-title">⚡ Trade Activity</span>
-      <span style="font-size:0.68rem;color:var(--text2)">Placed = bot sent order · Executed = limit filled on-chain</span>
+      <span style="font-size:0.68rem;color:var(--text2)">This candle</span>
     </div>
-    <!-- Legend -->
-    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px;font-size:0.65rem;color:var(--text2)">
-      <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent2);margin-right:3px"></span>Placed (GTC order sent)</span>
-      <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--win);margin-right:3px"></span>Executed (limit filled)</span>
-      <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--loss);margin-right:3px"></span>Unfilled (not matched)</span>
-      <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--text2);margin-right:3px"></span>Signal-only (no order)</span>
-    </div>
-    <div class="trade-activity" id="trade-activity-list">
-      <div style="color:var(--text2);text-align:center;padding:20px;font-size:0.78rem">No trades yet today</div>
+    <div id="trade-activity-current">
     </div>
   </div>
 
@@ -1315,84 +1307,67 @@ async function loadDipStats() {
 }
 
 // ═══════════════════════════════════
-// ── TRADE ACTIVITY (dashboard) ────────────────────────────────────────────────
+// ── TRADE ACTIVITY (dashboard) — shows ONLY the current pending signal ─────────
 function renderTradeActivity(signals) {
-  const list = document.getElementById('trade-activity-list');
-  if (!list) return;
-  if (!signals || !signals.length) {
-    list.innerHTML = '<div style="color:var(--text2);text-align:center;padding:20px;font-size:0.78rem">No trades yet today</div>';
+  const card = document.getElementById('trade-activity-card');
+  const box  = document.getElementById('trade-activity-current');
+  if (!card || !box) return;
+
+  // Find the single PENDING signal, if any
+  const pending = (signals || []).find(s => (s.outcome || 'PENDING').toUpperCase() === 'PENDING');
+
+  if (!pending) {
+    card.style.display = 'none';
+    box.innerHTML = '';
     return;
   }
+  card.style.display = '';
 
-  // Derive no-execute pairs from current settings (e.g. XRP-USDT signal-only)
   let noExecPairs = [];
   try { noExecPairs = JSON.parse(state.settings?.no_execute_pairs || '[]'); } catch(e) {}
 
-  // Sort newest first by candle_open_time
-  const sorted = [...signals].sort((a,b) =>
-    new Date(b.candle_open_time||0) - new Date(a.candle_open_time||0)
-  );
+  const s     = pending;
+  const dir   = (s.signal_direction||'').toUpperCase();
+  const isUp  = dir === 'UP';
+  const fill  = (s.limitless_fill||'NEUTRAL').toUpperCase();
+  const noExec= noExecPairs.includes(s.symbol);
+  const mode  = (s.mode||'shadow').toLowerCase();
 
-  list.innerHTML = sorted.map(s => {
-    const dir   = (s.signal_direction||'').toUpperCase();
-    const isUp  = dir === 'UP';
-    const fill  = (s.limitless_fill||'NEUTRAL').toUpperCase();
-    const noExec= noExecPairs.includes(s.symbol);
-    const mode  = (s.mode||'shadow').toLowerCase();
-    const out   = (s.outcome||'PENDING').toUpperCase();
+  let placedHtml = '';
+  if (mode === 'shadow')      placedHtml = '<span class="tr-status trs-noexec">SHADOW</span>';
+  else if (noExec)            placedHtml = '<span class="tr-status trs-noexec">SIGNAL ONLY</span>';
+  else                        placedHtml = '<span class="tr-status trs-placed">ORDER SENT</span>';
 
-    // Trade placement status
-    let placedHtml = '';
-    if (mode === 'shadow') {
-      placedHtml = '<span class="tr-status trs-noexec">SHADOW</span>';
-    } else if (noExec) {
-      placedHtml = '<span class="tr-status trs-noexec">SIGNAL ONLY</span>';
-    } else {
-      placedHtml = '<span class="tr-status trs-placed">ORDER SENT</span>';
-    }
+  let execHtml = '';
+  if (mode === 'shadow' || noExec) {
+    execHtml = '';
+  } else if (fill === 'FILLED') {
+    const cp = s.contract_price != null ? (parseFloat(s.contract_price)*100).toFixed(1)+'¢' : '—';
+    execHtml = `<span class="tr-status trs-exec">✓ FILLED @ ${cp}</span>`;
+  } else if (fill === 'UNFILLED') {
+    execHtml = '<span class="tr-status trs-unfilled">✗ UNFILLED</span>';
+  } else {
+    execHtml = '<span class="tr-status trs-pending">Checking…</span>';
+  }
 
-    // Execution status (whether limit was filled on-chain)
-    let execHtml = '';
-    if (mode === 'shadow' || noExec) {
-      execHtml = '';  // no execution in shadow/signal-only
-    } else if (fill === 'FILLED') {
-      const cp = s.contract_price != null ? (parseFloat(s.contract_price)*100).toFixed(1)+'¢' : '—';
-      execHtml = `<span class="tr-status trs-exec">✓ FILLED @ ${cp}</span>`;
-    } else if (fill === 'UNFILLED') {
-      execHtml = '<span class="tr-status trs-unfilled">✗ UNFILLED</span>';
-    } else if (out === 'PENDING') {
-      execHtml = '<span class="tr-status trs-pending">Checking…</span>';
-    }
+  const ot = s.candle_open_time  ? new Date(s.candle_open_time+'Z').toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '—';
+  const ct = s.candle_close_time ? new Date(s.candle_close_time+'Z').toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '—';
+  const rowClass = fill==='FILLED'?'executed': fill==='UNFILLED'?'unfilled':'placed';
 
-    // Outcome
-    let outHtml = '';
-    if (out === 'WIN')  outHtml = '<span class="outcome-badge ob-win">WIN</span>';
-    else if (out==='LOSS') outHtml = '<span class="outcome-badge ob-loss">LOSS</span>';
-    else outHtml = '<span class="outcome-badge ob-pending">PENDING</span>';
-
-    // Time range
-    const ot = s.candle_open_time  ? new Date(s.candle_open_time+'Z').toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '—';
-    const ct = s.candle_close_time ? new Date(s.candle_close_time+'Z').toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '—';
-
-    // Fill class for row
-    const rowClass = fill==='FILLED'?'executed': fill==='UNFILLED'?'unfilled': mode==='shadow'||noExec?'placed':'placed';
-
-    return `<div class="trade-row ${rowClass}">
-      <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap">
-        <span class="tr-pair">${s.symbol||'?'}</span>
-        <span class="tr-dir ${isUp?'up':'dn'}">${isUp?'▲ UP':'▼ DOWN'}</span>
-        <span class="tr-meta">${ot}–${ct} UTC</span>
-        <span class="tr-meta">conf ${s.ml_confidence||'—'}%</span>
-        ${s.contracts_bought!=null?`<span class="tr-meta">${s.contracts_bought} cts</span>`:''}
-        ${s.position_size!=null?`<span class="tr-meta">$${parseFloat(s.position_size).toFixed(2)}</span>`:''}
-      </div>
-      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end">
-        ${placedHtml}
-        ${execHtml}
-        ${outHtml}
-      </div>
-    </div>`;
-  }).join('');
+  box.innerHTML = `<div class="trade-row ${rowClass}">
+    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap">
+      <span class="tr-pair">${s.symbol||'?'}</span>
+      <span class="tr-dir ${isUp?'up':'dn'}">${isUp?'▲ UP':'▼ DOWN'}</span>
+      <span class="tr-meta">${ot}–${ct} UTC</span>
+      <span class="tr-meta">conf ${s.ml_confidence||'—'}%</span>
+      ${s.contracts_bought!=null?`<span class="tr-meta">${s.contracts_bought} cts</span>`:''}
+      ${s.position_size!=null?`<span class="tr-meta">$${parseFloat(s.position_size).toFixed(2)}</span>`:''}
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+      ${placedHtml}
+      ${execHtml}
+    </div>
+  </div>`;
 }
 
 // Called when signals list is refreshed (today + new_signal WS event)

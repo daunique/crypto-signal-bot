@@ -90,7 +90,7 @@ PAIR_CONFIG = {
         "gate_long":   0.15,  "gate_short":  0.85, # BB% thresholds (loosened from 0.08)
         "calm_only":   False, "vol_min":     1.2,  # VOL filter
         "cooldown":    None,
-        "threshold":   0.62,  "tier": "C",  "invert": True,
+        "threshold":   0.62,  "tier": "C",  "invert": False,  # LIVE: normal execution (UP sig -> trade UP)
     },
     "DOGE-USDT": {
         "signal_gate": "wr",
