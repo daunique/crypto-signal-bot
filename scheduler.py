@@ -47,6 +47,10 @@ from apscheduler.triggers.interval import IntervalTrigger
 logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler(timezone="UTC")
 
+# Throttle for the early fill-check inside job_track_best_dip (runs every 3s,
+# but we only want to hit the Limitless fill-status API every ~10s).
+_last_early_fill_check_ts = 0.0
+
 
 def _ctx():
     from app import app
@@ -805,6 +809,40 @@ def job_track_best_dip():
         except Exception as _e:
             logger.warning("[DIP_TRACK] Unhandled error: %s", _e)
 
+        # ── Early fill check (separate try block — must not break dip tracking) ──
+        # Checks Limitless fill status while the signal is still PENDING, so the
+        # dashboard's "Checking…" badge resolves to FILLED/UNFILLED within seconds
+        # of order placement instead of waiting the full 15-minute candle.
+        # Throttled to once every ~10s (this job runs every 3s) to avoid
+        # hammering the Limitless API with redundant fill-status calls.
+        global _last_early_fill_check_ts
+        try:
+            import time as _time_efc
+            _now_efc = _time_efc.time()
+            if _now_efc - _last_early_fill_check_ts >= 10:
+                _last_early_fill_check_ts = _now_efc
+
+                from models import Signal as _DipSigModel
+                _p = _DipSigModel.query.filter(
+                    _DipSigModel.outcome == "PENDING"
+                ).order_by(_DipSigModel.candle_open_time.desc()).first()
+
+                if _p and (_p.limitless_fill or "NEUTRAL") == "NEUTRAL":
+                    _oid = _p.order_id
+                    if _oid and not str(_oid).startswith("shadow_") and _p.market_slug:
+                        from limitless_executor import check_order_filled
+                        _fc = check_order_filled(_p.market_slug, _oid)
+                        if _fc.get("filled"):
+                            _p.limitless_fill = "FILLED"
+                            db.session.commit()
+                            logger.info("[DIP_TRACK][FILL] %s order=%s CONFIRMED FILLED (early check)",
+                                        _p.symbol, _oid)
+                        # If not yet filled, leave as NEUTRAL — resolve job will
+                        # do the authoritative UNFILLED determination at candle close
+                        # (an order can still fill in the remaining window).
+        except Exception as _efe:
+            logger.debug("[DIP_TRACK][FILL] early fill check error: %s", _efe)
+
 
 def job_resolve_outcomes():
     """
@@ -1029,13 +1067,71 @@ def job_resolve_outcomes():
                         # "Frozen" means the streak integer is untouched so the
                         # same stake fires again next candle. Neither penalised
                         # nor rewarded — the sequence just waits for a real fill.
+                        # ── Limitless / Polymarket fill check — ALWAYS runs ──────────
+                        # Previously this entire block was nested inside
+                        # `if _ms.use_martingale:` which meant limitless_fill
+                        # was NEVER checked (stuck at default 'NEUTRAL') for
+                        # any account with martingale turned off. Fill status
+                        # must be checked regardless of martingale setting —
+                        # martingale is a STAKE strategy that consumes the
+                        # fill result, it should not gate whether we check it.
+                        _was_filled  = False
+                        _fill_status = "UNKNOWN"
                         try:
                             from models import Settings as _MSettings
                             from limitless_executor import check_order_filled
                             _ms = _MSettings.query.first()
+
+                            _order_id = sig.order_id
+                            _mkt_slug = sig.market_slug
+
+                            if not _order_id or str(_order_id).startswith("shadow_"):
+                                _was_filled  = False
+                                _fill_status = "NO_ORDER_ID"
+                            else:
+                                _fill_check  = check_order_filled(_mkt_slug, _order_id)
+                                _was_filled  = _fill_check.get("filled", False)
+                                _fill_status = _fill_check.get("status", "UNKNOWN")
+
+                            # Persist Limitless fill status on the signal record
+                            try:
+                                from models import Signal as _SigModel
+                                _sig_rec = _SigModel.query.get(sig.id)
+                                if _sig_rec:
+                                    if str(_order_id).startswith("shadow_") or _fill_status == "NO_ORDER_ID":
+                                        _sig_rec.limitless_fill = "NEUTRAL"
+                                    else:
+                                        _sig_rec.limitless_fill = "FILLED" if _was_filled else "UNFILLED"
+
+                                    # Polymarket fill check (runs regardless of Limitless fill)
+                                    if _sig_rec.poly_order_id and _sig_rec.poly_fill in (None, "PENDING", "NEUTRAL"):
+                                        try:
+                                            from polymarket_executor import check_order_filled as _poly_fill_fn
+                                            _pf = _poly_fill_fn(_sig_rec.poly_order_id)
+                                            if _pf.get("filled"):
+                                                _sig_rec.poly_fill = "FILLED"
+                                            elif _pf.get("status") not in ("SHADOW", "ERROR", "NO_ORDER_ID"):
+                                                _sig_rec.poly_fill = "UNFILLED"
+                                            logger.info("[RESOLVE][POLY] Fill: order=%s status=%s poly_fill=%s",
+                                                _sig_rec.poly_order_id, _pf.get("status"), _sig_rec.poly_fill)
+                                        except Exception as _pfe:
+                                            logger.warning("[RESOLVE][POLY] Fill check error: %s", _pfe)
+
+                                    db.session.commit()
+                                    logger.info(
+                                        "[RESOLVE] Fill check complete | order=%s status=%s filled=%s limitless_fill=%s",
+                                        _order_id, _fill_status, _was_filled, _sig_rec.limitless_fill
+                                    )
+                            except Exception as _fe:
+                                logger.warning(f"[RESOLVE] limitless_fill persist error: {_fe}")
+                        except Exception as _fce:
+                            logger.warning(f"[RESOLVE] Fill check block error: {_fce}")
+
+                        # ── Martingale stake update — only runs when martingale is ON ───
+                        # Uses the _was_filled / _fill_status computed above (unconditionally).
+                        try:
                             if _ms and _ms.use_martingale:
                                 cap       = int(_ms.martingale_cap or 10)
-                                # Parse custom sequence
                                 _raw_seq = _ms.martingale_sequence or "1,1.5,2,3,4.5,6.7"
                                 try:
                                     _MART_SEQ = [round(float(x.strip()), 1)
@@ -1044,45 +1140,6 @@ def job_resolve_outcomes():
                                         raise ValueError
                                 except Exception:
                                     _MART_SEQ = [1.0, 1.5, 2.0, 3.0, 4.5, 6.7]
-                                _order_id = sig.order_id
-                                _mkt_slug = sig.market_slug
-
-                                # Shadow or missing order — no on-chain fill possible
-                                if not _order_id or str(_order_id).startswith("shadow_"):
-                                    _was_filled  = False
-                                    _fill_status = "NO_ORDER_ID"
-                                else:
-                                    _fill_check  = check_order_filled(_mkt_slug, _order_id)
-                                    _was_filled  = _fill_check.get("filled", False)
-                                    _fill_status = _fill_check.get("status", "UNKNOWN")
-
-                                # Persist Limitless fill status on the signal record
-                                try:
-                                    from models import Signal as _SigModel
-                                    _sig_rec = _SigModel.query.get(sig.id)
-                                    if _sig_rec:
-                                        if str(_order_id).startswith("shadow_") or _fill_status == "NO_ORDER_ID":
-                                            _sig_rec.limitless_fill = "NEUTRAL"
-                                        else:
-                                            _sig_rec.limitless_fill = "FILLED" if _was_filled else "UNFILLED"
-
-                                        # Polymarket fill check (runs regardless of Limitless fill)
-                                        if _sig_rec.poly_order_id and _sig_rec.poly_fill in (None, "PENDING", "NEUTRAL"):
-                                            try:
-                                                from polymarket_executor import check_order_filled as _poly_fill_fn
-                                                _pf = _poly_fill_fn(_sig_rec.poly_order_id)
-                                                if _pf.get("filled"):
-                                                    _sig_rec.poly_fill = "FILLED"
-                                                elif _pf.get("status") not in ("SHADOW", "ERROR", "NO_ORDER_ID"):
-                                                    _sig_rec.poly_fill = "UNFILLED"
-                                                logger.info("[RESOLVE][POLY] Fill: order=%s status=%s poly_fill=%s",
-                                                    _sig_rec.poly_order_id, _pf.get("status"), _sig_rec.poly_fill)
-                                            except Exception as _pfe:
-                                                logger.warning("[RESOLVE][POLY] Fill check error: %s", _pfe)
-
-                                        db.session.commit()
-                                except Exception as _fe:
-                                    logger.warning(f"[RESOLVE] limitless_fill persist error: {_fe}")
 
                                 if not _was_filled:
                                     # Not confirmed on-chain — freeze streak, carry stake forward
