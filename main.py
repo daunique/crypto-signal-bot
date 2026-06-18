@@ -12,10 +12,9 @@ from app import app, socketio
 def _bg():
     with app.app_context():
         try:
-            # v4.0: rule-based engine — retrain_all is a no-op stub
             from signal_engine import retrain_all
-            retrain_all(limit=300)   # no-op, returns instantly
-            logger.info("[INIT] Rule-based signal engine v4.0 — ready immediately")
+            retrain_all(limit=300)
+            logger.info("[INIT] Models ready")
         except Exception as e:
             logger.error(f"[INIT] {e}")
 
@@ -26,34 +25,6 @@ def _sched():
     except Exception as e:
         logger.error(f"[INIT] Scheduler: {e}")
 
-def _ensure_new_columns():
-    import os
-    db_url = os.environ.get("DATABASE_URL", "")
-    if not db_url or "postgresql" not in db_url:
-        return
-    try:
-        import psycopg2
-        conn = psycopg2.connect(db_url, options="-c statement_timeout=60000")
-        conn.autocommit = True
-        cur = conn.cursor()
-        for col, coldef in [
-            ("placed_at",             "TIMESTAMP"),
-            ("limitless_executed_at", "TIMESTAMP"),
-            ("limitless_fill_price",  "REAL"),
-        ]:
-            cur.execute(
-                "SELECT 1 FROM information_schema.columns "
-                "WHERE table_name='signals' AND column_name=%s", (col,)
-            )
-            if cur.fetchone():
-                continue
-            cur.execute(f"ALTER TABLE signals ADD COLUMN IF NOT EXISTS {col} {coldef}")
-            logger.info("[INIT] signals.%s added OK", col)
-        cur.close(); conn.close()
-    except Exception as _e:
-        logger.warning("[INIT] _ensure_new_columns: %s", _e)
-
-_ensure_new_columns()
 threading.Thread(target=_bg, daemon=True).start()
 _sched()
 

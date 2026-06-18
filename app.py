@@ -94,58 +94,19 @@ def create_app():
         _is_pg = "postgresql" in str(app.config["SQLALCHEMY_DATABASE_URI"])
 
         def _add_column(table, col, coldef):
-            """
-            Add a column only if it does not already exist.
-
-            On PostgreSQL: check information_schema.columns first — this is an
-            instant catalog lookup that never acquires a table lock and never
-            times out.  Only issue the ALTER TABLE when the column is genuinely
-            absent.  Each DDL statement runs in its own autocommit connection so
-            a statement timeout on one column cannot block or roll back the rest.
-
-            On SQLite: fall through to the old try/catch approach (no
-            information_schema, but SQLite never has statement-timeout issues).
-            """
-            from sqlalchemy import text as _t
+            from sqlalchemy import text
             try:
-                if _is_pg:
-                    # ── Fast existence check (zero locks, instant) ─────────────
-                    with db.engine.connect() as _chk:
-                        _row = _chk.execute(_t(
-                            "SELECT 1 FROM information_schema.columns "
-                            "WHERE table_name=:tbl AND column_name=:col"
-                        ), {"tbl": table, "col": col}).fetchone()
-                    if _row:
-                        return  # column already exists — skip DDL entirely
-
-                    # ── Issue DDL on a fresh autocommit connection ─────────────
-                    # isolation_level=AUTOCOMMIT means no implicit transaction
-                    # wraps the ALTER TABLE, so statement_timeout only applies
-                    # to this single statement and a timeout here does not
-                    # leave an open transaction that blocks subsequent work.
-                    with db.engine.connect().execution_options(
-                        isolation_level="AUTOCOMMIT"
-                    ) as _ac:
-                        # Raise statement_timeout to 30 s for this ALTER TABLE.
-                        # Render's default is often 5–10 s; we need more headroom
-                        # for tables with many rows.
-                        _ac.execute(_t("SET LOCAL statement_timeout = '30s'"))
-                        _ac.execute(_t(
-                            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {coldef}"
-                        ))
-                    logger.info("[APP] Migration: added %s.%s", table, col)
-
-                else:
-                    # SQLite path — unchanged
-                    with db.engine.connect() as _c:
-                        _c.execute(_t(f"ALTER TABLE {table} ADD COLUMN {col} {coldef}"))
-                        _c.commit()
-                    logger.info("[APP] Migration: added %s.%s", table, col)
-
+                with db.engine.connect() as _c:
+                    if _is_pg:
+                        _c.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {coldef}"))
+                    else:
+                        _c.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {coldef}"))
+                    _c.commit()
+                    logger.info(f"[APP] Migration: added {table}.{col}")
             except Exception as _e:
                 _em = str(_e).lower()
                 if "duplicate column" not in _em and "already exists" not in _em:
-                    logger.warning("[APP] Migration warning (%s.%s): %s", table, col, _e)
+                    logger.warning(f"[APP] Migration warning ({table}.{col}): {_e}")
 
         # signals table
         for _col, _def in [
@@ -154,41 +115,34 @@ def create_app():
             ("limitless_fill", "VARCHAR(10) DEFAULT 'NEUTRAL'"),
             # v2 additions
             ("best_entry_pct", "REAL"),
-            ("poly_order_id",           "VARCHAR(120)"),
-            ("poly_fill",               "VARCHAR(10) DEFAULT 'NEUTRAL'"),
-            # v3.4 additions — trade placement + execution timestamps
-            ("placed_at",              "TIMESTAMP"),
-            ("limitless_executed_at",  "TIMESTAMP"),
-            ("limitless_fill_price",   "REAL"),
+            ("poly_order_id",  "VARCHAR(120)"),
+            ("poly_fill",      "VARCHAR(10) DEFAULT 'NEUTRAL'"),
         ]:
             _add_column("signals", _col, _def)
 
         # ── Type-fix: limitless_fill / poly_fill may have been created as
         # DOUBLE PRECISION in older deployments. Coerce to VARCHAR(10).
-        # Uses the same autocommit + SET LOCAL statement_timeout pattern.
+        # Safe no-op if already the correct type.
         if _is_pg:
             from sqlalchemy import text as _text
             for _fix_col in ("limitless_fill", "poly_fill"):
                 try:
-                    with db.engine.connect() as _chk:
-                        _row = _chk.execute(_text(
+                    with db.engine.connect() as _c:
+                        _row = _c.execute(_text(
                             "SELECT data_type FROM information_schema.columns "
                             "WHERE table_name='signals' AND column_name=:col"
                         ), {"col": _fix_col}).fetchone()
-                    if _row and _row[0] != "character varying":
-                        with db.engine.connect().execution_options(
-                            isolation_level="AUTOCOMMIT"
-                        ) as _ac:
-                            _ac.execute(_text("SET LOCAL statement_timeout = '30s'"))
-                            _ac.execute(_text(
+                        if _row and _row[0] != "character varying":
+                            _c.execute(_text(
                                 f"ALTER TABLE signals ALTER COLUMN {_fix_col} "
                                 f"TYPE VARCHAR(10) USING "
                                 f"CASE WHEN {_fix_col} IS NULL THEN 'NEUTRAL' "
                                 f"     ELSE 'NEUTRAL' END"
                             ))
-                        logger.info(
-                            "[APP] Migration: fixed signals.%s type → VARCHAR(10)", _fix_col
-                        )
+                            _c.commit()
+                            logger.info(
+                                "[APP] Migration: fixed signals.%s type → VARCHAR(10)", _fix_col
+                            )
                 except Exception as _tfe:
                     logger.warning("[APP] Type-fix migration (%s): %s", _fix_col, _tfe)
 
@@ -212,7 +166,7 @@ def create_app():
             ("poly_position_size",   "REAL DEFAULT 10.0"),
             ("poly_max_price",       "REAL DEFAULT 0.5"),
             # v3 additions
-            ("no_execute_pairs",     "TEXT DEFAULT '[\"DOGE-USDT\",\"ETH-USDT\"]'"),
+            ("no_execute_pairs",     "TEXT DEFAULT '[\"XRP-USDT\"]'"),
             ("cooldown_log",         "TEXT DEFAULT '[]'"),
         ]:
             _add_column("settings", _col, _def)
@@ -222,7 +176,7 @@ def create_app():
                 mode=os.environ.get("DEFAULT_MODE", "shadow"),
                 position_size=float(os.environ.get("DEFAULT_POSITION_SIZE", "10")),
                 min_confidence=0.0,
-                no_execute_pairs='["DOGE-USDT", "ETH-USDT"]',
+                no_execute_pairs='["XRP-USDT"]',
                 cooldown_log='[]',
             ))
             db.session.commit()
@@ -236,28 +190,18 @@ def create_app():
                 _existing.min_confidence = 0.0
                 _changed = True
                 logger.info("[APP] Migration: min_confidence reset to 0.0 (per-pair gates active)")
-            # v3.4: XRP-USDT re-enabled for live execution. DOGE-USDT and ETH-USDT
-            # disabled from live execution (walk-forward WR below threshold).
-            # Migrate existing Settings rows: remove XRP, add DOGE + ETH.
+            # v3.2: XRP-USDT disabled from live execution — signal fires but no order placed.
+            # Ensure XRP-USDT is in no_execute_pairs on existing deployments.
             if _existing:
                 import json as _nep_clr_j
                 try:
                     _nep_raw  = _existing.no_execute_pairs or '[]'
                     _nep_list = _nep_raw if isinstance(_nep_raw, list) else _nep_clr_j.loads(_nep_raw)
-                    if 'XRP-USDT' in _nep_list:
-                        _nep_list.remove('XRP-USDT')
-                        _changed = True
-                        logger.info("[APP] Migration v3.4: XRP-USDT removed from no_execute_pairs — live execution ENABLED")
-                    if 'DOGE-USDT' not in _nep_list:
-                        _nep_list.append('DOGE-USDT')
-                        _changed = True
-                        logger.info("[APP] Migration v3.4: DOGE-USDT added to no_execute_pairs — live execution disabled")
-                    if 'ETH-USDT' not in _nep_list:
-                        _nep_list.append('ETH-USDT')
-                        _changed = True
-                        logger.info("[APP] Migration v3.4: ETH-USDT added to no_execute_pairs — live execution disabled")
-                    if _changed:
+                    if 'XRP-USDT' not in _nep_list:
+                        _nep_list.append('XRP-USDT')
                         _existing.no_execute_pairs = _nep_clr_j.dumps(_nep_list)
+                        _changed = True
+                        logger.info("[APP] Migration: XRP-USDT added to no_execute_pairs — live execution disabled")
                 except Exception:
                     pass
             if _changed:
@@ -766,36 +710,15 @@ def create_app():
         records = DailyStats.query.filter(
             DailyStats.date >= cutoff
         ).order_by(DailyStats.date.desc()).all()
-
-        # Augment each daily record with Limitless fill counts from the signals table
-        result = []
-        for r in records:
-            row = r.to_dict()
-            try:
-                day_start = datetime.combine(r.date, datetime.min.time())
-                day_end   = datetime.combine(r.date, datetime.max.time())
-                # All live signals that day (have a real order_id, not shadow)
-                day_sigs = Signal.query.filter(
-                    Signal.candle_open_time >= day_start,
-                    Signal.candle_open_time <= day_end,
-                    Signal.mode == "live",
-                ).all()
-                ltl_total  = sum(1 for s in day_sigs if s.order_id and not str(s.order_id).startswith("shadow_"))
-                ltl_filled = sum(1 for s in day_sigs if s.limitless_fill == "FILLED")
-                row["limitless_total"]  = ltl_total
-                row["limitless_filled"] = ltl_filled
-            except Exception:
-                row["limitless_total"]  = None
-                row["limitless_filled"] = None
-            result.append(row)
-        return jsonify(result)
+        return jsonify([r.to_dict() for r in records])
 
     # ── Stats: per-pair ───────────────────────────────────────────────────────
     @app.route("/api/stats/pairs")
     def pair_stats():
-        from signal_engine import get_pair_stats, get_pair_config
-        live   = get_pair_stats()
-        config = get_pair_config()
+        from signal_engine import get_pair_stats, get_pair_config, get_direction_block_status
+        live      = get_pair_stats()
+        config    = get_pair_config()
+        dir_block = get_direction_block_status()
 
         result = {}
         for sym in ["BTC-USDT", "ETH-USDT", "SOL-USDT",
