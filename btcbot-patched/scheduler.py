@@ -66,22 +66,12 @@ def _models_ready():
         return False
 
 
-def job_generate_signal(force: bool = False):
+def job_generate_signal():
     """
     Fires at :00, :15, :30, :45 UTC — candle OPEN.
     Generates ONE signal, places order, saves to DB.
-
-    Args:
-      force: When True, bypasses the MR_extreme strategy gate (RSI/BB/ATR/
-        Volume thresholds) so a signal fires even if the market hasn't
-        produced a natural setup. ALL other safety logic still applies
-        unchanged — stop-loss check, pair cooldowns, family rotation,
-        duplicate-PENDING guard, balance checks, order execution. This
-        exists for manually testing the full pipeline (dashboard, Telegram,
-        order placement, DB writes) on demand. Triggered by the "Force
-        Signal" button in Settings → POST /api/force-signal.
     """
-    logger.info("[GENERATE] Job fired%s", " (FORCED)" if force else "")
+    logger.info("[GENERATE] Job fired")
     if not _models_ready():
         logger.info("[GENERATE] Models not ready yet — skipping this candle")
         return
@@ -300,11 +290,9 @@ def job_generate_signal(force: bool = False):
                 preferred_families=_preferred_families,
                 excluded_families=_excluded_families,
                 blocked_directions=_blocked_directions if _blocked_directions else None,
-                force=force,
             )
             if not sig:
-                logger.info("[GENERATE] No qualifying signal this candle%s",
-                             " (forced)" if force else "")
+                logger.info("[GENERATE] No qualifying signal this candle")
                 return
 
             candle_open  = sig['candle_open_time']

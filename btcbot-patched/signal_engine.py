@@ -56,11 +56,7 @@ SYMBOLS  = ["BTC-USDT", "ETH-USDT", "XRP-USDT",
             "SOL-USDT", "DOGE-USDT", "BNB-USDT"]
 
 # Active pairs for live signal generation
-# v6: all 6 pairs active. Family rotation removed — confirmed via scheduler-
-# simulated backtest to suppress good signals without improving WR (BTC/ETH
-# share family A; rotation forced skipping the better of the two each cycle).
-ACTIVE_PAIRS = ["BTC-USDT", "ETH-USDT", "XRP-USDT",
-                 "SOL-USDT", "DOGE-USDT", "BNB-USDT"]
+ACTIVE_PAIRS = ["BTC-USDT", "ETH-USDT", "XRP-USDT"]
 
 # ── Scheduler compatibility shim ─────────────────────────────────────────────
 # scheduler.py calls `from signal_engine import _models, SYMBOLS` and checks
@@ -74,43 +70,23 @@ PAIR_CONFIG = {
     "BTC-USDT":  {"tier": "A", "invert": False, "active": True},
     "ETH-USDT":  {"tier": "A", "invert": False, "active": True},
     "XRP-USDT":  {"tier": "C", "invert": False, "active": True},
-    "SOL-USDT":  {"tier": "B", "invert": False, "active": True},
-    "DOGE-USDT": {"tier": "B", "invert": False, "active": True},
-    "BNB-USDT":  {"tier": "C", "invert": False, "active": True},
+    "SOL-USDT":  {"tier": "B", "invert": False, "active": False},
+    "DOGE-USDT": {"tier": "B", "invert": False, "active": False},
+    "BNB-USDT":  {"tier": "C", "invert": False, "active": False},
 }
 
-# ── Strategy thresholds — PER PAIR (v6 / V3 tuning) ───────────────────────────
-# Scheduler-confirmed backtest (Jan-May 2026, OKX 15m, full scheduler
-# mechanics: pair cooldown + directional block + saturation floor, NO ATR
-# filter, NO family rotation):
-#   17.5 signals/day | 59.2% overall WR | 59.7% avg daily WR
-#   53% of days >=60% WR | max win streak 13 | max loss streak 6
-#
-# Per-pair live WR in that backtest:
-#   BTC 61.4%  ETH 61.0%  XRP 59.8%  BNB 57.6%  DOGE 56.5%  SOL 56.0%
-#
-# Chosen deliberately wider than the original BTC/ETH/XRP-only thresholds
-# (RSI<25/BB<5%, ~61.4% dWR @ 11.6 sig/day) to hit the 15-20 signal/day
-# target needed as a buffer against unfilled GTC orders. Going narrower
-# raises per-signal WR but undershoots signal volume; going wider (tested
-# up to ~20/day) drops WR below 59% — this is the validated middle point.
-#
-# Do not loosen further without re-running the scheduler-confirmed backtest
-# (raw per-signal backtests are NOT representative — cooldown/dirblock
-# interact with candidate pool size in ways that change realized WR).
-_PAIR_THRESHOLDS = {
-    "BTC-USDT":  {"rsi_long": 30.0, "rsi_short": 70.0, "bb_long": 0.10, "bb_short": 0.90, "vol_min": 1.0},
-    "ETH-USDT":  {"rsi_long": 30.0, "rsi_short": 70.0, "bb_long": 0.10, "bb_short": 0.90, "vol_min": 1.0},
-    "XRP-USDT":  {"rsi_long": 30.0, "rsi_short": 70.0, "bb_long": 0.10, "bb_short": 0.90, "vol_min": 1.0},
-    "SOL-USDT":  {"rsi_long": 25.0, "rsi_short": 75.0, "bb_long": 0.15, "bb_short": 0.85, "vol_min": 1.0},
-    "DOGE-USDT": {"rsi_long": 28.0, "rsi_short": 72.0, "bb_long": 0.12, "bb_short": 0.88, "vol_min": 1.0},
-    "BNB-USDT":  {"rsi_long": 28.0, "rsi_short": 72.0, "bb_long": 0.08, "bb_short": 0.92, "vol_min": 1.0},
-}
-
-# NOTE: ATR volatility kill-switch REMOVED in v6. Scheduler-confirmed
-# isolation test showed it was net-negative once family rotation was also
-# removed — it filtered out a meaningful share of *good* signals along with
-# bad ones at the 15m timeframe, costing both WR and signal volume.
+# ── Strategy thresholds ───────────────────────────────────────────────────────
+# These are the EXACT thresholds validated in the backtest.
+# Do NOT loosen these to generate more signals — the edge comes from the
+# extreme thresholds. More signals at weaker levels = lower WR.
+_RSI_LONG    = 25.0   # RSI14 must be BELOW this for LONG
+_RSI_SHORT   = 75.0   # RSI14 must be ABOVE this for SHORT
+_BBP_LONG    = 0.05   # BB%B must be BELOW this for LONG  (5% = near lower band)
+_BBP_SHORT   = 0.95   # BB%B must be ABOVE this for SHORT (95% = near upper band)
+_VOL_MIN     = 1.1    # Volume ratio must exceed this (participation filter)
+_ATR_LO_PCT  = 15     # Skip bottom 15th percentile ATR (dead market)
+_ATR_HI_PCT  = 90     # Skip top 90th percentile ATR (explosive/news)
+_ATR_WINDOW  = 50     # Lookback for ATR percentile calculation
 
 # ── System-level state ────────────────────────────────────────────────────────
 _dir_loss_streak:    dict = {'UP': 0, 'DOWN': 0}
@@ -227,43 +203,23 @@ def _compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # CORE SIGNAL GATE — MR_EXTREME_RSI_BB
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _mr_extreme_signal(symbol: str, df: pd.DataFrame, force: bool = False) -> dict | None:
+def _mr_extreme_signal(symbol: str, df: pd.DataFrame) -> dict | None:
     """
     Apply MR_extreme_rsi_bb gate to the LAST CONFIRMED CANDLE (iloc[-2]).
 
     Returns signal dict or None.
 
-    Gate (ALL conditions must be true simultaneously, per-pair thresholds
-    from _PAIR_THRESHOLDS — see module docstring for the scheduler-confirmed
-    backtest this was tuned against):
-      LONG:  RSI14 < rsi_long   AND  BB%B < bb_long   AND  Vol > vol_min
-      SHORT: RSI14 > rsi_short  AND  BB%B > bb_short  AND  Vol > vol_min
+    Gate (ALL conditions must be true simultaneously):
+      LONG:  RSI14 < 25   AND  BB%B < 5%  AND  Vol > 1.1×
+      SHORT: RSI14 > 75   AND  BB%B > 95% AND  Vol > 1.1×
 
-    No ATR volatility filter (removed in v6 — see _PAIR_THRESHOLDS comment).
-
-    Args:
-      force: When True, BYPASSES the RSI/BB/Volume gate entirely and
-        returns the best-effort directional read from the same indicators
-        on the last confirmed candle. This is NOT the backtested strategy —
-        it exists purely for manual "Force Signal" testing (dashboard wiring,
-        order execution, Telegram alerts, DB writes) when the market hasn't
-        produced a natural MR_extreme setup. Forced signals are tagged
-        signal_gate='mr_extreme_forced' and carry a low, fixed confidence
-        so they never get confused with a real signal in stats/backtests.
+    Volatility kill switch:
+      Skip when ATR% < 15th percentile (dead/drift) or
+                ATR% > 90th percentile (explosive/news breakout).
     """
     if df.empty or len(df) < 60:
         logger.debug("[%s] Not enough candles for signal (%d)", symbol, len(df))
         return None
-
-    thresh = _PAIR_THRESHOLDS.get(symbol)
-    if thresh is None:
-        logger.warning("[%s] No threshold config — skipping", symbol)
-        return None
-    rsi_long  = thresh['rsi_long']
-    rsi_short = thresh['rsi_short']
-    bb_long   = thresh['bb_long']
-    bb_short  = thresh['bb_short']
-    vol_min   = thresh['vol_min']
 
     df = _compute_indicators(df)
     df_clean = df.dropna(subset=['rsi_14', 'bb_pct', 'vol_ratio', 'atr_norm'])
@@ -279,30 +235,29 @@ def _mr_extreme_signal(symbol: str, df: pd.DataFrame, force: bool = False) -> di
     atr_norm  = float(row['atr_norm'])
     hour      = int(row.get('hour', 0))
 
-    if not force:
-        # ── Volume participation filter ──────────────────────────────────
-        if vol < vol_min:
-            logger.debug("[%s] Vol filter: vol=%.2f < min=%.1f", symbol, vol, vol_min)
+    # ── ATR volatility kill switch ─────────────────────────────────────────
+    atr_history = df_clean['atr_norm'].values
+    if len(atr_history) >= _ATR_WINDOW:
+        lo_cut = float(np.nanpercentile(atr_history[-_ATR_WINDOW:], _ATR_LO_PCT))
+        hi_cut = float(np.nanpercentile(atr_history[-_ATR_WINDOW:], _ATR_HI_PCT))
+        if atr_norm < lo_cut:
+            logger.debug("[%s] ATR kill: dead market (atr=%.4f < lo=%.4f)", symbol, atr_norm, lo_cut)
             return None
+        if atr_norm > hi_cut:
+            logger.debug("[%s] ATR kill: explosive market (atr=%.4f > hi=%.4f)", symbol, atr_norm, hi_cut)
+            return None
+
+    # ── Volume participation filter ────────────────────────────────────────
+    if vol < _VOL_MIN:
+        logger.debug("[%s] Vol filter: vol=%.2f < min=%.1f", symbol, vol, _VOL_MIN)
+        return None
 
     # ── Core gate ─────────────────────────────────────────────────────────
     direction = None
-    if rsi14 < rsi_long and bbp < bb_long:
+    if rsi14 < _RSI_LONG and bbp < _BBP_LONG:
         direction = 'UP'
-    elif rsi14 > rsi_short and bbp > bb_short:
+    elif rsi14 > _RSI_SHORT and bbp > _BBP_SHORT:
         direction = 'DOWN'
-
-    if direction is None and force:
-        # Best-effort directional read: side RSI sits closer to (below 50 =
-        # leaning oversold/UP, above 50 = leaning overbought/DOWN). This is
-        # arbitrary by design — forced signals are for wiring tests only.
-        direction = 'UP' if rsi14 <= 50 else 'DOWN'
-        logger.warning(
-            "[%s] FORCED signal — gate NOT met (RSI14=%.1f BBp=%.3f Vol=%.2f). "
-            "Using best-effort direction=%s. This bypasses the backtested "
-            "strategy and should only be used for manual testing.",
-            symbol, rsi14, bbp, vol, direction
-        )
 
     if direction is None:
         return None
@@ -310,25 +265,16 @@ def _mr_extreme_signal(symbol: str, df: pd.DataFrame, force: bool = False) -> di
     # ── Confidence computation ─────────────────────────────────────────────
     # Based on how extreme the indicators are — higher distance from threshold = more conviction.
     # Range: ~0.55 (just above threshold) to ~0.95 (maximum extreme)
-    if force and not (
-        (rsi14 < rsi_long and bbp < bb_long) or
-        (rsi14 > rsi_short and bbp > bb_short)
-    ):
-        # Gate wasn't actually met — this is a synthetic forced signal.
-        # Fixed, deliberately low confidence so it's visually/statistically
-        # distinguishable from a genuine MR_extreme signal everywhere
-        # downstream (dashboard, DB, stats).
-        confidence = 0.50
+    if direction == 'UP':
+        rsi_score = min(1.0, (_RSI_LONG  - rsi14) / _RSI_LONG)
+        bb_score  = min(1.0, (_BBP_LONG  - bbp)   / _BBP_LONG)
     else:
-        if direction == 'UP':
-            rsi_score = min(1.0, (rsi_long  - rsi14) / rsi_long)
-            bb_score  = min(1.0, (bb_long   - bbp)   / bb_long)
-        else:
-            rsi_score = min(1.0, (rsi14 - rsi_short) / (100 - rsi_short))
-            bb_score  = min(1.0, (bbp   - bb_short)  / (1.0 - bb_short))
-        vol_boost   = min(0.08, (vol - vol_min) * 0.04)
-        confidence  = 0.55 + 0.30 * (rsi_score + bb_score) / 2 + vol_boost
-        confidence  = float(min(0.97, max(0.55, confidence)))
+        rsi_score = min(1.0, (rsi14 - _RSI_SHORT) / (100 - _RSI_SHORT))
+        bb_score  = min(1.0, (bbp   - _BBP_SHORT) / (1.0 - _BBP_SHORT))
+
+    vol_boost   = min(0.08, (vol - _VOL_MIN) * 0.04)
+    confidence  = 0.55 + 0.30 * (rsi_score + bb_score) / 2 + vol_boost
+    confidence  = float(min(0.97, max(0.55, confidence)))
 
     # ── Tier (T1 = high-volume signal, T2 = standard) ─────────────────────
     tier = "T1" if vol > 1.5 else "T2"
@@ -348,13 +294,9 @@ def _mr_extreme_signal(symbol: str, df: pd.DataFrame, force: bool = False) -> di
     upper_wick   = float(row.get('upper_wick', 0))
     bull_market  = bool(row.get('bull_market', 0))
 
-    _gate_label = 'mr_extreme'
-    if force and confidence <= 0.50:
-        _gate_label = 'mr_extreme_forced'
-
     logger.info(
-        "[%s] SIGNAL %s | RSI14=%.1f BBp=%.3f Vol=%.2f ATR=%.4f conf=%.3f %s gate=%s",
-        symbol, direction, rsi14, bbp, vol, atr_norm, confidence, tier, _gate_label
+        "[%s] SIGNAL %s | RSI14=%.1f BBp=%.3f Vol=%.2f ATR=%.4f conf=%.3f %s",
+        symbol, direction, rsi14, bbp, vol, atr_norm, confidence, tier
     )
 
     return {
@@ -365,7 +307,7 @@ def _mr_extreme_signal(symbol: str, df: pd.DataFrame, force: bool = False) -> di
         'threshold':         0.55,
         'margin':            confidence - 0.55,
         'tier':              tier,
-        'signal_gate':       _gate_label,
+        'signal_gate':       'mr_extreme',
         'tail_wick':         lower_wick if direction == 'UP' else upper_wick,
         'tail_boost':        0.0,
         'tail_label':        'NONE',
@@ -452,16 +394,11 @@ def fetch_okx_candles(symbol: str, bar: str = "15m", limit: int = 300) -> pd.Dat
 # SINGLE-PAIR SIGNAL ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
 
-def get_signal_for_symbol(symbol: str, force: bool = False) -> dict | None:
+def get_signal_for_symbol(symbol: str) -> dict | None:
     """
     Fetch live OKX data and generate a signal for a single symbol.
     Returns signal dict or None.
     Called by pick_best_signal() for each active pair.
-
-    Args:
-      force: passed through to _mr_extreme_signal — bypasses the strict
-        MR_extreme gate for manual "Force Signal" testing. See
-        _mr_extreme_signal docstring for details.
     """
     if not PAIR_CONFIG.get(symbol, {}).get('active', False):
         logger.debug("[%s] Pair not active — skipping", symbol)
@@ -472,7 +409,7 @@ def get_signal_for_symbol(symbol: str, force: bool = False) -> dict | None:
         logger.warning("[%s] Insufficient data (%d candles)", symbol, len(df))
         return None
 
-    return _mr_extreme_signal(symbol, df, force=force)
+    return _mr_extreme_signal(symbol, df)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -485,7 +422,6 @@ def pick_best_signal(
     preferred_families: list = None,
     excluded_families: list = None,
     blocked_directions: dict = None,
-    force: bool = False,
 ) -> dict | None:
     """
     Evaluate all active pairs and return the single best signal.
@@ -496,11 +432,6 @@ def pick_best_signal(
         preferred_families: Not used for filtering — informational only.
         excluded_families:  Family strings to exclude (family rotation).
         blocked_directions: Dict of {direction: floor} for Rule 2 saturation.
-        force:             When True, bypasses the MR_extreme gate on every
-            active pair (see _mr_extreme_signal). Used by the manual
-            "Force Signal" debug endpoint. min_confidence is IGNORED when
-            force=True, since forced signals are intentionally low-confidence
-            (0.50) and would otherwise always be filtered out.
 
     Returns the highest-scoring qualifying signal dict, or None.
 
@@ -533,26 +464,23 @@ def pick_best_signal(
     candidates = []
     for sym in active_symbols:
         try:
-            sig = get_signal_for_symbol(sym, force=force)
+            sig = get_signal_for_symbol(sym)
             if sig:
                 sig['family'] = PAIR_FAMILY.get(sym, "A")
                 candidates.append(sig)
                 logger.info(
-                    "[%s] candidate %s conf=%.3f margin=%.3f family=%s gate=%s",
+                    "[%s] candidate %s conf=%.3f margin=%.3f family=%s",
                     sym, sig['direction'], sig['confidence'],
-                    sig['margin'], sig['family'], sig.get('signal_gate', 'mr_extreme')
+                    sig['margin'], sig['family']
                 )
         except Exception as e:
             logger.error("[%s] get_signal_for_symbol error: %s", sym, e)
 
     if not candidates:
-        logger.info("[ENGINE] No qualifying signals this candle%s",
-                     " (forced — even best-effort read failed, check OKX data)" if force else "")
+        logger.info("[ENGINE] No qualifying signals this candle")
         return None
 
     # ── Apply directional block ────────────────────────────────────────────
-    # Forced signals still respect the directional block — it's a risk
-    # control, not a strategy filter, so it stays active even when testing.
     if _currently_blocked_dirs:
         before     = len(candidates)
         candidates = [s for s in candidates if s['direction'] not in _currently_blocked_dirs]
@@ -565,17 +493,14 @@ def pick_best_signal(
             return None
 
     # ── Min confidence floor ───────────────────────────────────────────────
-    # Skipped when force=True: forced signals are pinned to confidence=0.50
-    # by design and would always fail a real min_confidence floor.
-    if min_confidence and not force:
+    if min_confidence:
         candidates = [s for s in candidates if s['confidence'] >= min_confidence]
         if not candidates:
             logger.info("[ENGINE] No signals above min_confidence=%.2f", min_confidence)
             return None
 
     # ── Rule 2: directional saturation ────────────────────────────────────
-    # Skipped when force=True for the same reason as min_confidence above.
-    _dir_blocked = {} if force else (blocked_directions or {})
+    _dir_blocked = blocked_directions or {}
     if _dir_blocked:
         filtered = []
         for s in candidates:
@@ -594,20 +519,20 @@ def pick_best_signal(
     def score(s):
         return s['margin'] + (0.04 if s['tier'] == 'T1' else 0.0)
 
-    # ── Family rotation — DISABLED (v6) ─────────────────────────────────────
-    # Scheduler-confirmed isolation backtest showed family rotation was net
-    # negative: BTC+ETH share family A, so rotation frequently forced the
-    # scheduler to skip the stronger of the two signals just because the
-    # prior candle's pick came from the same family. Removing it alone
-    # raised avg daily WR from 60.7% to 63.1% on BTC/ETH/XRP test data.
-    # excluded_families is accepted for backward compatibility with
-    # scheduler.py's call signature but is intentionally ignored.
-    if excluded_families:
-        logger.debug(
-            "[ENGINE] excluded_families=%s received but IGNORED — "
-            "family rotation disabled in v6 (confirmed net-negative)",
-            excluded_families
-        )
+    # ── Family rotation — hard exclusion ──────────────────────────────────
+    _excl_set = set(excluded_families) if excluded_families else set()
+    if _excl_set:
+        eligible = [s for s in candidates if s['family'] not in _excl_set]
+        if eligible:
+            best = max(eligible, key=score)
+            logger.info("[ENGINE] Best: %s %s conf=%.3f family=%s gate=%s",
+                        best['symbol'], best['direction'], best['confidence'],
+                        best['family'], best.get('signal_gate', 'mr_extreme'))
+            return best
+        else:
+            logger.info("[ENGINE] Family rotation: no signal outside %s — skipping candle",
+                        _excl_set)
+            return None
 
     best = max(candidates, key=score)
     logger.info("[ENGINE] Best: %s %s conf=%.3f family=%s gate=%s",

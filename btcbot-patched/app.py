@@ -277,6 +277,302 @@ def create_app():
     def health():
         return jsonify({"status": "ok", "time": datetime.utcnow().isoformat()})
 
+    # ── DB Admin: inspect, repair, and sync all tables ────────────────────────
+    @app.route("/api/db-admin", methods=["GET"])
+    def db_admin_status():
+        """
+        GET /api/db-admin
+        Returns a full diagnostic of the database:
+          - Which expected tables exist vs are missing
+          - Which expected columns exist vs are missing per table
+          - Row counts and basic health for each table
+          - Whether Settings and ShadowBalance seed rows exist
+        This is read-only — use POST /api/db-admin/repair to fix issues.
+        """
+        from sqlalchemy import inspect as sa_inspect, text
+        try:
+            inspector = sa_inspect(db.engine)
+            existing_tables = set(inspector.get_table_names())
+
+            # --- Expected schema definition ---
+            EXPECTED_SCHEMA = {
+                "signals": {
+                    "id", "created_at", "symbol", "candle_open_time", "candle_close_time",
+                    "signal_direction", "ml_confidence", "rsi_14", "macd_hist", "adx",
+                    "vol_ratio", "tier", "outcome", "open_price", "close_price", "mode",
+                    "order_id", "market_slug", "condition_id", "position_size",
+                    "contracts_bought", "contract_price", "telegram_sent", "limitless_fill",
+                    "best_entry_pct", "poly_order_id", "poly_fill",
+                },
+                "settings": {
+                    "id", "mode", "position_size", "use_martingale", "martingale_sequence",
+                    "martingale_step", "martingale_cap", "martingale_streak",
+                    "cooldown_remaining", "cooldown_loss_count", "cooldown_win_count",
+                    "use_cooldown", "stop_loss_balance", "use_family_rotation",
+                    "pair_loss_cooldowns", "dir_saturation_history", "use_limitless",
+                    "use_polymarket", "poly_position_size", "poly_max_price",
+                    "max_contract_price", "min_confidence", "no_execute_pairs",
+                    "cooldown_log", "updated_at",
+                },
+                "daily_stats": {
+                    "id", "date", "total_signals", "wins", "losses", "win_rate", "mode",
+                },
+                "shadow_balance": {
+                    "id", "balance", "total_profit_loss", "updated_at",
+                },
+            }
+
+            report = {}
+            all_ok = True
+
+            for table_name, expected_cols in EXPECTED_SCHEMA.items():
+                entry = {}
+                if table_name not in existing_tables:
+                    entry["exists"] = False
+                    entry["status"] = "MISSING_TABLE"
+                    entry["row_count"] = None
+                    entry["missing_columns"] = sorted(expected_cols)
+                    entry["extra_columns"] = []
+                    all_ok = False
+                else:
+                    entry["exists"] = True
+                    actual_cols = {col["name"] for col in inspector.get_columns(table_name)}
+                    missing = sorted(expected_cols - actual_cols)
+                    extra   = sorted(actual_cols - expected_cols)
+                    entry["missing_columns"] = missing
+                    entry["extra_columns"]   = extra
+
+                    # Row count
+                    try:
+                        with db.engine.connect() as _c:
+                            cnt = _c.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar()
+                        entry["row_count"] = cnt
+                    except Exception as e:
+                        entry["row_count"] = f"error: {e}"
+
+                    if missing:
+                        entry["status"] = "MISSING_COLUMNS"
+                        all_ok = False
+                    else:
+                        entry["status"] = "OK"
+
+                report[table_name] = entry
+
+            # Unexpected tables in DB
+            unexpected_tables = sorted(existing_tables - set(EXPECTED_SCHEMA.keys()))
+
+            # Seed row checks
+            seed_checks = {}
+            try:
+                seed_checks["settings_row_exists"]      = Settings.query.count() > 0
+                seed_checks["shadow_balance_row_exists"] = ShadowBalance.query.count() > 0
+            except Exception as e:
+                seed_checks["error"] = str(e)
+
+            return jsonify({
+                "overall_status":    "OK" if all_ok else "NEEDS_REPAIR",
+                "tables":            report,
+                "unexpected_tables": unexpected_tables,
+                "seed_rows":         seed_checks,
+                "repair_endpoint":   "POST /api/db-admin/repair",
+                "checked_at":        datetime.utcnow().isoformat(),
+            })
+        except Exception as e:
+            logger.error("[DB_ADMIN] Diagnostic error: %s", e)
+            return jsonify({"error": str(e), "overall_status": "ERROR"}), 500
+
+    @app.route("/api/db-admin/repair", methods=["POST"])
+    def db_admin_repair():
+        """
+        POST /api/db-admin/repair
+        Automatically repairs the database:
+          1. Creates any missing tables (using SQLAlchemy models)
+          2. Adds any missing columns with correct types and defaults
+          3. Seeds missing Settings and ShadowBalance rows
+          4. Returns a detailed log of every action taken
+        Safe to run multiple times — all operations are idempotent.
+        Does NOT drop or delete any existing tables or columns.
+        """
+        from sqlalchemy import inspect as sa_inspect, text
+        log    = []
+        errors = []
+
+        def _log(msg):
+            logger.info("[DB_REPAIR] %s", msg)
+            log.append(msg)
+
+        def _err(msg):
+            logger.error("[DB_REPAIR] %s", msg)
+            errors.append(msg)
+
+        is_pg = "postgresql" in str(app.config["SQLALCHEMY_DATABASE_URI"])
+
+        # ── Step 1: Create missing tables ─────────────────────────────────────
+        try:
+            db.create_all()
+            _log("db.create_all() completed — all model tables ensured")
+        except Exception as e:
+            _err(f"db.create_all() failed: {e}")
+
+        # ── Step 2: Column-level migrations ───────────────────────────────────
+        # Full list of every column that might be missing on older deployments.
+        COLUMN_MIGRATIONS = {
+            "signals": [
+                ("market_slug",    "VARCHAR(200)"),
+                ("condition_id",   "VARCHAR(100)"),
+                ("limitless_fill", "VARCHAR(10) DEFAULT 'NEUTRAL'"),
+                ("best_entry_pct", "REAL"),
+                ("poly_order_id",  "VARCHAR(120)"),
+                ("poly_fill",      "VARCHAR(10) DEFAULT 'NEUTRAL'"),
+                ("ml_confidence",  "REAL"),
+                ("rsi_14",         "REAL"),
+                ("macd_hist",      "REAL"),
+                ("adx",            "REAL"),
+                ("vol_ratio",      "REAL"),
+                ("tier",           "VARCHAR(10)"),
+                ("position_size",  "REAL"),
+                ("contracts_bought","REAL"),
+                ("contract_price", "REAL"),
+                ("telegram_sent",  "BOOLEAN DEFAULT FALSE"),
+            ],
+            "settings": [
+                ("martingale_step",        "REAL DEFAULT 0.5"),
+                ("martingale_cap",         "INTEGER DEFAULT 10"),
+                ("martingale_streak",      "INTEGER DEFAULT 0"),
+                ("cooldown_remaining",     "INTEGER DEFAULT 0"),
+                ("cooldown_loss_count",    "INTEGER DEFAULT 0"),
+                ("cooldown_win_count",     "INTEGER DEFAULT 0"),
+                ("martingale_sequence",    "VARCHAR(200) DEFAULT '1,1.5,2,3,4.5,6.7'"),
+                ("use_cooldown",           "BOOLEAN DEFAULT FALSE"),
+                ("stop_loss_balance",      "REAL"),
+                ("use_family_rotation",    "BOOLEAN DEFAULT FALSE"),
+                ("pair_loss_cooldowns",    "TEXT DEFAULT '{}'"),
+                ("dir_saturation_history", "TEXT DEFAULT '[]'"),
+                ("use_limitless",          "BOOLEAN DEFAULT TRUE"),
+                ("use_polymarket",         "BOOLEAN DEFAULT FALSE"),
+                ("poly_position_size",     "REAL DEFAULT 10.0"),
+                ("poly_max_price",         "REAL DEFAULT 0.5"),
+                ("max_contract_price",     "REAL DEFAULT 0.5"),
+                ("min_confidence",         "REAL DEFAULT 0.0"),
+                ("no_execute_pairs",       "TEXT DEFAULT '[]'"),
+                ("cooldown_log",           "TEXT DEFAULT '[]'"),
+                ("updated_at",             "TIMESTAMP"),
+            ],
+            "daily_stats": [
+                ("total_signals", "INTEGER DEFAULT 0"),
+                ("wins",          "INTEGER DEFAULT 0"),
+                ("losses",        "INTEGER DEFAULT 0"),
+                ("win_rate",      "REAL DEFAULT 0.0"),
+                ("mode",          "VARCHAR(10) DEFAULT 'shadow'"),
+            ],
+            "shadow_balance": [
+                ("total_profit_loss", "REAL DEFAULT 0.0"),
+                ("updated_at",        "TIMESTAMP"),
+            ],
+        }
+
+        inspector = sa_inspect(db.engine)
+        existing_tables = set(inspector.get_table_names())
+
+        for table_name, cols in COLUMN_MIGRATIONS.items():
+            if table_name not in existing_tables:
+                _log(f"Table '{table_name}' does not exist — skipping column migration (will be created by db.create_all)")
+                continue
+            actual_cols = {c["name"] for c in inspector.get_columns(table_name)}
+            for col_name, col_def in cols:
+                if col_name in actual_cols:
+                    continue  # already present
+                try:
+                    with db.engine.connect() as _c:
+                        if is_pg:
+                            _c.execute(text(
+                                f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {col_name} {col_def}"
+                            ))
+                        else:
+                            _c.execute(text(
+                                f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_def}"
+                            ))
+                        _c.commit()
+                    _log(f"Added column: {table_name}.{col_name} ({col_def})")
+                except Exception as e:
+                    em = str(e).lower()
+                    if "duplicate column" in em or "already exists" in em:
+                        _log(f"Column {table_name}.{col_name} already exists (race) — OK")
+                    else:
+                        _err(f"Failed to add {table_name}.{col_name}: {e}")
+
+        # ── Step 3: Fix limitless_fill / poly_fill type (DOUBLE → VARCHAR) ────
+        if is_pg:
+            for fix_col in ("limitless_fill", "poly_fill"):
+                try:
+                    with db.engine.connect() as _c:
+                        row = _c.execute(text(
+                            "SELECT data_type FROM information_schema.columns "
+                            "WHERE table_name='signals' AND column_name=:col"
+                        ), {"col": fix_col}).fetchone()
+                        if row and row[0] != "character varying":
+                            _c.execute(text(
+                                f"ALTER TABLE signals ALTER COLUMN {fix_col} "
+                                f"TYPE VARCHAR(10) USING "
+                                f"CASE WHEN {fix_col} IS NULL THEN 'NEUTRAL' ELSE 'NEUTRAL' END"
+                            ))
+                            _c.commit()
+                            _log(f"Type-fixed signals.{fix_col}: {row[0]} → VARCHAR(10)")
+                        elif row:
+                            _log(f"signals.{fix_col} type is already VARCHAR — OK")
+                except Exception as e:
+                    _err(f"Type-fix for signals.{fix_col}: {e}")
+
+        # ── Step 4: Seed missing rows ─────────────────────────────────────────
+        try:
+            if not Settings.query.first():
+                db.session.add(Settings(
+                    mode=os.environ.get("DEFAULT_MODE", "shadow"),
+                    position_size=float(os.environ.get("DEFAULT_POSITION_SIZE", "10")),
+                    min_confidence=0.0,
+                    no_execute_pairs='[]',
+                    cooldown_log='[]',
+                ))
+                db.session.commit()
+                _log("Seeded default Settings row")
+            else:
+                _log("Settings row already exists — OK")
+        except Exception as e:
+            _err(f"Settings seed failed: {e}")
+
+        try:
+            if not ShadowBalance.query.first():
+                db.session.add(ShadowBalance(balance=1000.0, total_profit_loss=0.0))
+                db.session.commit()
+                _log("Seeded default ShadowBalance row")
+            else:
+                _log("ShadowBalance row already exists — OK")
+        except Exception as e:
+            _err(f"ShadowBalance seed failed: {e}")
+
+        # ── Step 5: Final diagnostic snapshot ─────────────────────────────────
+        inspector2 = sa_inspect(db.engine)
+        final_tables = {}
+        for tbl in ["signals", "settings", "daily_stats", "shadow_balance"]:
+            if tbl in set(inspector2.get_table_names()):
+                try:
+                    with db.engine.connect() as _c:
+                        cnt = _c.execute(text(f"SELECT COUNT(*) FROM {tbl}")).scalar()
+                    final_tables[tbl] = {"exists": True, "row_count": cnt}
+                except Exception as e:
+                    final_tables[tbl] = {"exists": True, "row_count": f"error: {e}"}
+            else:
+                final_tables[tbl] = {"exists": False, "row_count": None}
+
+        status = "OK" if not errors else "COMPLETED_WITH_ERRORS"
+        return jsonify({
+            "status":       status,
+            "actions_taken": log,
+            "errors":        errors,
+            "final_tables":  final_tables,
+            "repaired_at":   datetime.utcnow().isoformat(),
+        })
+
     # ── Limitless orderbook proxy (avoids CORS from browser) ─────────────────
     @app.route("/api/orderbook")
     def limitless_orderbook():
@@ -979,17 +1275,9 @@ def create_app():
     @app.route("/api/trigger", methods=["POST"])
     def manual_trigger():
         """
-        Dashboard 'Force Signal Now' — runs the full job_generate_signal pipeline
-        with force=True, which bypasses the MR_extreme RSI/BB/Volume gate so a
-        signal fires even when the market hasn't produced a natural setup.
-        Evaluates, saves to DB, emits WebSocket, and places shadow/live order —
-        identical to the scheduler's normal :00/:15/:30/:45 UTC run, except the
-        strategy gate is skipped. All other safety logic (stop-loss check, pair
-        cooldowns, directional block, saturation floor) still applies unchanged.
-        Forced signals are tagged signal_gate='mr_extreme_forced' with a fixed
-        low confidence (0.50) so they're distinguishable from real signals in
-        stats/backtests. Use this to test the pipeline end-to-end on demand —
-        it is NOT a way to get more real trading signals.
+        Dashboard 'Force Signal Now' — runs the full job_generate_signal pipeline:
+        evaluates, saves to DB, emits WebSocket, and places shadow/live order.
+        This is identical to what the scheduler does at :00/:15/:30/:45 UTC.
         After this call the signal appears on the dashboard immediately.
         """
         try:
@@ -1002,7 +1290,7 @@ def create_app():
 
             def _run():
                 try:
-                    job_generate_signal(force=True)
+                    job_generate_signal()
                     result['ok'] = True
                 except Exception as _e:
                     result['ok']    = False
@@ -1021,16 +1309,13 @@ def create_app():
                 sig_data = latest.to_dict() if latest else None
                 return jsonify({
                     "success": True,
-                    "message": "Forced signal generated — dashboard updated "
-                                "(strategy gate bypassed, see signal_gate field)",
+                    "message": "Signal generation complete — dashboard updated",
                     "signal":  sig_data,
                 })
             elif 'error' in result:
                 return jsonify({"success": False, "message": result['error']}), 500
             else:
-                # Should be rare with force=True (data fetch failure, all
-                # pairs blocked by directional block, or in cooldown)
-                return jsonify({"success": True, "message": "Forced but still no signal — check pair cooldowns / directional block / OKX data", "signal": None})
+                return jsonify({"success": True, "message": "No qualifying signal this candle", "signal": None})
         except Exception as e:
             return jsonify({"success": False, "message": str(e)}), 500
 
