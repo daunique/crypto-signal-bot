@@ -66,22 +66,12 @@ def _models_ready():
         return False
 
 
-def job_generate_signal(force: bool = False):
+def job_generate_signal():
     """
     Fires at :00, :15, :30, :45 UTC — candle OPEN.
     Generates ONE signal, places order, saves to DB.
-
-    Args:
-      force: When True, bypasses the MR_extreme strategy gate (RSI/BB/ATR/
-        Volume thresholds) so a signal fires even if the market hasn't
-        produced a natural setup. ALL other safety logic still applies
-        unchanged — stop-loss check, pair cooldowns, family rotation,
-        duplicate-PENDING guard, balance checks, order execution. This
-        exists for manually testing the full pipeline (dashboard, Telegram,
-        order placement, DB writes) on demand. Triggered by the "Force
-        Signal" button in Settings → POST /api/force-signal.
     """
-    logger.info("[GENERATE] Job fired%s", " (FORCED)" if force else "")
+    logger.info("[GENERATE] Job fired")
     if not _models_ready():
         logger.info("[GENERATE] Models not ready yet — skipping this candle")
         return
@@ -267,9 +257,22 @@ def job_generate_signal(force: bool = False):
 
             # ── Rule 2: Directional Saturation Filter ────────────────────────
             # If the same direction has lost ≥3 times in the last 6 signals,
-            # raise the confidence floor for that direction to 0.67.
+            # raise the confidence floor for that direction.
             # This prevents the engine chasing a losing directional trend with
             # low-conviction signals.
+            #
+            # FIX (signal_engine v5 / RSI(2) swap): the old ML engine's
+            # confidence was a model probability that could exceed 0.67.
+            # The new engine's confidence is a fixed backtested win rate per
+            # pair/direction, which only ranges ~0.558-0.612 (see
+            # signal_engine._BACKTEST_WIN_RATE). A 0.67 floor is therefore
+            # unreachable by ANY signal under the new engine — once Rule 2
+            # tripped, that direction would be blocked permanently (in
+            # practice, until enough time passed for the losses to age out
+            # of the 6-event window on their own, making the "block" do
+            # nothing extra beyond what the window expiry already does).
+            # 0.60 sits near the top of the engine's real range, so it still
+            # meaningfully raises the bar without being unreachable.
             _blocked_directions = {}
             try:
                 import json as _json_r2
@@ -282,10 +285,10 @@ def job_generate_signal(force: bool = False):
                         if e.get('dir') == _chk_dir and e.get('result') == 'LOSS'
                     )
                     if _dir_losses >= 3:
-                        _blocked_directions[_chk_dir] = 0.67
+                        _blocked_directions[_chk_dir] = 0.60
                         logger.info(
                             '[GENERATE] Rule2 dir-saturation: %s has %d/6 losses → '
-                            'floor raised to 0.67',
+                            'floor raised to 0.60',
                             _chk_dir, _dir_losses
                         )
             except Exception as _r2e:
@@ -300,11 +303,9 @@ def job_generate_signal(force: bool = False):
                 preferred_families=_preferred_families,
                 excluded_families=_excluded_families,
                 blocked_directions=_blocked_directions if _blocked_directions else None,
-                force=force,
             )
             if not sig:
-                logger.info("[GENERATE] No qualifying signal this candle%s",
-                             " (forced)" if force else "")
+                logger.info("[GENERATE] No qualifying signal this candle")
                 return
 
             candle_open  = sig['candle_open_time']
