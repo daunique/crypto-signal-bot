@@ -145,7 +145,7 @@ class Settings(db.Model):
             'poly_max_price':         self.poly_max_price or 0.50,
             'max_contract_price':     self.max_contract_price,
             'min_confidence':         self.min_confidence,
-            'no_execute_pairs':       self.no_execute_pairs or '["XRP-USDT"]',
+            'no_execute_pairs':       self.no_execute_pairs or '[]',
             'cooldown_log':           self.cooldown_log or '[]',
         }
 

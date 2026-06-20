@@ -166,7 +166,7 @@ def create_app():
             ("poly_position_size",   "REAL DEFAULT 10.0"),
             ("poly_max_price",       "REAL DEFAULT 0.5"),
             # v3 additions
-            ("no_execute_pairs",     "TEXT DEFAULT '[\"XRP-USDT\"]'"),
+            ("no_execute_pairs",     "TEXT DEFAULT '[]'"),
             ("cooldown_log",         "TEXT DEFAULT '[]'"),
         ]:
             _add_column("settings", _col, _def)
@@ -202,6 +202,24 @@ def create_app():
                         _existing.no_execute_pairs = _nep_clr_j.dumps(_nep_list)
                         _changed = True
                         logger.info("[APP] Migration: XRP-USDT removed from no_execute_pairs — live execution enabled (invert=True)")
+                except Exception:
+                    pass
+            # v3.4: ETH-USDT and DOGE-USDT reactivated for live trading.
+            # All 6 pairs now execute live orders — no signal-only pairs remain.
+            if _existing:
+                import json as _nep_clr_j2
+                try:
+                    _nep_raw2  = _existing.no_execute_pairs or '[]'
+                    _nep_list2 = _nep_raw2 if isinstance(_nep_raw2, list) else _nep_clr_j2.loads(_nep_raw2)
+                    _removed = [p for p in ('ETH-USDT', 'DOGE-USDT') if p in _nep_list2]
+                    if _removed:
+                        _nep_list2 = [p for p in _nep_list2 if p not in ('ETH-USDT', 'DOGE-USDT')]
+                        _existing.no_execute_pairs = _nep_clr_j2.dumps(_nep_list2)
+                        _changed = True
+                        logger.info(
+                            "[APP] Migration: %s removed from no_execute_pairs — "
+                            "all 6 pairs now execute live orders.", _removed
+                        )
                 except Exception:
                     pass
             if _changed:
