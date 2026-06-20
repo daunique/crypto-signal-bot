@@ -110,24 +110,71 @@ def create_app():
 
         # signals table
         for _col, _def in [
-            ("market_slug",   "VARCHAR(200)"),
-            ("condition_id",  "VARCHAR(100)"),
-            ("limitless_fill","VARCHAR(10) DEFAULT 'NEUTRAL'"),
+            ("market_slug",    "VARCHAR(200)"),
+            ("condition_id",   "VARCHAR(100)"),
+            ("limitless_fill", "VARCHAR(10) DEFAULT 'NEUTRAL'"),
+            # v2 additions
+            ("best_entry_pct", "REAL"),
+            ("poly_order_id",  "VARCHAR(120)"),
+            ("poly_fill",      "VARCHAR(10) DEFAULT 'NEUTRAL'"),
+            # v3.6 additions — on-chain wallet tracking
+            ("maker_address",  "VARCHAR(64)"),
+            ("signer_address", "VARCHAR(64)"),
+            # v3.7 additions — unconditional fill tracking
+            ("tx_hash",           "VARCHAR(80)"),
+            ("fill_check_status", "VARCHAR(20)"),
+            ("fill_check_count",  "INTEGER DEFAULT 0"),
         ]:
             _add_column("signals", _col, _def)
 
+        # ── Type-fix: limitless_fill / poly_fill may have been created as
+        # DOUBLE PRECISION in older deployments. Coerce to VARCHAR(10).
+        # Safe no-op if already the correct type.
+        if _is_pg:
+            from sqlalchemy import text as _text
+            for _fix_col in ("limitless_fill", "poly_fill"):
+                try:
+                    with db.engine.connect() as _c:
+                        _row = _c.execute(_text(
+                            "SELECT data_type FROM information_schema.columns "
+                            "WHERE table_name='signals' AND column_name=:col"
+                        ), {"col": _fix_col}).fetchone()
+                        if _row and _row[0] != "character varying":
+                            _c.execute(_text(
+                                f"ALTER TABLE signals ALTER COLUMN {_fix_col} "
+                                f"TYPE VARCHAR(10) USING "
+                                f"CASE WHEN {_fix_col} IS NULL THEN 'NEUTRAL' "
+                                f"     ELSE 'NEUTRAL' END"
+                            ))
+                            _c.commit()
+                            logger.info(
+                                "[APP] Migration: fixed signals.%s type → VARCHAR(10)", _fix_col
+                            )
+                except Exception as _tfe:
+                    logger.warning("[APP] Type-fix migration (%s): %s", _fix_col, _tfe)
+
         # settings table
         for _col, _def in [
-            ("martingale_step",     "REAL DEFAULT 0.5"),
-            ("martingale_cap",      "INTEGER DEFAULT 10"),
-            ("martingale_streak",   "INTEGER DEFAULT 0"),
-            ("cooldown_remaining",  "INTEGER DEFAULT 0"),
-            ("cooldown_loss_count", "INTEGER DEFAULT 0"),
-            ("cooldown_win_count",  "INTEGER DEFAULT 0"),
-            ("martingale_sequence", "VARCHAR(200) DEFAULT '1,1.5,2,3,4.5,6.7'"),
-            ("use_cooldown",        "BOOLEAN DEFAULT FALSE"),
-            ("stop_loss_balance",   "REAL"),
-            ("use_family_rotation", "BOOLEAN DEFAULT FALSE"),
+            ("martingale_step",      "REAL DEFAULT 0.5"),
+            ("martingale_cap",       "INTEGER DEFAULT 10"),
+            ("martingale_streak",    "INTEGER DEFAULT 0"),
+            ("cooldown_remaining",   "INTEGER DEFAULT 0"),
+            ("cooldown_loss_count",  "INTEGER DEFAULT 0"),
+            ("cooldown_win_count",   "INTEGER DEFAULT 0"),
+            ("martingale_sequence",  "VARCHAR(200) DEFAULT '1,1.5,2,3,4.5,6.7'"),
+            ("use_cooldown",         "BOOLEAN DEFAULT FALSE"),
+            ("stop_loss_balance",    "REAL"),
+            ("use_family_rotation",  "BOOLEAN DEFAULT FALSE"),
+            # v2 additions
+            ("pair_loss_cooldowns",  "TEXT DEFAULT '{}'"),
+            ("dir_saturation_history", "TEXT DEFAULT '[]'"),
+            ("use_limitless",        "BOOLEAN DEFAULT TRUE"),
+            ("use_polymarket",       "BOOLEAN DEFAULT FALSE"),
+            ("poly_position_size",   "REAL DEFAULT 10.0"),
+            ("poly_max_price",       "REAL DEFAULT 0.5"),
+            # v3 additions
+            ("no_execute_pairs",     "TEXT DEFAULT '[\"XRP-USDT\"]'"),
+            ("cooldown_log",         "TEXT DEFAULT '[]'"),
         ]:
             _add_column("settings", _col, _def)
 
@@ -135,14 +182,56 @@ def create_app():
             db.session.add(Settings(
                 mode=os.environ.get("DEFAULT_MODE", "shadow"),
                 position_size=float(os.environ.get("DEFAULT_POSITION_SIZE", "10")),
+                min_confidence=0.0,
+                no_execute_pairs='["XRP-USDT"]',
+                cooldown_log='[]',
             ))
             db.session.commit()
             logger.info("[APP] Default settings seeded")
+        else:
+            # v3 migration: reset legacy min_confidence=0.58 to 0.0 (disabled)
+            # Per-pair thresholds in PAIR_CONFIG are now the sole confidence gates.
+            _existing = Settings.query.first()
+            _changed  = False
+            if _existing and _existing.min_confidence and _existing.min_confidence >= 0.55:
+                _existing.min_confidence = 0.0
+                _changed = True
+                logger.info("[APP] Migration: min_confidence reset to 0.0 (per-pair gates active)")
+            # v3.5: XRP-USDT disabled from live execution again — signal fires but no order placed.
+            # Ensure XRP-USDT is in no_execute_pairs on existing deployments.
+            if _existing:
+                import json as _nep_clr_j
+                try:
+                    _nep_raw  = _existing.no_execute_pairs or '[]'
+                    _nep_list = _nep_raw if isinstance(_nep_raw, list) else _nep_clr_j.loads(_nep_raw)
+                    if 'XRP-USDT' not in _nep_list:
+                        _nep_list.append('XRP-USDT')
+                        _existing.no_execute_pairs = _nep_clr_j.dumps(_nep_list)
+                        _changed = True
+                        logger.info("[APP] Migration: XRP-USDT added to no_execute_pairs — live execution disabled")
+                except Exception:
+                    pass
+            # v3.8: SOL-USDT re-enabled for live execution.
+            # Remove SOL-USDT from no_execute_pairs on existing deployments.
+            if _existing:
+                import json as _nep_sol_j
+                try:
+                    _nep_raw  = _existing.no_execute_pairs or '[]'
+                    _nep_list = _nep_raw if isinstance(_nep_raw, list) else _nep_sol_j.loads(_nep_raw)
+                    if 'SOL-USDT' in _nep_list:
+                        _nep_list.remove('SOL-USDT')
+                        _existing.no_execute_pairs = _nep_sol_j.dumps(_nep_list)
+                        _changed = True
+                        logger.info("[APP] Migration: SOL-USDT removed from no_execute_pairs — live execution re-enabled")
+                except Exception:
+                    pass
+            if _changed:
+                db.session.commit()
         if not ShadowBalance.query.first():
             db.session.add(ShadowBalance(balance=1000.0))
             db.session.commit()
 
-        # ── Startup wallet diagnostics ─────────────────────────────────────
+        # ── Startup wallet diagnostics — Limitless ────────────────────────
         try:
             from limitless_executor import get_maker_address, get_signer_address
             maker  = get_maker_address()
@@ -166,6 +255,38 @@ def create_app():
                 logger.info("[APP] Wallet OK — maker == signer == %s", maker)
         except Exception as _e:
             logger.warning("[APP] Wallet diagnostics failed: %s", _e)
+
+        # ── Startup wallet diagnostics — Polymarket ────────────────────────
+        try:
+            from polymarket_executor import validate_credentials, get_wallet_address as _poly_addr
+            _poly_creds  = validate_credentials()
+            _poly_wallet = _poly_creds.get("wallet_address")
+            _poly_auth   = _poly_creds.get("auth_level", "NONE")
+            _poly_l2     = _poly_creds.get("l2_ready", False)
+            _poly_pk     = _poly_creds.get("POLYMARKET_PRIVATE_KEY", False)
+
+            if not _poly_pk:
+                logger.warning(
+                    "[APP][POLY] POLYMARKET_PRIVATE_KEY not set — "
+                    "Polymarket execution disabled. Add key to Render env vars."
+                )
+            else:
+                logger.info(
+                    "[APP][POLY] Wallet: %s | Auth: %s | L2 ready: %s",
+                    _poly_wallet, _poly_auth, _poly_l2
+                )
+                if not _poly_l2:
+                    logger.warning(
+                        "[APP][POLY] L2 credentials missing (POLYMARKET_API_KEY / "
+                        "POLYMARKET_API_SECRET / POLYMARKET_API_PASSPHRASE not set). "
+                        "Using L1 auth — click 'Generate L2 API Key' in Settings to upgrade."
+                    )
+                else:
+                    logger.info(
+                        "[APP][POLY] L2 auth ready — HMAC signing active for all requests."
+                    )
+        except Exception as _pe:
+            logger.warning("[APP][POLY] Wallet diagnostics failed: %s", _pe)
 
     # ── Dashboard ─────────────────────────────────────────────────────────────
     @app.route("/")
@@ -225,58 +346,275 @@ def create_app():
             except Exception:
                 pass
 
-        # Fallback 3: live discover_slug from limitless_executor (shadow mode)
+        # Fallback 3: check in-memory slug cache for the pending signal's symbol
         if not slug:
             try:
-                from limitless_executor import _slug_cache, discover_slug
-                # Pick the symbol of the most recent signal if available
-                _last = Signal.query.order_by(Signal.candle_open_time.desc()).first()
-                if _last:
-                    slug = _slug_cache.get(_last.symbol) or ""
+                from limitless_executor import _slug_cache
+                _pending2 = Signal.query.filter(Signal.outcome=="PENDING").order_by(
+                    Signal.candle_open_time.desc()
+                ).first()
+                if _pending2:
+                    _sym_base = _pending2.symbol.replace("-USDT", "")
+                    slug = _slug_cache.get(_pending2.symbol) or _slug_cache.get(_sym_base) or ""
             except Exception:
                 pass
 
+        # Fallback 4: hit active/slugs endpoint with tight timeout to find 15-min market
         if not slug:
-            return jsonify({"error": "no market slug available", "pending": False}), 404
+            try:
+                _pending3 = Signal.query.filter(Signal.outcome=="PENDING").order_by(
+                    Signal.candle_open_time.desc()
+                ).first()
+                if _pending3:
+                    _sym_base = _pending3.symbol.replace("-USDT", "")
+                    _r = _req.get(
+                        "https://api.limitless.exchange/markets/active/slugs",
+                        timeout=4
+                    )
+                    if _r.ok:
+                        _markets = _r.json() if isinstance(_r.json(), list) else []
+                        _fifteen = [
+                            m for m in _markets
+                            if isinstance(m, dict)
+                            and m.get("ticker", "").upper() == _sym_base.upper()
+                            and "15" in m.get("slug", "").lower()
+                        ]
+                        if _fifteen:
+                            slug = _fifteen[0].get("slug", "")
+                            logger.info("[orderbook] Resolved slug via active/slugs: %s", slug)
+                            # Backfill DB
+                            _pending3.market_slug = slug
+                            db.session.commit()
+            except Exception as _fb4e:
+                logger.debug("[orderbook] active/slugs fallback: %s", _fb4e)
+
+        if not slug:
+            return jsonify({"error": "no market slug available", "pending": True,
+                            "hint": "15-min market not yet open on Limitless"}), 404
 
         try:
             url  = f"{API}/markets/{slug}/orderbook"
+            logger.info("[orderbook] Fetching: %s", url)
             resp = _req.get(url, timeout=8)
-            if not resp.ok:
-                return jsonify({"error": f"upstream {resp.status_code}", "slug": slug}), resp.status_code
-            ob   = resp.json() or {}
+            logger.info("[orderbook] Response: status=%d slug=%s", resp.status_code, slug)
 
-            # Normalise: extract the YES midpoint and expose it clearly
+            if not resp.ok:
+                # Log the actual error body from Limitless
+                try:
+                    err_body = resp.json()
+                except Exception:
+                    err_body = resp.text[:300]
+                logger.warning("[orderbook] Upstream %d for slug=%s body=%s",
+                               resp.status_code, slug, err_body)
+                return jsonify({
+                    "error":       f"upstream {resp.status_code}",
+                    "slug":        slug,
+                    "upstream_body": err_body,
+                    "upstream_status": resp.status_code,
+                }), resp.status_code
+
+            ob = resp.json() or {}
+            logger.info("[orderbook] Keys: %s | adjustedMidpoint=%s midpoint=%s lastTradePrice=%s",
+                        list(ob.keys()),
+                        ob.get("adjustedMidpoint"),
+                        ob.get("midpoint"),
+                        ob.get("lastTradePrice"))
+
+            # ── Parse orderbook entries ────────────────────────────────────
+            # Limitless returns one orderbook per token (YES or NO).
+            # The response may contain:
+            #   { bids, asks }                   → single-side (YES token)
+            #   { yes: {bids,asks}, no: {bids,asks} } → dual-side
+            # We need the BEST ASK (lowest ask) for each token because
+            # that is the actual execution price when buying.
+            # Best dip tracking must use the ask, not the midpoint.
+
+            def _parse_price(entry):
+                """Handle [price, size] arrays, plain floats, or dicts."""
+                if isinstance(entry, (list, tuple)) and len(entry) > 0:
+                    return float(entry[0])
+                if isinstance(entry, dict):
+                    return float(entry.get("price", entry.get("p", 0)) or 0)
+                try:
+                    return float(entry)
+                except Exception:
+                    return None
+
+            def _best_ask(asks_list):
+                """Lowest ask price from a list = cheapest entry for a buyer."""
+                prices = []
+                for e in (asks_list or []):
+                    p = _parse_price(e)
+                    if p is not None and p > 0:
+                        prices.append(p)
+                return min(prices) if prices else None
+
+            def _best_bid(bids_list):
+                """Highest bid price from a list."""
+                prices = []
+                for e in (bids_list or []):
+                    p = _parse_price(e)
+                    if p is not None and p > 0:
+                        prices.append(p)
+                return max(prices) if prices else None
+
+            # Handle both response shapes
+            yes_ob = ob.get("yes") or {}
+            no_ob  = ob.get("no")  or {}
+
+            if yes_ob and no_ob:
+                # Dual-side shape: { yes: {bids,asks}, no: {bids,asks} }
+                yes_best_ask = _best_ask(yes_ob.get("asks"))
+                yes_best_bid = _best_bid(yes_ob.get("bids"))
+                no_best_ask  = _best_ask(no_ob.get("asks"))
+                no_best_bid  = _best_bid(no_ob.get("bids"))
+            else:
+                # Single-side shape (YES token only) — NO ask = 1 - YES bid
+                yes_best_ask = _best_ask(ob.get("asks"))
+                yes_best_bid = _best_bid(ob.get("bids"))
+                # NO token price is complement: buying NO = paying (1 - YES_bid)
+                no_best_ask  = round(1.0 - yes_best_bid, 6) if yes_best_bid is not None else None
+                no_best_bid  = round(1.0 - yes_best_ask, 6) if yes_best_ask is not None else None
+
+            # Midpoint for reference only (NOT used for dip tracking)
             midpoint = (
                 ob.get("adjustedMidpoint")
                 or ob.get("midpoint")
                 or ob.get("lastTradePrice")
             )
-            # Best bid/ask for YES token
-            bids = ob.get("bids") or []
-            asks = ob.get("asks") or []
-            best_bid = float(bids[0][0]) if bids else None
-            best_ask = float(asks[0][0]) if asks else None
 
-            # Derive YES% from best available price source
-            yes_price = None
-            if midpoint is not None:
-                yes_price = float(midpoint)
-            elif best_ask is not None:
-                yes_price = best_ask
-            elif best_bid is not None:
-                yes_price = best_bid
+            logger.info(
+                "[orderbook] yes_ask=%s yes_bid=%s no_ask=%s no_bid=%s midpoint=%s slug=%s",
+                yes_best_ask, yes_best_bid, no_best_ask, no_best_bid, midpoint, slug
+            )
 
-            ob["_slug"]       = slug
-            ob["_yes_price"]  = yes_price          # 0.0–1.0
-            ob["_yes_pct"]    = round(yes_price * 100, 2) if yes_price is not None else None
-            ob["_source"]     = ("adjustedMidpoint" if ob.get("adjustedMidpoint") is not None
-                                  else "midpoint" if ob.get("midpoint") is not None
-                                  else "best_ask" if best_ask is not None else "best_bid")
+            # ── Expose clean fields for the frontend gauge ─────────────────
+            # _yes_ask_pct : cheapest price to BUY YES token right now (cents on $1)
+            # _no_ask_pct  : cheapest price to BUY NO  token right now (cents on $1)
+            # _midpoint_pct: market midpoint for reference
+            # _yes_pct     : kept for backward compat — same as _yes_ask_pct or midpoint fallback
+            #
+            # Gauge logic:
+            #   UP   signal → bot bought UP (YES) token → track _yes_ask_pct
+            #   DOWN signal → bot bought DOWN (NO)  token → track _no_ask_pct
+            #   "Best dip" = the lowest that ask price reached = cheapest limit entry seen
 
+            yes_ask_pct = round(yes_best_ask * 100, 2) if yes_best_ask is not None else None
+            no_ask_pct  = round(no_best_ask  * 100, 2) if no_best_ask  is not None else None
+            mid_pct     = round(float(midpoint) * 100, 2) if midpoint is not None else None
+
+            # _yes_pct: backward compat — prefer real ask, fall back to midpoint
+            legacy_yes_pct = yes_ask_pct if yes_ask_pct is not None else mid_pct
+
+            ob["_slug"]          = slug
+            ob["_yes_ask_pct"]   = yes_ask_pct
+            ob["_no_ask_pct"]    = no_ask_pct
+            ob["_yes_bid_pct"]   = round(yes_best_bid * 100, 2) if yes_best_bid is not None else None
+            ob["_no_bid_pct"]    = round(no_best_bid  * 100, 2) if no_best_bid  is not None else None
+            ob["_midpoint_pct"]  = mid_pct
+            ob["_yes_pct"]       = legacy_yes_pct   # kept for any older dashboard code
+            ob["_source"]        = "ask" if yes_best_ask is not None else (
+                                   "midpoint" if midpoint is not None else "none")
+
+            logger.info(
+                "[orderbook] yes_ask_pct=%s no_ask_pct=%s mid_pct=%s source=%s",
+                yes_ask_pct, no_ask_pct, mid_pct, ob["_source"]
+            )
             return jsonify(ob), 200
+
         except Exception as _e:
+            logger.error("[orderbook] Exception for slug=%s: %s", slug, _e, exc_info=True)
             return jsonify({"error": str(_e), "slug": slug}), 502
+
+    # ── Orderbook live debug — bypasses all caching, full raw dump ──────────
+    @app.route("/api/orderbook/live")
+    def orderbook_live_debug():
+        """
+        Direct Limitless orderbook call — no proxy logic, full raw response.
+        Shows exactly what Limitless returns so we can diagnose 502 issues.
+        Visit: /api/orderbook/live?slug=<slug>
+        Or without params to use the current pending signal's slug.
+        """
+        import requests as _req
+        API = "https://api.limitless.exchange"
+
+        slug = request.args.get("slug", "").strip()
+        if not slug:
+            pending = Signal.query.filter(Signal.outcome=="PENDING").order_by(
+                Signal.candle_open_time.desc()
+            ).first()
+            slug = (pending.market_slug or "") if pending else ""
+
+        if not slug:
+            return jsonify({"error": "no slug — pass ?slug= or have a pending signal"}), 400
+
+        result = {"slug": slug, "steps": []}
+
+        # Step 1: fetch orderbook
+        try:
+            url = f"{API}/markets/{slug}/orderbook"
+            result["steps"].append({"action": "GET", "url": url})
+            r = _req.get(url, timeout=10)
+            result["http_status"] = r.status_code
+            result["response_headers"] = dict(r.headers)
+            try:
+                result["response_body"] = r.json()
+            except Exception:
+                result["response_body_raw"] = r.text[:500]
+            result["steps"].append({"status": r.status_code, "ok": r.ok})
+        except Exception as e:
+            result["exception"] = str(e)
+            result["steps"].append({"exception": str(e)})
+
+        # Step 2: also fetch market details for comparison
+        try:
+            r2 = _req.get(f"{API}/markets/{slug}", timeout=6)
+            result["market_status"] = r2.status_code
+            if r2.ok:
+                mkt = r2.json()
+                result["market_keys"] = list(mkt.keys()) if isinstance(mkt, dict) else "(list)"
+                result["market_slug_field"] = mkt.get("slug") if isinstance(mkt, dict) else None
+                result["market_active"] = mkt.get("active") if isinstance(mkt, dict) else None
+                result["market_deadline"] = mkt.get("deadline") if isinstance(mkt, dict) else None
+        except Exception as e:
+            result["market_exception"] = str(e)
+
+        return jsonify(result), 200
+
+    # ── Orderbook debug endpoint ─────────────────────────────────────────────
+    @app.route("/api/orderbook/debug")
+    def orderbook_debug():
+        """Returns raw orderbook + parsed fields for the current PENDING signal."""
+        import requests as _req
+        API = "https://api.limitless.exchange"
+        pending = Signal.query.filter(Signal.outcome=="PENDING").order_by(
+            Signal.candle_open_time.desc()
+        ).first()
+        if not pending:
+            return jsonify({"error": "no pending signal"}), 404
+        slug = pending.market_slug or ""
+        if not slug:
+            return jsonify({"error": "no slug on pending signal", "signal_id": pending.id}), 404
+        try:
+            r = _req.get(f"{API}/markets/{slug}/orderbook", timeout=8)
+            raw = r.json() if r.ok else {}
+            return jsonify({
+                "signal_id":   pending.id,
+                "symbol":      pending.symbol,
+                "direction":   pending.signal_direction,
+                "slug":        slug,
+                "http_status": r.status_code,
+                "raw_keys":    list(raw.keys()),
+                "adjustedMidpoint": raw.get("adjustedMidpoint"),
+                "midpoint":    raw.get("midpoint"),
+                "lastTradePrice": raw.get("lastTradePrice"),
+                "tokenId":     raw.get("tokenId"),
+                "bids_count":  len(raw.get("bids") or []),
+                "asks_count":  len(raw.get("asks") or []),
+                "full_raw":    raw,
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 502
 
     # ── Limitless market info proxy ───────────────────────────────────────────
     @app.route("/api/market_info")
@@ -301,26 +639,28 @@ def create_app():
         direction    = pending.signal_direction if pending else None
         candle_close = pending.candle_close_time.isoformat() if (pending and pending.candle_close_time) else None
 
-        # If the DB row exists but is missing slug (shadow race condition), discover it now
+        # If the DB row exists but is missing slug, check the in-memory cache only.
+        # Never call discover_slug() here — it has blocking retries (up to 150s)
+        # which would stall the gevent request handler.
         if pending and not market_slug:
             try:
-                from limitless_executor import discover_slug, _slug_cache
-                market_slug = _slug_cache.get(symbol) or discover_slug(symbol)
+                from limitless_executor import _slug_cache
+                market_slug = _slug_cache.get(symbol) or None
                 if market_slug:
                     pending.market_slug = market_slug
                     db.session.commit()
-                    logger.info("[market_info] Backfilled market_slug=%s for signal id=%s", market_slug, pending.id)
+                    logger.info("[market_info] Backfilled market_slug=%s (cache) for signal id=%s", market_slug, pending.id)
             except Exception as _de:
-                logger.warning("[market_info] discover_slug fallback failed: %s", _de)
+                logger.warning("[market_info] slug cache lookup failed: %s", _de)
 
         if not market_slug:
             return jsonify({"pending": bool(pending), "slug_missing": True})
 
-        # Fetch full market JSON — extracts condition_id from multiple possible field names
+        # Fetch full market JSON with a tight timeout — this is a foreground request handler.
         data = {}
         try:
             url  = f"https://api.limitless.exchange/markets/{market_slug}"
-            resp = _req.get(url, timeout=6)
+            resp = _req.get(url, timeout=3)
             if resp.ok:
                 data = resp.json()
                 # Extract condition_id from whichever field the API returns
@@ -341,14 +681,15 @@ def create_app():
             logger.warning("[market_info] Market fetch failed: %s", _e)
 
         return jsonify({
-            "pending":      True,
-            "signal_id":    pending.id if pending else None,
-            "symbol":       symbol,
-            "direction":    direction,
-            "market_slug":  market_slug,
-            "condition_id": condition_id,
-            "candle_close": candle_close,
-            "market":       data,
+            "pending":         True,
+            "signal_id":       pending.id if pending else None,
+            "symbol":          symbol,
+            "direction":       direction,
+            "market_slug":     market_slug,
+            "condition_id":    condition_id,
+            "candle_close":    candle_close,
+            "best_entry_pct":  pending.best_entry_pct if pending else None,
+            "market":          data,
         })
 
     # ── Stats: today ──────────────────────────────────────────────────────────
@@ -426,10 +767,32 @@ def create_app():
         mode        = request.args.get("mode")
         date_filter = request.args.get("date_filter")  # today|yesterday|7d|30d
 
+        best_dip    = request.args.get("best_dip")   # 5|10|20|30|40 (≤ threshold)
+
         q = Signal.query
-        if symbol:  q = q.filter(Signal.symbol == symbol)
-        if outcome: q = q.filter(Signal.outcome == outcome)
-        if mode:    q = q.filter(Signal.mode == mode)
+        if symbol:   q = q.filter(Signal.symbol == symbol)
+        if outcome:  q = q.filter(Signal.outcome == outcome)
+        if mode:     q = q.filter(Signal.mode == mode)
+        if best_dip:
+            try:
+                # Exclusive ranges — each bucket is independent, no overlap:
+                # ≤5%  → 0–5       ≤10% → 5.1–10
+                # ≤20% → 10.1–20   ≤30% → 20.1–30   ≤40% → 30.1–40
+                _range_map = {
+                    "5":  (0,    5.0),
+                    "10": (5.0,  10.0),
+                    "20": (10.0, 20.0),
+                    "30": (20.0, 30.0),
+                    "40": (30.0, 40.0),
+                }
+                _lo, _hi = _range_map.get(str(best_dip), (0, float(best_dip)))
+                q = q.filter(
+                    Signal.best_entry_pct.isnot(None),
+                    Signal.best_entry_pct >  _lo,
+                    Signal.best_entry_pct <= _hi
+                )
+            except (ValueError, TypeError):
+                pass
 
         if date_filter:
             from datetime import timezone as _tz
@@ -455,6 +818,58 @@ def create_app():
             "pages":   pg.pages,
             "page":    page,
         })
+
+    @app.route("/api/signals/dip_stats")
+    def dip_stats():
+        """
+        Returns hit counts for each best_dip threshold across all resolved signals.
+        Used to show frequency analysis in the History filter UI.
+        """
+        from sqlalchemy import func as _func
+        thresholds = [5, 10, 20, 30, 40]
+        resolved = Signal.query.filter(
+            Signal.outcome.in_(["WIN", "LOSS"]),
+            Signal.best_entry_pct.isnot(None)
+        )
+        total_resolved = resolved.count()
+        total_with_dip = resolved.filter(Signal.best_entry_pct.isnot(None)).count()
+
+        # Exclusive ranges — each bucket contains only signals in that band
+        range_map = {
+            5:  (0,    5.0),
+            10: (5.0,  10.0),
+            20: (10.0, 20.0),
+            30: (20.0, 30.0),
+            40: (30.0, 40.0),
+        }
+        result = {"total_resolved": total_resolved, "thresholds": {}}
+        for t in thresholds:
+            lo, hi = range_map[t]
+            hits = resolved.filter(
+                Signal.best_entry_pct > lo,
+                Signal.best_entry_pct <= hi
+            ).count()
+            wins_at_t = Signal.query.filter(
+                Signal.outcome == "WIN",
+                Signal.best_entry_pct.isnot(None),
+                Signal.best_entry_pct > lo,
+                Signal.best_entry_pct <= hi
+            ).count()
+            losses_at_t = Signal.query.filter(
+                Signal.outcome == "LOSS",
+                Signal.best_entry_pct.isnot(None),
+                Signal.best_entry_pct > lo,
+                Signal.best_entry_pct <= hi
+            ).count()
+            result["thresholds"][str(t)] = {
+                "hits":      hits,
+                "wins":      wins_at_t,
+                "losses":    losses_at_t,
+                "range":     f"{lo}–{hi}%",
+                "win_rate":  round(wins_at_t / hits * 100, 1) if hits > 0 else None,
+                "hit_rate":  round(hits / total_resolved * 100, 1) if total_resolved > 0 else None,
+            }
+        return jsonify(result)
 
     @app.route("/api/signals/today")
     def signals_today():
@@ -512,6 +927,18 @@ def create_app():
             s.max_contract_price = min(float(data["max_contract_price"]), 0.50)
         if "min_confidence" in data:
             s.min_confidence = float(data["min_confidence"])
+        if "no_execute_pairs" in data:
+            import json as _nep_json
+            _nep = data["no_execute_pairs"]
+            if isinstance(_nep, list):
+                s.no_execute_pairs = _nep_json.dumps(_nep)
+            elif isinstance(_nep, str):
+                # Validate it's a valid JSON list
+                try:
+                    _nep_json.loads(_nep)
+                    s.no_execute_pairs = _nep
+                except Exception:
+                    pass
         if "use_cooldown" in data:
             s.use_cooldown = bool(data["use_cooldown"])
         if "stop_loss_balance" in data:
@@ -519,6 +946,14 @@ def create_app():
             s.stop_loss_balance = float(val) if val not in (None, "", 0) else None
         if "use_family_rotation" in data:
             s.use_family_rotation = bool(data["use_family_rotation"])
+        if "use_limitless" in data:
+            s.use_limitless       = bool(data["use_limitless"])
+        if "use_polymarket" in data:
+            s.use_polymarket      = bool(data["use_polymarket"])
+        if "poly_position_size" in data:
+            s.poly_position_size  = float(data["poly_position_size"])
+        if "poly_max_price" in data:
+            s.poly_max_price      = float(data["poly_max_price"])
 
         db.session.commit()
         try:
@@ -547,41 +982,89 @@ def create_app():
     @app.route("/api/trigger", methods=["POST"])
     def manual_trigger():
         """
-        Dashboard trigger — evaluates the current signal and returns it for display.
-        Does NOT place a live order. Orders are placed exclusively by the cron scheduler
-        (job_generate_signal) at :00/:15/:30/:45 UTC to avoid duplicate positions.
+        Dashboard 'Force Signal Now' — runs the full job_generate_signal pipeline:
+        evaluates, saves to DB, emits WebSocket, and places shadow/live order.
+        This is identical to what the scheduler does at :00/:15/:30/:45 UTC.
+        After this call the signal appears on the dashboard immediately.
         """
-        from signal_engine import pick_best_signal
-        from models import Settings
-        settings = Settings.query.first()
-        min_conf = settings.min_confidence if settings else 0.58
-        sig = pick_best_signal(min_confidence=min_conf)
-        if sig:
-            return jsonify({
-                "success": True,
-                "message": "Signal evaluated (order placed by scheduler only)",
-                "signal": {
-                    "symbol":     sig.get("symbol"),
-                    "direction":  sig.get("direction"),
-                    "confidence": sig.get("confidence"),
-                    "tier":       sig.get("tier"),
-                },
-            })
-        return jsonify({"success": True, "message": "No qualifying signal this candle", "signal": None})
+        try:
+            from scheduler import job_generate_signal
+            import threading
+            # Run in a thread so it doesn't block the HTTP response
+            # (signal generation takes 5-10s due to OKX candle fetches)
+            result = {}
+            done  = threading.Event()
 
-    # ── Best entry % recorder — called by gauge JS when signal resolves ────────
+            def _run():
+                try:
+                    job_generate_signal()
+                    result['ok'] = True
+                except Exception as _e:
+                    result['ok']    = False
+                    result['error'] = str(_e)
+                finally:
+                    done.set()
+
+            t = threading.Thread(target=_run, daemon=True)
+            t.start()
+            done.wait(timeout=30)  # wait up to 30s for the job to complete
+
+            if result.get('ok'):
+                # Fetch the most recent signal to return its details
+                from models import Signal as _Signal
+                latest = _Signal.query.order_by(_Signal.created_at.desc()).first()
+                sig_data = latest.to_dict() if latest else None
+                return jsonify({
+                    "success": True,
+                    "message": "Signal generation complete — dashboard updated",
+                    "signal":  sig_data,
+                })
+            elif 'error' in result:
+                return jsonify({"success": False, "message": result['error']}), 500
+            else:
+                return jsonify({"success": True, "message": "No qualifying signal this candle", "signal": None})
+        except Exception as e:
+            return jsonify({"success": False, "message": str(e)}), 500
+
+    # ── Test order — fires a real/shadow order and returns full result ─────────
+    @app.route("/api/polymarket/status", methods=["GET"])
+    def polymarket_status():
+        """
+        Returns credential status and auth level (L1/L2/NONE).
+        Called by the Settings page to show the credential indicator.
+        """
+        try:
+            from polymarket_executor import validate_credentials
+            creds = validate_credentials()
+            return jsonify({"success": True, "credentials": creds})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+
+    @app.route("/api/polymarket/derive-key", methods=["POST"])
+    def polymarket_derive_key():
+        """
+        One-time call to generate L2 API credentials from the private key.
+        Returns { api_key, api_secret, api_passphrase } — add these to
+        Render env vars as POLYMARKET_API_KEY / _SECRET / _PASSPHRASE.
+
+        Must have POLYMARKET_PRIVATE_KEY set first.
+        Can only be called in shadow or live mode (not unauthenticated).
+        """
+        try:
+            from polymarket_executor import derive_api_key
+            result = derive_api_key()
+            if result.get("success"):
+                logger.info("[APP] Polymarket L2 credentials derived successfully")
+            else:
+                logger.warning("[APP] Polymarket L2 derivation failed: %s",
+                               result.get("error"))
+            return jsonify(result)
+        except Exception as e:
+            logger.error("[APP] polymarket_derive_key error: %s", e, exc_info=True)
+            return jsonify({"success": False, "error": str(e)}), 500
+
     @app.route("/api/signals/<int:signal_id>/best_entry", methods=["POST"])
     def update_best_entry(signal_id):
-        """
-        Record the lowest signal-side % the Limitless gauge observed during a
-        signal's lifetime.  Called client-side when stopGauge() fires.
-
-        Body: { "best_entry_pct": 18.4 }   (the lowest % seen, 0-100 scale)
-
-        The target is ≤20% for both UP and DOWN:
-          UP  signal: YES% dips to ≤20% → best limit-buy entry
-          DOWN signal: NO%  dips to ≤20% (= YES% rises to ≥80%) → best entry
-        """
         data = request.get_json(silent=True) or {}
         pct  = data.get("best_entry_pct")
         if pct is None:
@@ -590,20 +1073,14 @@ def create_app():
             pct = float(pct)
         except (TypeError, ValueError):
             return jsonify({"error": "best_entry_pct must be a number"}), 400
-
         sig = Signal.query.get(signal_id)
         if not sig:
             return jsonify({"error": "signal not found"}), 404
-
-        # Only update if this is a new low (in case of multiple calls)
         if sig.best_entry_pct is None or pct < sig.best_entry_pct:
             sig.best_entry_pct = round(pct, 1)
             db.session.commit()
-            logger.info("[best_entry] Signal %s best_entry_pct=%.1f%%", signal_id, pct)
-
         return jsonify({"success": True, "signal_id": signal_id, "best_entry_pct": sig.best_entry_pct})
 
-    # ── Test order — fires a real/shadow order and returns full result ─────────
     @app.route("/api/resolve", methods=["POST"])
     def manual_resolve():
         from scheduler import job_resolve_outcomes
@@ -883,21 +1360,43 @@ def create_app():
     # ── Live prices ───────────────────────────────────────────────────────────
     @app.route("/api/prices")
     def live_prices():
-        from signal_engine import fetch_okx_candles, SYMBOLS
+        import requests as _req
+        from signal_engine import SYMBOLS
+        OKX = "https://www.okx.com"
         prices = {}
-        for sym in SYMBOLS:
+
+        def _fetch_one(sym):
             try:
-                df = fetch_okx_candles(sym, limit=2)
-                if not df.empty and len(df) >= 2:
-                    prices[sym] = {
-                        "price":      float(df.iloc[-1]["close"]),
-                        "change_pct": round(
-                            (df.iloc[-1]["close"] - df.iloc[-2]["close"])
-                            / df.iloc[-2]["close"] * 100, 2
-                        ),
-                    }
+                r = _req.get(
+                    f"{OKX}/api/v5/market/candles",
+                    params={"instId": sym, "bar": "1m", "limit": "2"},
+                    timeout=4,
+                )
+                if not r.ok:
+                    return
+                rows = r.json().get("data", [])
+                if len(rows) < 2:
+                    return
+                # OKX row: [ts, open, high, low, close, vol, ...]
+                close_now  = float(rows[0][4])
+                close_prev = float(rows[1][4])
+                prices[sym] = {
+                    "price":      close_now,
+                    "change_pct": round((close_now - close_prev) / close_prev * 100, 2),
+                }
             except Exception:
                 pass
+
+        # Run all fetches concurrently via gevent greenlets
+        try:
+            import gevent
+            jobs = [gevent.spawn(_fetch_one, sym) for sym in SYMBOLS]
+            gevent.joinall(jobs, timeout=5)
+        except Exception:
+            # Fallback: sequential if gevent unavailable
+            for sym in SYMBOLS:
+                _fetch_one(sym)
+
         return jsonify(prices)
 
     # ── WebSocket ─────────────────────────────────────────────────────────────
