@@ -979,9 +979,17 @@ def create_app():
     @app.route("/api/trigger", methods=["POST"])
     def manual_trigger():
         """
-        Dashboard 'Force Signal Now' — runs the full job_generate_signal pipeline:
-        evaluates, saves to DB, emits WebSocket, and places shadow/live order.
-        This is identical to what the scheduler does at :00/:15/:30/:45 UTC.
+        Dashboard 'Force Signal Now' — runs the full job_generate_signal pipeline
+        with force=True, which bypasses the MR_extreme RSI/BB/Volume gate so a
+        signal fires even when the market hasn't produced a natural setup.
+        Evaluates, saves to DB, emits WebSocket, and places shadow/live order —
+        identical to the scheduler's normal :00/:15/:30/:45 UTC run, except the
+        strategy gate is skipped. All other safety logic (stop-loss check, pair
+        cooldowns, directional block, saturation floor) still applies unchanged.
+        Forced signals are tagged signal_gate='mr_extreme_forced' with a fixed
+        low confidence (0.50) so they're distinguishable from real signals in
+        stats/backtests. Use this to test the pipeline end-to-end on demand —
+        it is NOT a way to get more real trading signals.
         After this call the signal appears on the dashboard immediately.
         """
         try:
@@ -994,7 +1002,7 @@ def create_app():
 
             def _run():
                 try:
-                    job_generate_signal()
+                    job_generate_signal(force=True)
                     result['ok'] = True
                 except Exception as _e:
                     result['ok']    = False
@@ -1013,13 +1021,16 @@ def create_app():
                 sig_data = latest.to_dict() if latest else None
                 return jsonify({
                     "success": True,
-                    "message": "Signal generation complete — dashboard updated",
+                    "message": "Forced signal generated — dashboard updated "
+                                "(strategy gate bypassed, see signal_gate field)",
                     "signal":  sig_data,
                 })
             elif 'error' in result:
                 return jsonify({"success": False, "message": result['error']}), 500
             else:
-                return jsonify({"success": True, "message": "No qualifying signal this candle", "signal": None})
+                # Should be rare with force=True (data fetch failure, all
+                # pairs blocked by directional block, or in cooldown)
+                return jsonify({"success": True, "message": "Forced but still no signal — check pair cooldowns / directional block / OKX data", "signal": None})
         except Exception as e:
             return jsonify({"success": False, "message": str(e)}), 500
 
