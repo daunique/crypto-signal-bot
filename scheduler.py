@@ -42,14 +42,9 @@ from datetime import datetime, timezone, timedelta, date
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
 
 logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler(timezone="UTC")
-
-# Throttle for the early fill-check inside job_track_best_dip (runs every 3s,
-# but we only want to hit the Limitless fill-status API every ~10s).
-_last_early_fill_check_ts = 0.0
 
 
 def _ctx():
@@ -177,132 +172,91 @@ def job_generate_signal():
                 except Exception as _sle:
                     logger.warning('[GENERATE] Stop-loss check error: %s — proceeding', _sle)
 
-
-            # ── Per-pair loss cooldown ───────────────────────────────────────────
-            _pair_cooldown_excludes = []
+            # ── SOL-USDT 2-hour cooldown ────────────────────────────────────────
+            # After any SOL signal fires, suppress SOL from the candidate pool
+            # for 8 candles (2 hours). SOL is only re-eligible if 2 hours have
+            # passed since the last SOL signal AND it qualifies at that time.
+            _sol_blocked = False
             try:
-                import json as _json
-                _pcd_raw  = getattr(settings, 'pair_loss_cooldowns', '{}') or '{}'
-                # Guard: SQLAlchemy may return a dict if psycopg2 auto-parses TEXT as JSON
-                _pcd      = _pcd_raw if isinstance(_pcd_raw, dict) else _json.loads(_pcd_raw)
-                _pcd_next = {}
-                for _pair, _pcd_state in _pcd.items():
-                    _rem = int(_pcd_state.get('candles_remaining', 0))
-                    if _rem > 0:
-                        _pair_cooldown_excludes.append(_pair)
-                        _pcd_next[_pair] = {'candles_remaining': _rem - 1, 'tier': _pcd_state.get('tier', 'T2')}
-                        logger.info('[GENERATE] Pair cooldown: %s suppressed (%d candle(s) left)', _pair, _rem)
-                settings.pair_loss_cooldowns = _json.dumps(_pcd_next)
-                db.session.commit()
-            except Exception as _pcde:
-                logger.warning('[GENERATE] Pair cooldown read error: %s', _pcde)
-                _pair_cooldown_excludes = []
+                _last_sol = Signal.query.filter(
+                    Signal.symbol == "SOL-USDT"
+                ).order_by(Signal.candle_open_time.desc()).first()
+                if _last_sol:
+                    _now_utc   = datetime.now(timezone.utc).replace(tzinfo=None)
+                    _sol_age   = _now_utc - _last_sol.candle_open_time
+                    if _sol_age < timedelta(hours=2):
+                        _sol_blocked = True
+                        _sol_mins_left = int((timedelta(hours=2) - _sol_age).total_seconds() / 60)
+                        logger.info(
+                            f"[GENERATE] SOL-USDT on 2-hour cooldown — "
+                            f"{_sol_mins_left}m remaining since last signal"
+                        )
+            except Exception as _se:
+                logger.warning(f"[GENERATE] SOL cooldown check error: {_se}")
 
             # ── Pair family rotation ──────────────────────────────────────────
             # Family groupings (user-defined):
             #   Family A: BTC-USDT + ETH-USDT
             #   Family B: DOGE-USDT + SOL-USDT
             #   Family C: XRP-USDT + BNB-USDT
-            # Family rotation is always active — rotates A→B→C→A.
-            # Falls through (skips candle) if no signal qualifies outside excluded family.
+            # When use_family_rotation is ON: after a signal fires from one family,
+            # the next signal must come from a different family (rotates A→B→C→A).
+            # Falls through to all families if preferred ones have no qualifying signal.
             _preferred_families = None
             _FAMILY_MAP = {
                 "BTC-USDT":  "A", "ETH-USDT":  "A",
                 "DOGE-USDT": "B", "SOL-USDT":  "B",
                 "XRP-USDT":  "C", "BNB-USDT":  "C",
             }
-            # Family rotation is ALWAYS ON — no toggle needed.
-            # After a signal fires from a family, the next candle must come
-            # from a different family. Prevents consecutive BTC/ETH spam.
-            # Families: A = BTC+ETH | B = DOGE+SOL | C = XRP+BNB
-            _excluded_family = None
-            try:
-                # Look at last signal overall (including PENDING — covers the
-                # 15-min window while the current signal is waiting to resolve).
-                _last_resolved = Signal.query.filter(
-                    Signal.outcome.in_(['WIN', 'LOSS', 'UNKNOWN'])
-                ).order_by(Signal.candle_open_time.desc()).first()
+            _use_fam_rotation = bool(getattr(settings, 'use_family_rotation', False))
+            _excluded_family  = None   # hard-excluded family this candle
+            if _use_fam_rotation:
+                try:
+                    # Look at the last RESOLVED signal (WIN/LOSS/UNKNOWN) to determine
+                    # which family just fired. Ignoring PENDING avoids re-reading the
+                    # same signal while it's waiting to resolve and always blocking A.
+                    _last_resolved = Signal.query.filter(
+                        Signal.outcome.in_(['WIN', 'LOSS', 'UNKNOWN'])
+                    ).order_by(Signal.candle_open_time.desc()).first()
 
-                _last_any = Signal.query.order_by(
-                    Signal.candle_open_time.desc()
-                ).first()
+                    # Also check last signal overall (including PENDING) — if it's
+                    # from the same family as last resolved, use it too (covers live
+                    # mode where a signal fires and sits PENDING for 15 min).
+                    _last_any = Signal.query.order_by(
+                        Signal.candle_open_time.desc()
+                    ).first()
 
-                # Use the more recent of the two
-                _ref_sig = None
-                if _last_any and _last_resolved:
-                    _ref_sig = _last_any if (
-                        _last_any.candle_open_time >= _last_resolved.candle_open_time
-                    ) else _last_resolved
-                else:
-                    _ref_sig = _last_any or _last_resolved
+                    # Use the more recent of the two
+                    _ref_sig = None
+                    if _last_any and _last_resolved:
+                        _ref_sig = _last_any if (
+                            _last_any.candle_open_time >= _last_resolved.candle_open_time
+                        ) else _last_resolved
+                    else:
+                        _ref_sig = _last_any or _last_resolved
 
-                if _ref_sig:
-                    _excl = _FAMILY_MAP.get(_ref_sig.symbol)
-                    _excluded_families  = [_excl] if _excl else None
-                    _preferred_families = [f for f in ['A', 'B', 'C'] if f != _excl]
-                    logger.info(
-                        '[GENERATE] Family rotation | last=%s family=%s → '
-                        'excluding family %s | eligible=%s',
-                        _ref_sig.symbol, _excl,
-                        _excluded_families, _preferred_families
-                    )
-                else:
-                    _excluded_families  = None
-                    _preferred_families = None
-                    logger.info('[GENERATE] Family rotation | no previous signal — all families eligible')
-            except Exception as _fe:
-                logger.warning('[GENERATE] Family rotation check error: %s — allowing all families', _fe)
-                _excluded_families  = None
-                _preferred_families = None
-
-            # ── Rule 2: Directional Saturation Filter ────────────────────────
-            # If the same direction has lost ≥3 times in the last 6 signals,
-            # raise the confidence floor for that direction.
-            # This prevents the engine chasing a losing directional trend with
-            # low-conviction signals.
-            #
-            # FIX (signal_engine v5 / RSI(2) swap): the old ML engine's
-            # confidence was a model probability that could exceed 0.67.
-            # The new engine's confidence is a fixed backtested win rate per
-            # pair/direction, which only ranges ~0.558-0.612 (see
-            # signal_engine._BACKTEST_WIN_RATE). A 0.67 floor is therefore
-            # unreachable by ANY signal under the new engine — once Rule 2
-            # tripped, that direction would be blocked permanently (in
-            # practice, until enough time passed for the losses to age out
-            # of the 6-event window on their own, making the "block" do
-            # nothing extra beyond what the window expiry already does).
-            # 0.60 sits near the top of the engine's real range, so it still
-            # meaningfully raises the bar without being unreachable.
-            _blocked_directions = {}
-            try:
-                import json as _json_r2
-                _sat_raw = getattr(settings, 'dir_saturation_history', '[]') or '[]'
-                _sat_history = _sat_raw if isinstance(_sat_raw, list) else _json_r2.loads(_sat_raw)
-                _window = _sat_history[-6:]  # last 6 signals
-                for _chk_dir in ('UP', 'DOWN'):
-                    _dir_losses = sum(
-                        1 for e in _window
-                        if e.get('dir') == _chk_dir and e.get('result') == 'LOSS'
-                    )
-                    if _dir_losses >= 3:
-                        _blocked_directions[_chk_dir] = 0.60
+                    if _ref_sig:
+                        _excluded_family  = _FAMILY_MAP.get(_ref_sig.symbol)
+                        _preferred_families = [f for f in ['A','B','C'] if f != _excluded_family]
                         logger.info(
-                            '[GENERATE] Rule2 dir-saturation: %s has %d/6 losses → '
-                            'floor raised to 0.60',
-                            _chk_dir, _dir_losses
+                            '[GENERATE] Family rotation ON | last signal=%s family=%s — '
+                            'EXCLUDING family %s, eligible families=%s',
+                            _ref_sig.symbol, _excluded_family,
+                            _excluded_family, _preferred_families
                         )
-            except Exception as _r2e:
-                logger.warning('[GENERATE] Rule2 saturation check error: %s', _r2e)
-                _blocked_directions = {}
+                    else:
+                        logger.info('[GENERATE] Family rotation ON | no previous signal — all families eligible')
+                except Exception as _fe:
+                    logger.warning('[GENERATE] Family rotation check error: %s', _fe)
+            else:
+                logger.debug('[GENERATE] Family rotation OFF — all families eligible')
 
             # Get signal from engine first — it computes the correct candle boundary
-            _exclude_list = _pair_cooldown_excludes or None
             sig = pick_best_signal(
                 min_confidence=min_conf,
-                exclude=_exclude_list,
+                exclude=["SOL-USDT"] if _sol_blocked else None,
                 preferred_families=_preferred_families,
-                excluded_families=_excluded_families,
-                blocked_directions=_blocked_directions if _blocked_directions else None,
+                excluded_family=_excluded_family,
             )
             if not sig:
                 logger.info("[GENERATE] No qualifying signal this candle")
@@ -344,7 +298,7 @@ def job_generate_signal():
             # after the candle boundary without wasting the full 15-min window.
             import time as _time
             ORDER_MAX_ATTEMPTS = 24
-            ORDER_RETRY_DELAY  = 2    # seconds between order retries (market already found)
+            ORDER_RETRY_DELAY  = 5    # seconds between retries
             order = {"success": False, "error": "not attempted"}
 
             # ── USDC balance check before placing order ─────────────────────
@@ -384,173 +338,88 @@ def job_generate_signal():
             else:
                 _trade_direction = sig['direction']
 
-            # ── Platform toggles — read from settings ────────────────────────
-            _ltl_val        = getattr(settings, 'use_limitless',  None)
-            _poly_val       = getattr(settings, 'use_polymarket', None)
-            _use_limitless  = bool(_ltl_val  if _ltl_val  is not None else True)
-            _use_polymarket = bool(_poly_val if _poly_val is not None else False)
-            _poly_size      = float(getattr(settings, 'poly_position_size', 10.0) or 10.0)
-            _poly_max_price = float(getattr(settings, 'poly_max_price', 0.50) or 0.50)
+            for _attempt in range(1, ORDER_MAX_ATTEMPTS + 1):
+                order = execute_order(sig['symbol'], _trade_direction, mode,
+                                      position_size, max_cp)
+                if order.get("success"):
+                    # Order placed — do NOT retry regardless of remaining attempts
+                    break
 
-            # At least one platform must be active — fall back to Limitless
-            if not _use_limitless and not _use_polymarket:
-                logger.warning("[GENERATE] No platform enabled — defaulting to Limitless")
-                _use_limitless = True
-
-            # ── Parallel execution: both platforms run in threads ─────────────
-            # Polymarket: market is ALWAYS available at t=0 of new candle → fires immediately.
-            # Limitless:  new market appears within ~60s   → discovery loop runs in thread.
-            # Both threads run concurrently so neither waits on the other.
-            # Results are joined before saving the signal to DB.
-            import threading as _threading
-
-            order          = {"success": False, "error": "Limitless disabled"}
-            order_id       = None
-            contracts      = 0
-            contract_price = max_cp
-            _poly_order    = {"success": False, "error": "Polymarket disabled"}
-            _poly_order_id = None
-
-            # ── No-execute pairs: signal fires normally but NO live order ────
-            # XRP-USDT (and any other pairs in this list) will generate signals,
-            # appear on the dashboard, and track dip/resolve outcomes —
-            # but the actual Limitless / Polymarket orders are skipped.
-            _no_execute = []
-            try:
-                import json as _nep_j
-                _nep_raw = getattr(settings, 'no_execute_pairs', '[]') or '[]'
-                _no_execute = _nep_raw if isinstance(_nep_raw, list) else _nep_j.loads(_nep_raw)
-            except Exception as _nepe:
-                logger.warning('[GENERATE] no_execute_pairs read error: %s', _nepe)
-                _no_execute = []
-
-            _is_no_execute_pair = sig['symbol'] in _no_execute
-            if _is_no_execute_pair:
-                logger.info(
-                    '[GENERATE] %s is in no_execute_pairs — signal fires but NO live order will be placed.',
-                    sig['symbol']
+                err_body = str(order.get("api_response", "") or order.get("error", ""))
+                logger.warning(
+                    f"[GENERATE] Order attempt {_attempt}/{ORDER_MAX_ATTEMPTS} FAILED | "
+                    f"{sig['symbol']} | error={order.get('error','unknown')}"
                 )
 
-            def _run_limitless():
-                nonlocal order, order_id, contracts, contract_price
-                for _attempt in range(1, ORDER_MAX_ATTEMPTS + 1):
-                    _result = execute_order(sig['symbol'], _trade_direction, mode,
-                                            position_size, max_cp)
-                    if _result.get("success"):
-                        order          = _result
-                        contracts      = _result.get("contracts", 0)
-                        contract_price = _result.get("price_per_contract", max_cp)
-                        order_id       = _result.get("order_id")
-                        logger.info(
-                            f"[GENERATE][LTL] Order ✓ | {sig['symbol']} {_trade_direction} "
-                            f"${position_size} | {contracts} contracts @ ${contract_price} "
-                            f"id={order_id}"
-                        )
-                        return
-                    _err_body = str(_result.get("api_response", "") or _result.get("error", ""))
-                    logger.warning(
-                        f"[GENERATE][LTL] Attempt {_attempt}/{ORDER_MAX_ATTEMPTS} FAILED | "
-                        f"{sig['symbol']} | error={_result.get('error','unknown')}"
+                # Insufficient collateral is a permanent failure — retrying won't help.
+                # Reset martingale streak to 0 so the next trade uses base stake.
+                if "insufficient collateral" in err_body.lower():
+                    logger.error(
+                        f"[GENERATE] Insufficient collateral — aborting retries. "
+                        f"Martingale streak reset to 0. Top up your USDC balance."
                     )
-                    if "insufficient collateral" in _err_body.lower():
-                        logger.error("[GENERATE][LTL] Insufficient collateral — aborting")
-                        try:
-                            from models import Settings as _CBSettings
-                            _cbs = _CBSettings.query.first()
-                            if _cbs and _cbs.use_martingale:
-                                _cbs.martingale_streak = 0
-                                db.session.commit()
-                        except Exception as _cbe:
-                            logger.warning(f"[GENERATE][LTL] Streak reset: {_cbe}")
-                        break
-                    if _attempt < ORDER_MAX_ATTEMPTS:
-                        _time.sleep(ORDER_RETRY_DELAY)
-                order = _result
+                    try:
+                        from models import Settings as _CBSettings
+                        _cbs = _CBSettings.query.first()
+                        if _cbs and _cbs.use_martingale:
+                            _cbs.martingale_streak = 0
+                            db.session.commit()
+                    except Exception as _cbe:
+                        logger.warning(f"[GENERATE] Streak reset error: {_cbe}")
+                    break  # stop retrying immediately
+
+                if _attempt < ORDER_MAX_ATTEMPTS:
+                    logger.info(
+                        f"[GENERATE] Retrying in {ORDER_RETRY_DELAY}s "
+                        f"(attempt {_attempt + 1}/{ORDER_MAX_ATTEMPTS})…"
+                    )
+                    _time.sleep(ORDER_RETRY_DELAY)  # 5s gap catches retracements
+
+            contracts      = order.get("contracts", 0)
+            contract_price = order.get("price_per_contract", max_cp)
+            order_id       = order.get("order_id") if order.get("success") else None
+
+            if order.get("success"):
+                logger.info(
+                    f"[GENERATE] Order ✓ | {sig['symbol']} {_trade_direction} (signal={sig['direction']}) "
+                    f"${position_size} | {contracts} contracts @ ${contract_price} "
+                    f"| id={order_id}"
+                )
+            else:
                 logger.error(
-                    f"[GENERATE][LTL] Order FAILED after {ORDER_MAX_ATTEMPTS} attempts | "
+                    f"[GENERATE] Order FAILED after {ORDER_MAX_ATTEMPTS} attempts | "
                     f"{sig['symbol']} | last_error={order.get('error','unknown')}"
                 )
 
-            def _run_polymarket():
-                nonlocal _poly_order, _poly_order_id
-                try:
-                    from polymarket_executor import execute_order as _poly_exec
-                    # Polymarket market is always available immediately —
-                    # attempt once with fast retries (3× × 3s = 9s max)
-                    _POLY_ATTEMPTS = 10
-                    _POLY_DELAY    = 3   # seconds
-                    for _pa in range(1, _POLY_ATTEMPTS + 1):
-                        _r = _poly_exec(sig['symbol'], _trade_direction, mode,
-                                        _poly_size, _poly_max_price)
-                        if _r.get("success"):
-                            _poly_order    = _r
-                            _poly_order_id = _r.get("order_id")
-                            logger.info(
-                                f"[GENERATE][POLY] Order ✓ | {sig['symbol']} {_trade_direction} "
-                                f"${_poly_size} @ ${_poly_max_price} id={_poly_order_id}"
-                            )
-                            return
-                        logger.warning(
-                            f"[GENERATE][POLY] Attempt {_pa}/{_POLY_ATTEMPTS} FAILED | "
-                            f"{sig['symbol']} | error={_r.get('error','unknown')}"
-                        )
-                        if _pa < _POLY_ATTEMPTS:
-                            _time.sleep(_POLY_DELAY)
-                    _poly_order = _r
-                    logger.error(
-                        f"[GENERATE][POLY] Order FAILED | {sig['symbol']} | "
-                        f"last_error={_poly_order.get('error','unknown')}"
-                    )
-                except Exception as _pe:
-                    logger.error("[GENERATE][POLY] Exception: %s", _pe, exc_info=True)
-                    _poly_order = {"success": False, "error": str(_pe)}
-
-            # Start threads — skipped for no_execute_pairs
-            _threads = []
-            if _use_limitless and not _is_no_execute_pair:
-                _t_ltl = _threading.Thread(target=_run_limitless, name="ltl-order", daemon=True)
-                _threads.append(_t_ltl)
-                _t_ltl.start()
-            elif _is_no_execute_pair:
-                # Synthetic SHADOW result so the signal still resolves correctly
-                order = {"success": True, "order_id": None,
-                         "contracts": 0, "price_per_contract": max_cp,
-                         "status": "NO_EXECUTE",
-                         "note": f"{sig['symbol']} is in no_execute_pairs — signal only"}
-                logger.info('[GENERATE] %s no-execute: synthetic order created', sig['symbol'])
-
-            if _use_polymarket and not _is_no_execute_pair:
-                _t_poly = _threading.Thread(target=_run_polymarket, name="poly-order", daemon=True)
-                _threads.append(_t_poly)
-                _t_poly.start()
-
-            # Join both threads — wait for whichever is slowest (Limitless ~10-60s)
-            # Timeout = 120s absolute ceiling so we never hang the scheduler
-            for _t in _threads:
-                _t.join(timeout=120)
-
-            logger.info(
-                "[GENERATE] Both platforms done | LTL=%s POLY=%s",
-                "✓" if order.get("success") else "✗",
-                "✓" if _poly_order.get("success") else "✗",
-            )
-
             # ── Save signal ──────────────────────────────────────────────────────
-            # Pull slug/condition_id from order response if available (live mode).
-            # In shadow mode the order response has no slug, so we start with None
-            # and patch it in a background thread — this way the DB commit is
-            # NEVER blocked by Limitless market discovery retries (up to 150s).
-            _mkt_slug = order.get("slug")         if order.get("success") else None
-            _cond_id  = order.get("condition_id") if order.get("success") else None
+            # ── Resolve market slug + condition_id for ALL modes ───────────────
+            # In live mode these come from the executed order response.
+            # In shadow mode no order is placed so we must discover them
+            # independently so the dashboard gauge can track the market.
+            _mkt_slug    = order.get("slug")          if order.get("success") else None
+            _cond_id     = order.get("condition_id")  if order.get("success") else None
 
-            # Also check cache immediately (may already be populated from
-            # a prior candle's discovery run) so slug is set when possible.
             if not _mkt_slug:
                 try:
-                    from limitless_executor import _slug_cache
-                    _mkt_slug = _slug_cache.get(sig['symbol']) or None
-                except Exception:
-                    pass
+                    from limitless_executor import discover_slug, fetch_market, _slug_cache
+                    _sym = sig['symbol']
+                    # Use cached slug if available to avoid a slow API call
+                    _mkt_slug = _slug_cache.get(_sym) or discover_slug(_sym)
+                    if _mkt_slug and not _cond_id:
+                        _mkt_data = fetch_market(_mkt_slug)
+                        if _mkt_data:
+                            _cond_id = (
+                                _mkt_data.get("conditionId")
+                                or _mkt_data.get("condition_id")
+                                or _mkt_data.get("ctfConditionId")
+                                or _mkt_data.get("condId")
+                            )
+                    logger.info(
+                        "[GENERATE] Shadow market discovery — slug=%s conditionId=%s",
+                        _mkt_slug, _cond_id
+                    )
+                except Exception as _sde:
+                    logger.warning("[GENERATE] Shadow slug discovery failed: %s", _sde)
 
             signal_obj = Signal(
                 symbol            = sig['symbol'],
@@ -573,65 +442,9 @@ def job_generate_signal():
                 contract_price    = contract_price,
                 outcome           = "PENDING",
                 telegram_sent     = False,
-                poly_order_id     = _poly_order_id,
-                poly_fill         = ("PENDING" if _poly_order_id else "NEUTRAL"),
             )
             db.session.add(signal_obj)
             db.session.commit()
-
-            # ── Background slug discovery (shadow / live without slug) ──────────
-            # If we don't have a slug yet, discover it in a daemon thread so the
-            # scheduler is never stalled by Limitless market retry delays.
-            # Once found, the signal row is patched and a WS update is emitted.
-            if not _mkt_slug:
-                _sig_id = signal_obj.id
-                _sym    = sig['symbol']
-
-                def _bg_discover_slug(sig_id, symbol):
-                    try:
-                        from limitless_executor import discover_slug, fetch_market
-                        slug = discover_slug(symbol)
-                        if not slug:
-                            logger.warning(
-                                "[GENERATE] BG slug discovery: no 15-min market found for %s", symbol
-                            )
-                            return
-                        cond_id = None
-                        mkt_data = fetch_market(slug)
-                        if mkt_data:
-                            cond_id = (
-                                mkt_data.get("conditionId")
-                                or mkt_data.get("condition_id")
-                                or mkt_data.get("ctfConditionId")
-                                or mkt_data.get("condId")
-                            )
-                        logger.info(
-                            "[GENERATE] BG slug discovery — %s slug=%s conditionId=%s",
-                            symbol, slug, cond_id
-                        )
-                        # Patch the signal row inside a fresh app context
-                        with _ctx():
-                            from extensions import db as _db, socketio as _sio
-                            from models import Signal as _Signal
-                            _s = _Signal.query.get(sig_id)
-                            if _s:
-                                _s.market_slug  = slug
-                                _s.condition_id = cond_id
-                                _db.session.commit()
-                                try:
-                                    _sio.emit("signal_updated", _s.to_dict())
-                                except Exception:
-                                    pass
-                    except Exception as _bge:
-                        logger.warning("[GENERATE] BG slug discovery error: %s", _bge)
-
-                _t_slug = _threading.Thread(
-                    target=_bg_discover_slug,
-                    args=(_sig_id, _sym),
-                    name="bg-slug-discovery",
-                    daemon=True,
-                )
-                _t_slug.start()
 
             # ── Shadow balance deduction ─────────────────────────────────────────
             if mode == "shadow":
@@ -660,18 +473,6 @@ def job_generate_signal():
             except Exception as e:
                 logger.warning(f"[GENERATE] WS emit: {e}")
 
-            # ── Rule 2: record this signal in saturation history (result=PENDING) ──
-            try:
-                import json as _json_sat
-                _sat_raw2 = getattr(settings, 'dir_saturation_history', '[]') or '[]'
-                _sat_hist2 = _sat_raw2 if isinstance(_sat_raw2, list) else _json_sat.loads(_sat_raw2)
-                _sat_hist2.append({'id': signal_obj.id, 'dir': sig['direction'], 'result': 'PENDING'})
-                _sat_hist2 = _sat_hist2[-10:]  # keep last 10 max
-                settings.dir_saturation_history = _json_sat.dumps(_sat_hist2)
-                db.session.commit()
-            except Exception as _sate:
-                logger.warning('[GENERATE] Rule2 history append error: %s', _sate)
-
             logger.info(
                 f"[GENERATE] Saved signal id={signal_obj.id} | "
                 f"{sig['symbol']} {sig['direction']} conf={sig['confidence']:.3f} | "
@@ -680,181 +481,6 @@ def job_generate_signal():
 
         except Exception as e:
             logger.error(f"[GENERATE] Unhandled error: {e}", exc_info=True)
-
-
-def job_track_best_dip():
-    """
-    Runs every 3s while a signal is PENDING.
-    Fetches the Limitless orderbook and records the lowest signal-side %
-    seen during the candle as best_entry_pct. Works entirely server-side
-    so best_dip is accurate even when the dashboard is closed.
-
-    Price extraction:
-      UP   signal → tracks YES% directly from adjustedMidpoint
-      DOWN signal → tracks NO%  = 1 - YES_mid  (binary market: YES+NO=1.0)
-                    Also reads NO best-ask from bids (NO bids = YES asks inverted)
-                    to get the most accurate tradeable NO price.
-    """
-    import requests as _req
-    API = "https://api.limitless.exchange"
-
-    with _ctx():
-        try:
-            from models import Signal
-            from extensions import db
-            pending = Signal.query.filter(
-                Signal.outcome == "PENDING"
-            ).order_by(Signal.candle_open_time.desc()).first()
-
-            if not pending:
-                return  # no active signal — nothing to do
-
-            slug = pending.market_slug
-            if not slug:
-                try:
-                    from limitless_executor import _slug_cache
-                    sym = pending.symbol
-                    slug = (_slug_cache.get(sym)
-                            or _slug_cache.get(sym.replace("-USDT", "")))
-                    if slug:
-                        pending.market_slug = slug
-                        db.session.commit()
-                except Exception:
-                    pass
-
-            if not slug:
-                return  # slug not yet discovered — bg thread will fill it
-
-            # Fetch orderbook (3s timeout — runs every 3s so must be fast)
-            try:
-                r = _req.get(f"{API}/markets/{slug}/orderbook", timeout=3)
-                if not r.ok:
-                    logger.debug("[DIP_TRACK] orderbook %d for %s", r.status_code, slug)
-                    return
-                ob = r.json() or {}
-            except Exception as _fe:
-                logger.debug("[DIP_TRACK] fetch error: %s", _fe)
-                return
-
-            # ── Extract YES mid-price (0–1 float) ────────────────────────────
-            # adjustedMidpoint is the primary YES price on Limitless.
-            # Falls back to midpoint → lastTradePrice → best ask.
-            yes_raw = (
-                ob.get("adjustedMidpoint")
-                or ob.get("midpoint")
-                or ob.get("lastTradePrice")
-            )
-            if yes_raw is None:
-                asks = ob.get("asks") or []
-                if asks:
-                    try:
-                        entry = asks[0]
-                        yes_raw = float(
-                            entry[0] if isinstance(entry, (list, tuple)) else entry
-                        )
-                    except Exception:
-                        pass
-
-            if yes_raw is None:
-                logger.debug("[DIP_TRACK] no price in orderbook for %s", slug)
-                return
-
-            yes_float = float(yes_raw)
-            if yes_float > 1:               # already expressed as percentage
-                yes_float = yes_float / 100
-            yes_pct = round(yes_float * 100, 2)   # e.g. 65.40
-
-            # ── Compute signal-side % ─────────────────────────────────────────
-            # UP   signal: we want the YES token to dip as low as possible
-            #              before resolving UP → track YES%
-            # DOWN signal: we want the NO  token to dip as low as possible
-            # Limitless shows two independent token prices:
-            #   UP token   ("Up ↑ X%")   = adjustedMidpoint from orderbook
-            #   DOWN token ("Down ↓ X%") = 1 - UP_mid (binary market complement)
-            #
-            # UP   signal → track UP%   (lowest UP% seen = best limit entry)
-            # DOWN signal → track DOWN% (lowest DOWN% seen = best limit entry)
-            if pending.signal_direction == "UP":
-                signal_pct = yes_pct          # UP token % = adjustedMidpoint
-                side_label = "UP"
-            else:
-                # DOWN token price = 1 - UP_mid on binary market
-                down_mid = round(100 - yes_pct, 2)
-
-                # Refinement: derive DOWN ask from best UP bid
-                # Best UP bid = highest price someone pays for UP token
-                # DOWN ask ≈ 1 - best_UP_bid (cheapest DOWN available to buy)
-                bids = ob.get("bids") or []
-                if bids:
-                    try:
-                        best_bid_entry = bids[0]
-                        best_up_bid = float(
-                            best_bid_entry[0]
-                            if isinstance(best_bid_entry, (list, tuple))
-                            else best_bid_entry
-                        )
-                        if best_up_bid > 1:
-                            best_up_bid /= 100
-                        down_ask = round((1 - best_up_bid) * 100, 2)
-                        # Use lower of mid and ask — most conservative dip value
-                        signal_pct = min(down_mid, down_ask)
-                    except Exception:
-                        signal_pct = down_mid
-                else:
-                    signal_pct = down_mid
-                side_label = "DOWN"
-
-            signal_pct = round(signal_pct, 1)
-
-            # ── Update best_entry_pct only if new minimum ─────────────────────
-            current_best = pending.best_entry_pct
-            if current_best is None or signal_pct < current_best:
-                pending.best_entry_pct = signal_pct
-                db.session.commit()
-                logger.info(
-                    "[DIP_TRACK] %s %s — new best_dip=%.1f%% (prev=%s) "
-                    "%s%%=%.2f UP%%=%.2f",
-                    pending.symbol, pending.signal_direction,
-                    signal_pct, current_best,
-                    side_label, signal_pct, yes_pct
-                )
-
-        except Exception as _e:
-            logger.warning("[DIP_TRACK] Unhandled error: %s", _e)
-
-        # ── Early fill check (separate try block — must not break dip tracking) ──
-        # Checks Limitless fill status while the signal is still PENDING, so the
-        # dashboard's "Checking…" badge resolves to FILLED/UNFILLED within seconds
-        # of order placement instead of waiting the full 15-minute candle.
-        # Throttled to once every ~10s (this job runs every 3s) to avoid
-        # hammering the Limitless API with redundant fill-status calls.
-        global _last_early_fill_check_ts
-        try:
-            import time as _time_efc
-            _now_efc = _time_efc.time()
-            if _now_efc - _last_early_fill_check_ts >= 10:
-                _last_early_fill_check_ts = _now_efc
-
-                from models import Signal as _DipSigModel
-                _p = _DipSigModel.query.filter(
-                    _DipSigModel.outcome == "PENDING"
-                ).order_by(_DipSigModel.candle_open_time.desc()).first()
-
-                if _p and (_p.limitless_fill or "NEUTRAL") == "NEUTRAL":
-                    _oid = _p.order_id
-                    if _oid and not str(_oid).startswith("shadow_") and _p.market_slug:
-                        from limitless_executor import check_order_filled
-                        _fc = check_order_filled(_p.market_slug, _oid)
-                        if _fc.get("filled"):
-                            _p.limitless_fill = "FILLED"
-                            db.session.commit()
-                            logger.info("[DIP_TRACK][FILL] %s order=%s CONFIRMED FILLED (early check)",
-                                        _p.symbol, _oid)
-                        # If not yet filled, leave as NEUTRAL — resolve job will
-                        # do the authoritative UNFILLED determination at candle close
-                        # (an order can still fill in the remaining window).
-        except Exception as _efe:
-            logger.debug("[DIP_TRACK][FILL] early fill check error: %s", _efe)
 
 
 def job_resolve_outcomes():
@@ -958,79 +584,11 @@ def job_resolve_outcomes():
                         sig.open_price  = open_price   # update to exact OKX candle open
                         sig.close_price = close_price
                         sig.outcome     = outcome
-
-                        # ── Rule 2: update saturation history with resolved result ──
-                        try:
-                            import json as _json_sat2
-                            _resolve_settings2 = Settings.query.first()
-                            if _resolve_settings2:
-                                _sat_raw3 = getattr(_resolve_settings2, 'dir_saturation_history', '[]') or '[]'
-                                _sat_hist3 = _sat_raw3 if isinstance(_sat_raw3, list) else _json_sat2.loads(_sat_raw3)
-                                # Find and update the matching PENDING entry by signal id
-                                _updated = False
-                                for _e in _sat_hist3:
-                                    if _e.get('id') == sig.id and _e.get('result') == 'PENDING':
-                                        _e['result'] = outcome
-                                        _updated = True
-                                        break
-                                if not _updated:
-                                    # Entry missing — append directly with result
-                                    _sat_hist3.append({'id': sig.id, 'dir': sig.signal_direction, 'result': outcome})
-                                    _sat_hist3 = _sat_hist3[-10:]
-                                _resolve_settings2.dir_saturation_history = _json_sat2.dumps(_sat_hist3)
-                                # commit happens below with the rest of the resolve commit
-                        except Exception as _sat3e:
-                            logger.debug('[RESOLVE] Rule2 history update error: %s', _sat3e)
-
-                        # ── Best-dip: fetch orderbook once at resolve time ────
-                        # The frontend gauge tracks best_dip live and POSTs it
-                        # when the signal resolves. But if the dashboard wasn't
-                        # open, best_entry_pct stays NULL. As a server-side
-                        # safety net, we fetch the orderbook at resolve time and
-                        # record it if nothing better has already been saved.
-                        # best_entry_pct is now tracked continuously by
-                        # job_track_best_dip (every 30s). Only do a final
-                        # snapshot here if it's still null (signal fired but
-                        # tracker hadn't run yet).
-                        if sig.best_entry_pct is None and sig.market_slug:
-                            try:
-                                import requests as _req
-                                _ob_url = (
-                                    f"https://api.limitless.exchange/markets/"
-                                    f"{sig.market_slug}/orderbook"
-                                )
-                                _ob_r = _req.get(_ob_url, timeout=6)
-                                if _ob_r.ok:
-                                    _ob = _ob_r.json()
-                                    _yes_raw = (
-                                        _ob.get("adjustedMidpoint")
-                                        or _ob.get("midpoint")
-                                        or _ob.get("lastTradePrice")
-                                    )
-                                    if _yes_raw is not None:
-                                        _yes_pct = float(_yes_raw)
-                                        if _yes_pct > 1:
-                                            _yes_pct = _yes_pct / 100
-                                        _yes_pct_display = _yes_pct * 100
-                                        _signal_pct = (
-                                            _yes_pct_display
-                                            if sig.signal_direction == "UP"
-                                            else 100 - _yes_pct_display
-                                        )
-                                        sig.best_entry_pct = round(_signal_pct, 1)
-                                        logger.info(
-                                            "[RESOLVE] best_entry_pct (final snapshot) "
-                                            "= %.1f%% for signal id=%s",
-                                            sig.best_entry_pct, sig.id
-                                        )
-                            except Exception as _be:
-                                logger.debug("[RESOLVE] best_entry_pct snapshot failed: %s", _be)
-
                         db.session.flush()
 
                         # Per-pair tracker
                         try:
-                            record_outcome(sym, outcome, direction=sig.direction)
+                            record_outcome(sym, outcome)
                         except Exception:
                             pass
 
@@ -1080,71 +638,13 @@ def job_resolve_outcomes():
                         # "Frozen" means the streak integer is untouched so the
                         # same stake fires again next candle. Neither penalised
                         # nor rewarded — the sequence just waits for a real fill.
-                        # ── Limitless / Polymarket fill check — ALWAYS runs ──────────
-                        # Previously this entire block was nested inside
-                        # `if _ms.use_martingale:` which meant limitless_fill
-                        # was NEVER checked (stuck at default 'NEUTRAL') for
-                        # any account with martingale turned off. Fill status
-                        # must be checked regardless of martingale setting —
-                        # martingale is a STAKE strategy that consumes the
-                        # fill result, it should not gate whether we check it.
-                        _was_filled  = False
-                        _fill_status = "UNKNOWN"
                         try:
                             from models import Settings as _MSettings
                             from limitless_executor import check_order_filled
                             _ms = _MSettings.query.first()
-
-                            _order_id = sig.order_id
-                            _mkt_slug = sig.market_slug
-
-                            if not _order_id or str(_order_id).startswith("shadow_"):
-                                _was_filled  = False
-                                _fill_status = "NO_ORDER_ID"
-                            else:
-                                _fill_check  = check_order_filled(_mkt_slug, _order_id)
-                                _was_filled  = _fill_check.get("filled", False)
-                                _fill_status = _fill_check.get("status", "UNKNOWN")
-
-                            # Persist Limitless fill status on the signal record
-                            try:
-                                from models import Signal as _SigModel
-                                _sig_rec = _SigModel.query.get(sig.id)
-                                if _sig_rec:
-                                    if str(_order_id).startswith("shadow_") or _fill_status == "NO_ORDER_ID":
-                                        _sig_rec.limitless_fill = "NEUTRAL"
-                                    else:
-                                        _sig_rec.limitless_fill = "FILLED" if _was_filled else "UNFILLED"
-
-                                    # Polymarket fill check (runs regardless of Limitless fill)
-                                    if _sig_rec.poly_order_id and _sig_rec.poly_fill in (None, "PENDING", "NEUTRAL"):
-                                        try:
-                                            from polymarket_executor import check_order_filled as _poly_fill_fn
-                                            _pf = _poly_fill_fn(_sig_rec.poly_order_id)
-                                            if _pf.get("filled"):
-                                                _sig_rec.poly_fill = "FILLED"
-                                            elif _pf.get("status") not in ("SHADOW", "ERROR", "NO_ORDER_ID"):
-                                                _sig_rec.poly_fill = "UNFILLED"
-                                            logger.info("[RESOLVE][POLY] Fill: order=%s status=%s poly_fill=%s",
-                                                _sig_rec.poly_order_id, _pf.get("status"), _sig_rec.poly_fill)
-                                        except Exception as _pfe:
-                                            logger.warning("[RESOLVE][POLY] Fill check error: %s", _pfe)
-
-                                    db.session.commit()
-                                    logger.info(
-                                        "[RESOLVE] Fill check complete | order=%s status=%s filled=%s limitless_fill=%s",
-                                        _order_id, _fill_status, _was_filled, _sig_rec.limitless_fill
-                                    )
-                            except Exception as _fe:
-                                logger.warning(f"[RESOLVE] limitless_fill persist error: {_fe}")
-                        except Exception as _fce:
-                            logger.warning(f"[RESOLVE] Fill check block error: {_fce}")
-
-                        # ── Martingale stake update — only runs when martingale is ON ───
-                        # Uses the _was_filled / _fill_status computed above (unconditionally).
-                        try:
                             if _ms and _ms.use_martingale:
                                 cap       = int(_ms.martingale_cap or 10)
+                                # Parse custom sequence
                                 _raw_seq = _ms.martingale_sequence or "1,1.5,2,3,4.5,6.7"
                                 try:
                                     _MART_SEQ = [round(float(x.strip()), 1)
@@ -1153,6 +653,30 @@ def job_resolve_outcomes():
                                         raise ValueError
                                 except Exception:
                                     _MART_SEQ = [1.0, 1.5, 2.0, 3.0, 4.5, 6.7]
+                                _order_id = sig.order_id
+                                _mkt_slug = sig.market_slug
+
+                                # Shadow or missing order — no on-chain fill possible
+                                if not _order_id or str(_order_id).startswith("shadow_"):
+                                    _was_filled  = False
+                                    _fill_status = "NO_ORDER_ID"
+                                else:
+                                    _fill_check  = check_order_filled(_mkt_slug, _order_id)
+                                    _was_filled  = _fill_check.get("filled", False)
+                                    _fill_status = _fill_check.get("status", "UNKNOWN")
+
+                                # Persist Limitless fill status on the signal record
+                                try:
+                                    from models import Signal as _SigModel
+                                    _sig_rec = _SigModel.query.get(sig.id)
+                                    if _sig_rec:
+                                        if str(_order_id).startswith("shadow_") or _fill_status == "NO_ORDER_ID":
+                                            _sig_rec.limitless_fill = "NEUTRAL"
+                                        else:
+                                            _sig_rec.limitless_fill = "FILLED" if _was_filled else "UNFILLED"
+                                        db.session.commit()
+                                except Exception as _fe:
+                                    logger.warning(f"[RESOLVE] limitless_fill persist error: {_fe}")
 
                                 if not _was_filled:
                                     # Not confirmed on-chain — freeze streak, carry stake forward
@@ -1226,48 +750,6 @@ def job_resolve_outcomes():
                         except Exception as _cde:
                             logger.warning('[RESOLVE] Cooldown update error: %s', _cde)
 
-                        # Per-pair cooldown WRITE
-                        try:
-                            import json as _json2
-                            _pcd2_raw = getattr(_resolve_settings, 'pair_loss_cooldowns', '{}') or '{}'
-                            # Guard: SQLAlchemy may return a dict if psycopg2 auto-parses TEXT as JSON
-                            _pcd2 = _pcd2_raw if isinstance(_pcd2_raw, dict) else _json2.loads(_pcd2_raw)
-                            if outcome == 'WIN':
-                                _pcd2.pop(sym, None)
-                                logger.info('[RESOLVE] Cooldown cleared for %s after WIN', sym)
-                            else:
-                                _cd = 1 if (sig.tier == 'T1') else 2
-                                _pcd2[sym] = {'candles_remaining': _cd, 'tier': sig.tier or 'T2'}
-                                logger.warning('[RESOLVE] Cooldown SET: %s suppressed %d candle(s)', sym, _cd)
-                            _resolve_settings.pair_loss_cooldowns = _json2.dumps(_pcd2)
-
-                            # Write to cooldown_log for dashboard display
-                            try:
-                                import json as _cdl_j
-                                from datetime import datetime as _dt
-                                _cdl_raw = getattr(_resolve_settings, 'cooldown_log', '[]') or '[]'
-                                _cdl = _cdl_raw if isinstance(_cdl_raw, list) else _cdl_j.loads(_cdl_raw)
-                                _cdl_entry = {
-                                    'ts':     _dt.utcnow().strftime('%Y-%m-%d %H:%M UTC'),
-                                    'pair':   sym,
-                                    'event':  'COOLDOWN_SET' if outcome == 'LOSS' else 'COOLDOWN_CLEARED',
-                                    'reason': f'Loss after {sig.tier or "T2"} signal' if outcome == 'LOSS' else 'Win',
-                                    'candles': _cd if outcome == 'LOSS' else 0,
-                                    'tier':   sig.tier or 'T2',
-                                    'outcome': outcome,
-                                }
-                                _cdl.append(_cdl_entry)
-                                # Keep last 50 log entries only
-                                if len(_cdl) > 50:
-                                    _cdl = _cdl[-50:]
-                                _resolve_settings.cooldown_log = _cdl_j.dumps(_cdl)
-                            except Exception as _cdlw:
-                                logger.warning('[RESOLVE] cooldown_log write error: %s', _cdlw)
-
-                            db.session.commit()
-                        except Exception as _pcd2e:
-                            logger.warning('[RESOLVE] Cooldown write error: %s', _pcd2e)
-
                         # Telegram result
                         try:
                             send_result_alert(sig.to_dict(), outcome,
@@ -1334,18 +816,6 @@ def start_scheduler():
     # RESOLVE first — fires at the candle boundary second=0.
     # Closes the previous candle signal before the new one is generated.
     # Retries OKX fetch internally (up to 3x with 1s sleep) — no extra delay needed.
-    # Best-dip tracker — polls Limitless orderbook every 30s during active signal.
-    # Runs server-side so best_entry_pct is accurate even when dashboard is closed.
-    scheduler.add_job(
-        job_track_best_dip,
-        IntervalTrigger(seconds=3),
-        id="track_dip",
-        replace_existing=True,
-        misfire_grace_time=20,
-        max_instances=1,
-        coalesce=True,
-    )
-
     scheduler.add_job(
         job_resolve_outcomes,
         CronTrigger(minute="0,15,30,45", second="0"),

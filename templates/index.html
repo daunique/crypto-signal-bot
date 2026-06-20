@@ -6,7 +6,6 @@
 <title>⚡ SignalBot — 15m Crypto Signals</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-annotation/3.0.1/chartjs-plugin-annotation.min.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -134,30 +133,6 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 
 /* ── Signal feed ── */
 .signal-feed{display:flex;flex-direction:column;gap:7px;max-height:420px;overflow-y:auto}
-.trade-activity{display:flex;flex-direction:column;gap:6px;margin-top:10px}
-.trade-row{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:6px;background:var(--surface2);border:1px solid var(--border);font-size:0.72rem}
-.trade-row.placed{border-left:3px solid var(--accent2)}
-.trade-row.executed{border-left:3px solid var(--win);background:rgba(0,229,160,0.05)}
-.trade-row.unfilled{border-left:3px solid var(--loss);background:rgba(255,77,109,0.04)}
-.trade-row.pending{border-left:3px solid var(--warn)}
-.tr-pair{font-weight:700;color:var(--text);min-width:72px}
-.tr-dir{font-size:0.7rem;font-weight:700;padding:2px 6px;border-radius:3px}
-.tr-dir.up{background:rgba(0,229,160,0.15);color:var(--win)}
-.tr-dir.dn{background:rgba(255,77,109,0.15);color:var(--loss)}
-.tr-meta{color:var(--text2);font-family:'IBM Plex Mono',monospace;font-size:0.68rem}
-.tr-status{font-size:0.68rem;font-weight:700;padding:2px 7px;border-radius:3px;white-space:nowrap}
-.trs-placed{background:rgba(0,184,168,0.12);color:var(--accent2)}
-.trs-exec{background:rgba(0,229,160,0.15);color:var(--win)}
-.trs-unfilled{background:rgba(255,77,109,0.12);color:var(--loss)}
-.trs-pending{background:rgba(246,201,14,0.12);color:var(--warn)}
-.trs-noexec{background:rgba(90,106,130,0.15);color:var(--text2)}
-/* Executed trades history table */
-.exec-table{width:100%;border-collapse:collapse;font-size:0.71rem;font-family:'IBM Plex Mono',monospace}
-.exec-table th{text-align:left;color:var(--text2);padding:5px 8px;border-bottom:1px solid var(--border);font-weight:500;white-space:nowrap}
-.exec-table td{padding:5px 8px;border-bottom:1px solid rgba(30,40,64,.45);white-space:nowrap}
-.exec-table tr:hover td{background:rgba(255,255,255,.015)}
-.exec-table tr.ex-win td{background:rgba(0,229,160,.025)}
-.exec-table tr.ex-loss td{background:rgba(255,77,109,.025)}
 .signal-feed::-webkit-scrollbar{width:3px}
 .signal-feed::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
 .sig-card{
@@ -337,7 +312,7 @@ input[type=number]:focus{border-color:var(--accent)}
   <!-- Win rate ring + chart -->
   <div class="g2">
     <div class="card">
-      <div class="card-hdr"><span class="card-title">Win Rate</span><span id="d-mode-badge" class="outcome-badge ob-pending">SHADOW</span><span id="platform-badge" style="font-size:0.65rem;background:rgba(99,179,237,0.1);color:#63b3ed;border:1px solid rgba(99,179,237,0.3);border-radius:10px;padding:2px 8px;margin-left:6px">⚡ LTL</span></div>
+      <div class="card-hdr"><span class="card-title">Win Rate</span><span id="d-mode-badge" class="outcome-badge ob-pending">SHADOW</span></div>
       <div class="wr-wrap">
         <div class="wr-ring">
           <svg viewBox="0 0 80 80" width="80" height="80">
@@ -367,147 +342,96 @@ input[type=number]:focus{border-color:var(--accent)}
     </div>
   </div>
 
-  <!-- ══ TRADE ACTIVITY — current pending signal only ══ -->
-  <div class="card" id="trade-activity-card" style="display:none">
+  <!-- ══ LIVE SIGNAL GAUGE + PULLBACK TRACKER ══ -->
+  <div class="card" id="gauge-card" style="display:none">
     <div class="card-hdr">
-      <span class="card-title">⚡ Trade Activity</span>
-      <span style="font-size:0.68rem;color:var(--text2)">This candle</span>
-    </div>
-    <div id="trade-activity-current">
-    </div>
-  </div>
-
-  <!-- ══ LIVE SIGNAL GAUGE + BEST DIP TRACKER ══ -->
-  <div class="card" id="gauge-card" style="display:none;overflow:hidden">
-    <!-- Fixed header — never scrolls -->
-    <div class="card-hdr" style="flex-shrink:0">
       <span class="card-title"><span class="live-dot"></span> Live Market Gauge</span>
       <span id="gauge-market-label" style="font-size:0.72rem;color:var(--text2)">—</span>
     </div>
-
     <!-- Direction banner -->
-    <div id="gauge-dir-banner" style="flex-shrink:0;text-align:center;font-size:0.78rem;font-weight:700;padding:6px 12px;border-radius:8px;margin-bottom:10px;background:var(--surface2);color:var(--text2)">
+    <div id="gauge-dir-banner" style="text-align:center;font-size:0.78rem;font-weight:700;padding:6px 12px;border-radius:8px;margin-bottom:12px;background:var(--surface2);color:var(--text2)">
       Waiting for signal…
     </div>
-
-    <!-- Gauge arc (fixed, no scroll) -->
-    <div style="flex-shrink:0;width:100%;max-width:300px;margin:0 auto 4px;line-height:0">
+    <!-- Tail pattern indicator -->
+    <div id="gauge-tail-indicator" style="display:none;text-align:center;margin-bottom:10px;padding:6px 10px;border-radius:8px;font-size:0.72rem;font-weight:700;background:rgba(255,200,0,0.08);border:1px solid rgba(255,200,0,0.3);color:var(--warn)">
+      <span id="gauge-tail-icon">🪝</span> <span id="gauge-tail-label">Tail pattern detected</span>
+    </div>
+    <!-- Gauge arc -->
+    <div style="width:100%;max-width:320px;margin:0 auto 8px;line-height:0">
       <svg id="gauge-svg" viewBox="0 0 200 120" width="100%" style="display:block">
+        <!-- Background arc (grey) -->
         <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="var(--surface2)" stroke-width="18" stroke-linecap="round"/>
-        <!-- Danger zone ≤20% (red highlight on left quarter) -->
-        <path d="M 20 100 A 80 80 0 0 1 44 36" fill="none" stroke="rgba(255,77,109,0.28)" stroke-width="18" stroke-linecap="round"/>
-        <!-- Target zone 20% line tick -->
-        <line x1="44" y1="36" x2="38" y2="28" stroke="rgba(255,77,109,0.7)" stroke-width="1.5"/>
-        <text x="20" y="26" font-size="7.5" fill="rgba(255,77,109,0.85)">20%</text>
+        <!-- Danger zone &#8804;40% (red) -->
+        <path id="gauge-danger" d="M 20 100 A 80 80 0 0 1 60 28" fill="none" stroke="rgba(255,77,109,0.25)" stroke-width="18" stroke-linecap="round"/>
+        <!-- Value arc (colored) -->
         <path id="gauge-arc" d="M 20 100 A 80 80 0 0 1 20.01 100" fill="none" stroke="var(--accent)" stroke-width="18" stroke-linecap="round" style="transition:all 0.5s ease"/>
-        <g id="gauge-needle-g" transform="rotate(-90,100,100)">
-          <line x1="100" y1="100" x2="100" y2="26" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+        <!-- Needle: wrapped in <g> so rotation pivots correctly at cx=100,cy=100 in all browsers -->
+        <g id="gauge-needle-g" style="transition:transform 0.5s ease;transform-origin:100px 100px;transform:rotate(-90deg)">
+          <line id="gauge-needle" x1="100" y1="100" x2="100" y2="26" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
           <polygon points="100,22 97,30 103,30" fill="white"/>
         </g>
-        <circle cx="100" cy="100" r="5" fill="white"/>
+        <circle cx="100" cy="100" r="6" fill="white" stroke="var(--surface)" stroke-width="1.5"/>
+        <!-- Labels -->
         <text x="10"  y="116" font-size="9" fill="var(--text2)">0%</text>
         <text x="92"  y="14"  font-size="9" fill="var(--text2)">50%</text>
         <text x="175" y="116" font-size="9" fill="var(--text2)">100%</text>
-        <text id="gauge-pct"        x="100" y="91"  text-anchor="middle" font-size="21" font-weight="900" fill="var(--accent)">—</text>
-        <text id="gauge-side-label" x="100" y="106" text-anchor="middle" font-size="8"   fill="var(--text2)">— %</text>
+        <text x="46"  y="50"  font-size="8" fill="rgba(255,77,109,0.7)">40&#162;</text>
+        <!-- 20% target marker on arc -->
+        <circle cx="36" cy="69" r="3.5" fill="#ffd700" opacity="0.9"/>
+        <text x="14" y="80" font-size="7.5" fill="#ffd700" font-weight="700">20%</text>
+        <text x="12" y="88" font-size="6.5" fill="#ffd700">target</text>
+        <!-- Value text inside SVG (avoids absolutely-positioned div pushing layout) -->
+        <text id="gauge-pct"        x="100" y="93"  text-anchor="middle" font-size="22" font-weight="900" fill="var(--accent)">&#8212;</text>
+        <text id="gauge-side-label" x="100" y="108" text-anchor="middle" font-size="8.5" fill="var(--text2)">YES %</text>
       </svg>
     </div>
-
-    <!-- YES / NO split bar -->
-    <div style="flex-shrink:0;display:flex;border-radius:8px;overflow:hidden;height:20px;margin-bottom:8px">
-      <div id="gauge-yes-bar" style="background:var(--win);transition:width 0.5s;display:flex;align-items:center;justify-content:center;font-size:0.68rem;font-weight:700;color:#000;width:50%"></div>
-      <div id="gauge-no-bar"  style="background:var(--down);transition:width 0.5s;display:flex;align-items:center;justify-content:center;font-size:0.68rem;font-weight:700;color:#fff;width:50%"></div>
+    <!-- Yes / No bar -->
+    <div style="display:flex;border-radius:8px;overflow:hidden;height:22px;margin-bottom:10px">
+      <div id="gauge-yes-bar" style="background:var(--win);transition:width 0.5s;display:flex;align-items:center;justify-content:center;font-size:0.7rem;font-weight:700;color:#000;min-width:2px"></div>
+      <div id="gauge-no-bar"  style="background:var(--down);transition:width 0.5s;flex:1;display:flex;align-items:center;justify-content:center;font-size:0.7rem;font-weight:700;color:#fff"></div>
     </div>
-    <div style="flex-shrink:0;display:flex;justify-content:space-between;font-size:0.72rem;margin-bottom:10px">
-      <span style="color:var(--win)">UP token <b id="gauge-yes-val">—</b></span>
-      <span style="color:var(--down)">DOWN token <b id="gauge-no-val">—</b></span>
+    <div style="display:flex;justify-content:space-between;font-size:0.72rem;margin-bottom:12px">
+      <span style="color:var(--win)">YES <b id="gauge-yes-val">—</b></span>
+      <span style="color:var(--down)">NO <b id="gauge-no-val">—</b></span>
     </div>
-
-    <!-- Best Dip Tracker (3 stats inline — no scroll) -->
-    <div style="flex-shrink:0;background:var(--surface2);border-radius:10px;padding:10px 12px;border:1px solid var(--border);margin-bottom:10px">
-      <div style="font-size:0.7rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">
-        📉 Best Dip Tracker
-        <span id="dip-target-badge" style="margin-left:6px;font-size:0.62rem;background:rgba(255,77,109,0.12);color:var(--down);border:1px solid rgba(255,77,109,0.3);border-radius:6px;padding:1px 6px;font-weight:600">best entry ≤20¢</span>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;text-align:center">
-        <div style="background:var(--surface1,#0e1117);border-radius:8px;padding:8px 4px">
-          <div style="font-size:0.6rem;color:var(--text2);margin-bottom:2px">Best Dip</div>
-          <div id="dip-best" style="font-size:1.35rem;font-weight:900;color:var(--warn);line-height:1">—</div>
-          <div style="font-size:0.58rem;color:var(--text2)">cheapest <span id="dip-side">UP</span>% seen</div>
+    <!-- Pullback tracker -->
+    <div style="background:var(--surface2);border-radius:10px;padding:12px;border:1px solid var(--border)">
+      <div style="font-size:0.72rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px">📉 Pullback Tracker — This Signal</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;text-align:center">
+        <div>
+          <div style="font-size:0.65rem;color:var(--text2)">Lowest <span id="pt-side">YES</span>%</div>
+          <div id="pt-lowest" style="font-size:1.4rem;font-weight:900;color:var(--warn)">—</div>
+          <div style="font-size:0.6rem;color:var(--text2)">best limit entry</div>
         </div>
-        <div style="background:var(--surface1,#0e1117);border-radius:8px;padding:8px 4px">
-          <div style="font-size:0.6rem;color:var(--text2);margin-bottom:2px">Current</div>
-          <div id="dip-current" style="font-size:1.35rem;font-weight:900;color:var(--accent);line-height:1">—</div>
-          <div style="font-size:0.58rem;color:var(--text2)">live %</div>
+        <div>
+          <div style="font-size:0.65rem;color:var(--text2)">Current</div>
+          <div id="pt-current" style="font-size:1.4rem;font-weight:900;color:var(--accent)">—</div>
+          <div style="font-size:0.6rem;color:var(--text2)">live %</div>
         </div>
-        <div style="background:var(--surface1,#0e1117);border-radius:8px;padding:8px 4px">
-          <div style="font-size:0.6rem;color:var(--text2);margin-bottom:2px">≤20% Hits</div>
-          <div id="dip-hits" style="font-size:1.35rem;font-weight:900;color:var(--down);line-height:1">0</div>
-          <div style="font-size:0.58rem;color:var(--text2)">entry opps</div>
+        <div>
+          <div style="font-size:0.65rem;color:var(--text2)">🎯 ≤20% hits</div>
+          <div id="pt-hits20" style="font-size:1.4rem;font-weight:900;color:#ffd700">0</div>
+          <div style="font-size:0.6rem;color:var(--text2)">best-entry hits</div>
         </div>
       </div>
-      <!-- Drop % from entry -->
-      <div style="margin-top:8px;display:flex;align-items:center;gap:8px">
-        <span style="font-size:0.65rem;color:var(--text2)">Drop from entry:</span>
-        <span id="dip-drop-pct" style="font-size:0.78rem;font-weight:700;color:var(--warn)">—</span>
-        <span id="dip-target-hit" style="display:none;font-size:0.65rem;background:rgba(0,229,160,0.12);color:var(--win);border:1px solid rgba(0,229,160,0.3);border-radius:6px;padding:1px 7px">✓ ≤20¢ entry available</span>
-      </div>
-      <!-- Sparkline chart -->
-      <div style="margin-top:8px">
-        <div style="font-size:0.6rem;color:var(--text2);margin-bottom:3px">
-          <span id="dip-side-lbl">Signal token</span>% over time (lower = cheaper entry)
-          <span style="color:rgba(255,77,109,0.7);margin-left:4px">── 20¢ dip target</span>
-        </div>
-        <div style="position:relative;height:55px">
-          <canvas id="pullback-chart" style="position:absolute;inset:0;width:100%;height:100%"></canvas>
-        </div>
+      <!-- Mini chart of gauge history -->
+      <div style="margin-top:10px">
+        <div style="font-size:0.63rem;color:var(--text2);margin-bottom:4px">Signal % over time <span style="color:rgba(255,77,109,0.7)">── 40¢ limit line</span></div>
+        <canvas id="pullback-chart" height="55" style="width:100%"></canvas>
       </div>
     </div>
-
-    <!-- Historical stats (compact 2-col grid, no extra scroll) -->
-    <div style="flex-shrink:0;background:var(--surface2);border-radius:10px;padding:10px 12px;border:1px solid var(--border)">
-      <div style="font-size:0.7rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:7px">📊 All-Signal Records</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:0.72rem">
-        <div><span style="color:var(--text2)">Avg best dip (wins):</span><br><b id="hist-avg-win" style="color:var(--win)">—</b></div>
-        <div><span style="color:var(--text2)">Avg best dip (losses):</span><br><b id="hist-avg-loss" style="color:var(--down)">—</b></div>
-        <div><span style="color:var(--text2)">Deepest dip seen:</span><br><b id="hist-deepest" style="color:var(--warn)">—</b></div>
-        <div><span style="color:var(--text2)">Signals tracked:</span><br><b id="hist-count" style="color:var(--accent)">0</b></div>
+    <!-- Historical pullback stats -->
+    <div style="margin-top:10px;background:var(--surface2);border-radius:10px;padding:12px;border:1px solid var(--border)">
+      <div style="font-size:0.72rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">📊 Historical Pullback Records</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.75rem">
+        <div><span style="color:var(--text2)">Avg pullback (wins):</span> <b id="hist-avg-win" style="color:var(--win)">—</b></div>
+        <div><span style="color:var(--text2)">Avg pullback (losses):</span> <b id="hist-avg-loss" style="color:var(--down)">—</b></div>
+        <div><span style="color:var(--text2)">Deepest pullback seen:</span> <b id="hist-deepest" style="color:var(--warn)">—</b></div>
+        <div><span style="color:var(--text2)">Signals tracked:</span> <b id="hist-count" style="color:var(--accent)">0</b></div>
       </div>
-    </div>
-  </div>
-
-  <!-- Per-pair cooldown status + log panel -->
-  <div class="card" id="cooldown-status-card" style="margin-bottom:12px">
-    <div class="card-hdr" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
-      <span class="card-title">🔒 Pair Cooldowns &amp; Execution Control</span>
-      <span id="cooldown-early-session" style="display:none;font-size:0.65rem;background:rgba(255,200,0,0.12);color:var(--warn);border:1px solid rgba(255,200,0,0.3);border-radius:6px;padding:2px 8px">⚠️ Early session (08:00–09:30 UTC) — be selective</span>
-    </div>
-
-    <!-- Active cooldowns row -->
-    <div style="margin-bottom:8px">
-      <div style="font-size:0.68rem;color:var(--text2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em">Active Cooldowns</div>
-      <div id="cooldown-pairs-list" style="display:flex;flex-wrap:wrap;gap:8px;min-height:28px">
-        <span style="color:var(--text2);font-size:0.72rem;font-style:italic">All pairs active — no cooldowns</span>
-      </div>
-    </div>
-
-    <!-- No-execute pairs row -->
-    <div style="margin-bottom:8px;padding-top:8px;border-top:1px solid var(--border)">
-      <div style="font-size:0.68rem;color:var(--text2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em">Signal-Only Pairs (no live execution)</div>
-      <div id="no-execute-pairs-list" style="display:flex;flex-wrap:wrap;gap:8px;min-height:24px">
-        <span style="color:var(--text2);font-size:0.72rem;font-style:italic">Loading…</span>
-      </div>
-      <div style="font-size:0.65rem;color:var(--text2);margin-top:4px">These pairs generate signals normally but NO live orders are placed on Limitless or Polymarket.</div>
-    </div>
-
-    <!-- Cooldown event log -->
-    <div style="padding-top:8px;border-top:1px solid var(--border)">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <div style="font-size:0.68rem;color:var(--text2);text-transform:uppercase;letter-spacing:.05em">Cooldown Event Log</div>
-        <span style="font-size:0.65rem;color:var(--text2)">last 20 events</span>
-      </div>
-      <div id="cooldown-log-list" style="max-height:180px;overflow-y:auto;display:flex;flex-direction:column;gap:4px">
-        <span style="color:var(--text2);font-size:0.72rem;font-style:italic">No cooldown events yet</span>
+      <div style="margin-top:8px;font-size:0.68rem;color:var(--text2)">
+        <span style="color:#ffd700;font-weight:700">🎯 Best entry: ≤20%</span> — signal side dips to 20¢ or below before resolving in predicted direction.<br>
+        <span style="color:var(--win)">Good zone: 21–40%.</span> Market always opens at 50/50 — deeper dip = cheaper entry.
       </div>
     </div>
   </div>
@@ -545,38 +469,28 @@ input[type=number]:focus{border-color:var(--accent)}
           <option value="">All Results</option>
           <option value="WIN">Win</option><option value="LOSS">Loss</option><option value="PENDING">Pending</option>
         </select>
-        <select id="f-dip" onchange="loadSignals()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 8px;font-size:0.75rem">
-          <option value="">All Dips</option>
-          <option value="5">0–5% 🎯</option>
-          <option value="10">5–10% 🎯</option>
-          <option value="20">10–20% 🎯</option>
-          <option value="30">20–30% ✅</option>
-          <option value="40">30–40% ✅</option>
-        </select>
-      </div>
-    </div>
-    <!-- Best Dip Stats Bar -->
-    <div id="dip-stats-bar" style="display:none;background:var(--surface2);border-radius:10px;padding:10px 14px;margin-bottom:10px;border:1px solid var(--border)">
-      <div style="font-size:0.68rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">
-        🎯 Best Dip Target Hit Frequency
-      </div>
-      <div id="dip-stats-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;text-align:center">
-        <!-- filled by JS -->
       </div>
     </div>
     <div style="overflow-x:auto">
       <table class="tbl">
-        <thead><tr><th>Open</th><th>Close</th><th>Pair</th><th>Direction</th><th>Confidence</th><th>Tier</th><th>Entry</th><th>Close Price</th><th style="white-space:nowrap">Best Dip 🎯</th><th>Result</th><th>Limitless</th><th>Polymarket</th></tr></thead>
+        <thead><tr><th>Open</th><th>Close</th><th>Pair</th><th>Direction</th><th>Confidence</th><th>Tier</th><th>Entry</th><th>Close Price</th><th style="white-space:nowrap">Best Dip 🎯</th><th>Result</th><th>Limitless</th></tr></thead>
         <tbody id="signals-tbody"></tbody>
       </table>
     </div>
     <div id="signals-pages" style="display:flex;gap:6px;justify-content:center;margin-top:12px"></div>
+    <div style="font-size:0.67rem;color:var(--text2);margin-top:8px;padding:8px 4px;border-top:1px solid var(--border);display:flex;gap:14px;flex-wrap:wrap">
+      <span><b style="color:#ffd700">🎯 ≤20%</b> — Target hit (best entry)</span>
+      <span><b style="color:var(--win)">✅ 21–40%</b> — Good limit zone</span>
+      <span><b style="color:var(--warn)">⚠️ 41–60%</b> — Moderate pullback</span>
+      <span><b style="color:var(--text2)">≥61%</b> — No meaningful pullback</span>
+      <span style="color:var(--text2)">— = gauge not running during signal</span>
+    </div>
   </div>
 </div>
 
 <!-- ══ HISTORY ══ -->
 <div class="page" id="page-history">
-  <div class="page-hdr"><h2>📜 History</h2><p>Daily breakdown · executed trades on Limitless</p></div>
+  <div class="page-hdr"><h2>📜 History</h2><p>Daily performance breakdown</p></div>
   <div class="g2">
     <div class="card">
       <div class="card-hdr"><span class="card-title">30-Day Win Rate</span></div>
@@ -589,37 +503,14 @@ input[type=number]:focus{border-color:var(--accent)}
         <div style="display:flex;justify-content:space-between"><span style="color:var(--text2);font-size:0.83rem">Wins</span><span id="h-wins" style="color:var(--win);font-weight:700">—</span></div>
         <div style="display:flex;justify-content:space-between"><span style="color:var(--text2);font-size:0.83rem">Losses</span><span id="h-losses" style="color:var(--loss);font-weight:700">—</span></div>
         <div style="display:flex;justify-content:space-between"><span style="color:var(--text2);font-size:0.83rem">Avg Win Rate</span><span id="h-wr" style="color:var(--accent);font-weight:700">—</span></div>
-        <div style="display:flex;justify-content:space-between"><span style="color:var(--text2);font-size:0.83rem">Executed Trades</span><span id="h-executed" style="color:var(--win);font-weight:700">—</span></div>
       </div>
     </div>
   </div>
-
-  <!-- ══ EXECUTED TRADES TABLE ══ -->
-  <div class="card">
-    <div class="card-hdr" style="flex-wrap:wrap;gap:6px">
-      <span class="card-title">✅ Executed Trades (Limitless Filled)</span>
-      <span style="font-size:0.68rem;color:var(--text2)">Only orders confirmed filled on-chain</span>
-    </div>
-    <div style="overflow-x:auto;max-height:380px;overflow-y:auto">
-      <table class="exec-table">
-        <thead><tr>
-          <th>Time</th><th>Pair</th><th>Dir</th><th>Entry¢</th>
-          <th>Contracts</th><th>Size $</th><th>Close $</th><th>Result</th><th>Payout</th>
-        </tr></thead>
-        <tbody id="exec-tbody">
-          <tr><td colspan="9" style="text-align:center;color:var(--text2);padding:20px">No executed trades yet</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <div id="exec-summary" style="display:flex;gap:18px;flex-wrap:wrap;padding:10px 4px 2px;font-size:0.7rem;color:var(--text2);border-top:1px solid var(--border);margin-top:8px"></div>
-  </div>
-
-  <!-- Daily Breakdown -->
   <div class="card">
     <div class="card-hdr"><span class="card-title">Daily Breakdown</span></div>
     <div style="overflow-x:auto">
       <table class="tbl">
-        <thead><tr><th>Date</th><th>Signals</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Executed</th><th>Mode</th></tr></thead>
+        <thead><tr><th>Date</th><th>Signals</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Mode</th></tr></thead>
         <tbody id="hist-tbody"></tbody>
       </table>
     </div>
@@ -658,17 +549,22 @@ input[type=number]:focus{border-color:var(--accent)}
         <div class="toggle live-mode" id="tgl-live" onclick="toggleSetting('mode')"></div>
       </div>
       <div class="toggle-row">
-        <div>
-          <div class="tgl-lbl">Martingale</div>
-          <div class="tgl-sub">Increase stake after each loss using the sequence below, reset on win</div>
-        </div>
+        <div><div class="tgl-lbl">Martingale</div><div class="tgl-sub">Increase stake by step after each loss, reset on win</div></div>
         <div class="toggle" id="tgl-mart" onclick="toggleSetting('martingale')"></div>
+      </div>
+      <div class="toggle-row">
+        <div><div class="tgl-lbl">Loss Cooldown</div><div class="tgl-sub">Sit out 2 candles after 2 consecutive losses</div></div>
+        <div class="toggle" id="tgl-cooldown" onclick="toggleSetting('cooldown')"></div>
+      </div>
+      <div class="toggle-row">
+        <div><div class="tgl-lbl">Family Rotation</div><div class="tgl-sub">Rotate between token families: BTC+ETH → DOGE+SOL → XRP+BNB</div></div>
+        <div class="toggle" id="tgl-family" onclick="toggleSetting('family')"></div>
       </div>
 
       <div class="form-group" style="margin-top:16px">
         <label class="form-lbl">Martingale Sequence ($)</label>
         <input type="text" id="inp-seq" value="1,1.5,2,3,4.5,6.7" placeholder="e.g. 1,1.5,2,3,4.5" style="font-family:monospace"/>
-        <div class="form-hint">Comma-separated stakes per loss step. Last value repeats if streak exceeds list length.</div>
+        <div class="form-hint">Comma-separated stakes per loss step. Decimals OK (1dp). Last value repeats if streak exceeds list length.</div>
       </div>
       <div class="form-group">
         <label class="form-lbl">Loss Cap (hard reset)</label>
@@ -680,86 +576,7 @@ input[type=number]:focus{border-color:var(--accent)}
         <div id="mart-streak-disp" style="font-size:1.4rem;font-weight:800;color:var(--down)">0</div>
         <div class="form-hint">Resets to 0 on next win or when cap is reached</div>
       </div>
-
-      <!-- Info block: removed controls explanation -->
-      <div style="margin-top:16px;padding:10px 12px;background:rgba(123,179,247,0.06);border:1px solid rgba(123,179,247,0.18);border-radius:8px;font-size:0.68rem;color:var(--text2);line-height:1.7">
-        <div style="font-weight:700;color:var(--text);margin-bottom:4px">ℹ️ Signal Engine v3 — auto-managed controls</div>
-        <div><b style="color:var(--text)">Confidence thresholds</b> — set per-pair in PAIR_CONFIG (BTC/BNB: 72%, ETH: 58%, others: 65%). No global slider needed.</div>
-        <div style="margin-top:3px"><b style="color:var(--text)">Family rotation</b> — handled automatically inside the signal engine on every candle. No toggle needed.</div>
-        <div style="margin-top:3px"><b style="color:var(--text)">Loss cooldown</b> — the cluster escalator in the engine raises the confidence bar after 3 consecutive same-direction signals. Automatic.</div>
-        <div style="margin-top:3px"><b style="color:var(--text)">Pair inversion</b> — XRP-USDT trades the opposite direction of its signal automatically (set in PAIR_CONFIG).</div>
-      </div>
     </div>
-    <!-- Platform execution toggles -->
-    <div class="card" style="border:1px solid rgba(99,179,237,0.3)">
-      <div class="card-hdr"><span class="card-title">🔀 Platform Execution</span></div>
-      <div class="form-hint" style="margin-bottom:12px;color:var(--text2)">
-        Toggle one or both platforms. When both are ON, signals execute on each simultaneously with independent position sizes.
-      </div>
-
-      <!-- Limitless toggle -->
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
-        <div>
-          <div style="font-weight:700;font-size:0.85rem">⚡ Limitless</div>
-          <div style="font-size:0.68rem;color:var(--text2);margin-top:2px">15-min markets · EIP-712 · Polygon</div>
-        </div>
-        <div id="tgl-limitless" class="toggle" onclick="this.classList.toggle('on')">
-          <div class="toggle-knob"></div>
-        </div>
-      </div>
-
-      <!-- Polymarket toggle -->
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
-        <div>
-          <div style="font-weight:700;font-size:0.85rem">🟣 Polymarket</div>
-          <div style="font-size:0.68rem;color:var(--text2);margin-top:2px">GTC limit orders · CLOB · btc/eth/sol/xrp/bnb/doge-updown-15m</div>
-        </div>
-        <div id="tgl-polymarket" class="toggle" onclick="this.classList.toggle('on')">
-          <div class="toggle-knob"></div>
-        </div>
-      </div>
-
-      <!-- Polymarket position size (shown when Polymarket is toggled on) -->
-      <div id="poly-size-section" style="margin-top:12px">
-        <div class="form-group" style="margin-bottom:10px">
-          <label class="form-lbl">Polymarket Position Size (USD)</label>
-          <input type="number" id="inp-poly-size" value="10" min="1" max="1000" step="0.5"/>
-          <div class="form-hint">Independent of Limitless position size</div>
-        </div>
-        <div class="form-group">
-          <label class="form-lbl">Polymarket Max Contract Price</label>
-          <input type="number" id="inp-poly-max-price" value="0.50" min="0.01" max="0.999" step="0.001"/>
-          <div class="form-hint">GTC limit price cap (0.50 = never buy above 50¢)</div>
-        </div>
-        <!-- Credential status display -->
-        <div id="poly-cred-status" style="font-size:0.72rem;padding:10px;background:var(--surface2);border-radius:8px;margin-top:8px">
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-            <span id="poly-cred-dot" style="width:8px;height:8px;border-radius:50%;background:var(--text2);flex-shrink:0"></span>
-            <span id="poly-cred-msg" style="font-weight:600">Checking credentials…</span>
-          </div>
-          <div id="poly-cred-detail" style="color:var(--text2);line-height:1.6;display:none">
-            <div id="poly-cred-pk"></div>
-            <div id="poly-cred-key"></div>
-            <div id="poly-cred-wallet"></div>
-          </div>
-        </div>
-
-        <!-- L2 key derivation button -->
-        <div id="poly-derive-section" style="margin-top:10px;display:none">
-          <div style="font-size:0.7rem;color:var(--text2);margin-bottom:6px">
-            POLYMARKET_PRIVATE_KEY is set but L2 API credentials are missing.<br>
-            Click below to generate them — results will appear in your Render logs.
-          </div>
-          <button id="btn-derive-key"
-            onclick="derivePolyKey()"
-            style="width:100%;padding:8px;background:rgba(192,132,252,0.15);border:1px solid rgba(192,132,252,0.4);border-radius:6px;color:#c084fc;font-size:0.75rem;font-weight:700;cursor:pointer">
-            🔑 Generate L2 API Key
-          </button>
-          <div id="poly-derive-result" style="margin-top:6px;font-size:0.68rem;display:none"></div>
-        </div>
-      </div>
-    </div>
-
     <div class="card">
       <div class="card-hdr"><span class="card-title">Position Sizing</span></div>
       <div class="form-group">
@@ -781,7 +598,16 @@ input[type=number]:focus{border-color:var(--accent)}
         <input type="number" id="inp-cp" value="0.50" min="0.01" max="0.50" step="0.01"/>
         <div class="form-hint">Limitless max is $0.50 per contract</div>
       </div>
-
+      <div class="form-group">
+        <label class="form-lbl">Min ML Confidence</label>
+        <input type="range" id="rng-conf" min="0.55" max="0.75" step="0.01" value="0.58" oninput="document.getElementById('conf-disp').textContent=Math.round(this.value*100)+'%'"/>
+        <div style="display:flex;justify-content:space-between;margin-top:5px">
+          <span style="font-size:0.7rem;color:var(--text2)">55%</span>
+          <span style="font-weight:800;color:var(--accent)" id="conf-disp">58%</span>
+          <span style="font-size:0.7rem;color:var(--text2)">75%</span>
+        </div>
+        <div class="form-hint">Higher = fewer but stronger signals</div>
+      </div>
     </div>
   </div>
 
@@ -832,7 +658,7 @@ input[type=number]:focus{border-color:var(--accent)}
 // STATE
 // ═══════════════════════════════════
 let state = {
-  settings: {mode:'shadow',position_size:10,use_martingale:false,max_contract_price:0.50},
+  settings: {mode:'shadow',position_size:10,use_martingale:false,martingale_multiplier:2,max_contract_price:0.50,min_confidence:0.58},
   signalsPage: 1,
   perfChart: null,
   histChart: null,
@@ -842,16 +668,13 @@ let state = {
 // WEBSOCKET
 // ═══════════════════════════════════
 const socket = io({transports:['websocket','polling'],reconnectionAttempts:10,reconnectionDelay:2000});
-socket.on('connect', () => { loadTodayStats(); loadTodaySignals(); refreshTradeActivity(); });
+socket.on('connect', () => { loadTodayStats(); loadTodaySignals(); });
 socket.on('new_signal', sig => {
-  refreshTradeActivity();
   loadTodaySignals(); loadTodayStats();
   toast(`📡 ${sig.symbol} ${sig.signal_direction} ${Number(sig.ml_confidence).toFixed(1)}%`, 'signal');
 });
 socket.on('signal_resolved', sig => {
-  refreshTradeActivity();
   loadTodaySignals(); loadTodayStats(); loadShadowBalance();
-  loadSettings();
   const t = sig.outcome==='WIN' ? 'win' : 'loss';
   toast(`${sig.outcome==='WIN'?'✅':'❌'} ${sig.symbol} ${sig.signal_direction} → ${sig.outcome}`, t);
 });
@@ -903,10 +726,10 @@ function showPage(name, el) {
   if (mNav) mNav.classList.add('active');
   window.scrollTo(0,0);
   if (name==='signals')  loadSignals();
-  if (name==='history') { loadHistory(); loadExecutedTrades(); }
+  if (name==='history')  loadHistory();
   if (name==='shadow')   { loadShadowBalance(); loadShadowSignals(); }
   if (name==='settings') loadSettings();
-  if (name==='dashboard') { loadPairStats(); refreshTradeActivity(); }
+  if (name==='dashboard') loadPairStats();
 }
 
 // ═══════════════════════════════════
@@ -1000,12 +823,13 @@ async function loadTodaySignals() {
              : f==='UNFILLED' ? '<span class="outcome-badge ob-loss" style="margin-left:4px">UNFILLED</span>'
              :                  '<span class="outcome-badge ob-neutral" style="margin-left:4px">–</span>';
       })(s.limitless_fill||'NEUTRAL');
+      // Tail pattern badge
       const tailScore = s.tail_direction_score || 0;
       const tailDom   = s.tail_dominance || 0;
       const hasTail   = (dir==='UP' && tailScore > 0.05 && tailDom > 0.2) ||
                         (dir==='DOWN' && tailScore < -0.05 && tailDom > 0.2);
       const tailBadge = hasTail
-        ? `<span style="font-size:0.62rem;background:rgba(255,200,0,0.12);color:var(--warn);border:1px solid rgba(255,200,0,0.3);border-radius:4px;padding:1px 5px;margin-left:4px">${dir==='UP'?'🪝⬆':'🪝⬇'} tail</span>`
+        ? `<span title="Wick-before-direction tail pattern" style="font-size:0.62rem;background:rgba(255,200,0,0.12);color:var(--warn);border:1px solid rgba(255,200,0,0.3);border-radius:4px;padding:1px 5px;margin-left:4px">${dir==='UP'?'🪝⬆':'🪝⬇'} tail</span>`
         : '';
       return `<div class="sig-card ${out}">
         <div class="sig-arrow ${dir.toLowerCase()}">${dir==='UP'?'▲':'▼'}</div>
@@ -1033,16 +857,14 @@ async function loadPairStats() {
     const d = await r.json();
     const tbody = document.getElementById('pair-tbody');
     if (!tbody) return;
-    // Family A = BTC/ETH/BNB (threshold 72%) — high confidence gate
-    // Family B = SOL/XRP/DOGE (threshold 65%) — mid confidence gate
-    const FAMILY_C = {A:'var(--win)',B:'var(--warn)'};
+    const TIER_C = {A:'var(--win)',B:'var(--warn)',C:'var(--text2)'};
     tbody.innerHTML = Object.entries(d).map(([sym,s]) => {
       const wr = s.win_rate;
       const wrC = wr===null?'var(--accent)':wr>=60?'var(--win)':wr>=50?'var(--warn)':'var(--loss)';
       const status = wr===null?'—':wr>=60?'✅ Strong':wr>=55?'⚡ Good':wr>=50?'⚠️ Weak':'❌ Poor';
       return `<tr>
         <td style="font-weight:700">${sym}</td>
-        <td style="color:${FAMILY_C[s.tier]||'var(--text2)'};font-weight:700">Family ${s.tier}</td>
+        <td style="color:${TIER_C[s.tier]||'var(--text2)'};font-weight:700">Tier ${s.tier}</td>
         <td style="color:var(--accent2)">${(s.threshold*100).toFixed(0)}%</td>
         <td style="color:var(--win)">${s.wins}</td>
         <td style="color:var(--loss)">${s.losses}</td>
@@ -1054,126 +876,6 @@ async function loadPairStats() {
 }
 
 // ═══════════════════════════════════
-// POLYMARKET KEY DERIVATION
-async function derivePolyKey() {
-  const btn    = document.getElementById('btn-derive-key');
-  const result = document.getElementById('poly-derive-result');
-  if (!btn || !result) return;
-
-  btn.disabled    = true;
-  btn.textContent = '⏳ Generating…';
-  result.style.display = '';
-  result.style.color   = 'var(--text2)';
-  result.textContent   = 'Calling POST /auth/api-key on Polymarket…';
-
-  try {
-    const r = await fetch('/api/polymarket/derive-key', {method: 'POST'});
-    const d = await r.json();
-
-    if (d.success) {
-      result.style.color = 'var(--win)';
-      result.innerHTML =
-        `✓ L2 credentials generated! Add these to Render env vars:<br>` +
-        `<b>POLYMARKET_API_KEY</b> = ${d.api_key}<br>` +
-        `<b>POLYMARKET_API_SECRET</b> = ${d.api_secret}<br>` +
-        `<b>POLYMARKET_API_PASSPHRASE</b> = ${d.api_passphrase}<br>` +
-        `<span style="color:var(--text2)">Then redeploy — the credential indicator will turn green.</span>`;
-    } else {
-      result.style.color = 'var(--down)';
-      result.textContent = `✗ Failed: ${d.error || 'unknown error'}`;
-      btn.disabled    = false;
-      btn.textContent = '🔑 Generate L2 API Key';
-    }
-  } catch(e) {
-    result.style.color = 'var(--down)';
-    result.textContent = `✗ Request failed: ${e.message}`;
-    btn.disabled    = false;
-    btn.textContent = '🔑 Generate L2 API Key';
-  }
-}
-
-// PAIR COOLDOWN PANEL
-function updateCooldownPanel(s) {
-  // ── Early session warning ──────────────────────────────────────────────────
-  const nowUTC  = new Date();
-  const utcMins = nowUTC.getUTCHours() * 60 + nowUTC.getUTCMinutes();
-  const earlyEl = document.getElementById('cooldown-early-session');
-  if (earlyEl) earlyEl.style.display = (utcMins >= 480 && utcMins < 570) ? '' : 'none';
-
-  // ── Active cooldowns ───────────────────────────────────────────────────────
-  const listEl = document.getElementById('cooldown-pairs-list');
-  if (listEl) {
-    let cooldowns = {};
-    try { cooldowns = JSON.parse(s.pair_loss_cooldowns || '{}'); } catch(e) {}
-    const pairs = Object.keys(cooldowns);
-    if (!pairs.length) {
-      listEl.innerHTML = '<span style="color:var(--text2);font-size:0.72rem;font-style:italic">All pairs active — no cooldowns</span>';
-    } else {
-      listEl.innerHTML = pairs.map(pair => {
-        const state = cooldowns[pair];
-        const rem   = state.candles_remaining || 0;
-        const tier  = state.tier || 'T2';
-        return `<span style="display:inline-flex;align-items:center;gap:5px;background:rgba(255,77,109,0.1);border:1px solid rgba(255,77,109,0.3);border-radius:6px;padding:3px 10px;font-size:0.72rem">
-          <span style="color:var(--down);font-weight:700">🔒 ${pair}</span>
-          <span style="color:${tier==='T1'?'var(--warn)':'var(--down)'}">${tier}</span>
-          <span style="color:var(--text2)">${rem} candle${rem!==1?'s':''} (${rem*15}m)</span>
-        </span>`;
-      }).join('');
-    }
-  }
-
-  // ── No-execute pairs ───────────────────────────────────────────────────────
-  const nepEl = document.getElementById('no-execute-pairs-list');
-  if (nepEl) {
-    let noExec = [];
-    try { noExec = JSON.parse(s.no_execute_pairs || '["XRP-USDT"]'); } catch(e) {}
-    if (!noExec.length) {
-      nepEl.innerHTML = '<span style="color:var(--text2);font-size:0.72rem;font-style:italic">All pairs executing live orders</span>';
-    } else {
-      nepEl.innerHTML = noExec.map(pair =>
-        `<span style="display:inline-flex;align-items:center;gap:5px;background:rgba(255,165,0,0.1);border:1px solid rgba(255,165,0,0.35);border-radius:6px;padding:3px 10px;font-size:0.72rem">
-          <span style="color:#f6a030;font-weight:700">👁 ${pair}</span>
-          <span style="color:var(--text2)">signal only</span>
-        </span>`
-      ).join('');
-    }
-  }
-
-  // ── Cooldown event log ─────────────────────────────────────────────────────
-  const logEl = document.getElementById('cooldown-log-list');
-  if (logEl) {
-    let logEntries = [];
-    try { logEntries = JSON.parse(s.cooldown_log || '[]'); } catch(e) {}
-    const last20 = logEntries.slice(-20).reverse(); // newest first
-    if (!last20.length) {
-      logEl.innerHTML = '<span style="color:var(--text2);font-size:0.72rem;font-style:italic">No cooldown events yet</span>';
-    } else {
-      logEl.innerHTML = last20.map(ev => {
-        const isSet     = ev.event === 'COOLDOWN_SET';
-        const bgColor   = isSet ? 'rgba(255,77,109,0.07)' : 'rgba(0,229,160,0.07)';
-        const bdColor   = isSet ? 'rgba(255,77,109,0.25)' : 'rgba(0,229,160,0.2)';
-        const icon      = isSet ? '🔒' : '✅';
-        const evLabel   = isSet ? `Cooldown set (${ev.candles || 0} candle${ev.candles!==1?'s':''}, ${(ev.candles||0)*15}m)` : 'Cooldown cleared';
-        const tierBadge = ev.tier ? `<span style="font-size:0.62rem;background:rgba(255,255,255,0.07);border-radius:3px;padding:1px 5px;margin-left:4px">${ev.tier}</span>` : '';
-        const outcBadge = ev.outcome
-          ? `<span style="font-size:0.62rem;color:${ev.outcome==='WIN'?'var(--up)':'var(--down)'};margin-left:4px">${ev.outcome}</span>`
-          : '';
-        return `<div style="display:flex;align-items:flex-start;gap:8px;padding:5px 8px;border-radius:6px;background:${bgColor};border:1px solid ${bdColor};font-size:0.7rem">
-          <span>${icon}</span>
-          <div style="flex:1;min-width:0">
-            <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px">
-              <span style="font-weight:700;color:var(--text)">${ev.pair || '?'}</span>
-              ${tierBadge}${outcBadge}
-              <span style="color:var(--text2)">· ${evLabel}</span>
-            </div>
-            <div style="color:var(--text2);font-size:0.65rem;margin-top:1px">${ev.ts || ''} · ${ev.reason || ''}</div>
-          </div>
-        </div>`;
-      }).join('');
-    }
-  }
-}
-
 // 7-DAY PERF CHART
 // ═══════════════════════════════════
 async function loadPerfChart() {
@@ -1208,12 +910,10 @@ async function loadSignals() {
   const sym  = document.getElementById('f-sym').value;
   const out  = document.getElementById('f-out').value;
   const date = document.getElementById('f-date').value;
-  const dip  = document.getElementById('f-dip') ? document.getElementById('f-dip').value : '';
   const p    = new URLSearchParams({page:state.signalsPage,per_page:25});
   if (sym)  p.append('symbol',sym);
   if (out)  p.append('outcome',out);
   if (date) p.append('date_filter',date);
-  if (dip)  p.append('best_dip',dip);
   try {
     const r = await fetch('/api/signals?'+p);
     if (!r.ok) return;
@@ -1233,246 +933,32 @@ async function loadSignals() {
         <td>$${s.open_price!=null?Number(s.open_price).toFixed(4):'—'}</td>
         <td>${s.close_price!=null?'$'+Number(s.close_price).toFixed(4):'—'}</td>
         <td>${(function(p){
-          if(p===null||p===undefined) return '<span style="color:var(--text2);font-size:0.75rem">—</span>';
-          const n=parseFloat(p);
-          const [col,icon]=n<=20?['#ffd700','🎯']:n<=40?['var(--win)','✅']:n<=60?['var(--warn)','⚠️']:['var(--text2)',''];
-          return `<span style="color:${col};font-weight:700;font-size:0.8rem">${icon} ${n.toFixed(1)}¢</span>`;
+          if (p === null || p === undefined) return '<span style="color:var(--text2);font-size:0.75rem">—</span>';
+          const n = parseFloat(p);
+          // ≤20% = gold (hit best-entry target)
+          // 21–40% = green (good limit entry zone)
+          // 41–60% = amber (moderate pullback)
+          // >60% = grey (no meaningful pullback)
+          const [col, icon, label] =
+            n <= 20 ? ['#ffd700','🎯', n.toFixed(1)+'%'] :
+            n <= 40 ? ['var(--win)','✅', n.toFixed(1)+'%'] :
+            n <= 60 ? ['var(--warn)','⚠️', n.toFixed(1)+'%'] :
+                      ['var(--text2)','', n.toFixed(1)+'%'];
+          return `<span style="color:${col};font-weight:700;font-size:0.8rem">${icon} ${label}</span>`;
         })(s.best_entry_pct)}</td>
         <td><span class="outcome-badge ${out==='win'?'ob-win':out==='loss'?'ob-loss':'ob-pending'}">${s.outcome||'PENDING'}</span></td>
         <td>${(function(f){return f==='FILLED'?'<span class="outcome-badge ob-win">FILLED</span>':f==='UNFILLED'?'<span class="outcome-badge ob-loss">UNFILLED</span>':'<span class="outcome-badge ob-neutral">–</span>';})(s.limitless_fill||'NEUTRAL')}</td>
-        <td>${(function(p,f){
-          if(!p) return '<span class="outcome-badge ob-neutral">–</span>';
-          return f==='FILLED'?'<span class="outcome-badge ob-win">FILLED</span>':
-                 f==='UNFILLED'?'<span class="outcome-badge ob-loss">UNFILLED</span>':
-                 f==='PENDING'?'<span class="outcome-badge ob-pending">PENDING</span>':
-                 '<span class="outcome-badge ob-neutral">–</span>';
-        })(s.poly_order_id, s.poly_fill||'NEUTRAL')}</td>
       </tr>`;
-    }).join('') || '<tr><td colspan="12" style="text-align:center;color:var(--text2);padding:20px">No signals yet</td></tr>';
+    }).join('') || '<tr><td colspan="11" style="text-align:center;color:var(--text2);padding:20px">No signals yet</td></tr>';
     const pages = document.getElementById('signals-pages');
     pages.innerHTML = Array.from({length:Math.min(d.pages,8)},(_,i)=>
       `<button class="pg-btn ${i+1===state.signalsPage?'active':''}" onclick="setSigPage(${i+1})">${i+1}</button>`
     ).join('');
   } catch(e) { console.error(e); }
-  // Load dip stats whenever signals tab is shown
-  loadDipStats();
 }
 function setSigPage(p) { state.signalsPage=p; loadSignals(); }
 
-// ── Best Dip stats bar ────────────────────────────────────────────────────────
-async function loadDipStats() {
-  const bar  = document.getElementById('dip-stats-bar');
-  const grid = document.getElementById('dip-stats-grid');
-  if (!bar || !grid) return;
-  try {
-    const r = await fetch('/api/signals/dip_stats');
-    if (!r.ok) return;
-    const d = await r.json();
-    const thresholds = [5, 10, 20, 30, 40];
-    const total = d.total_resolved || 0;
-
-    if (total === 0) { bar.style.display = 'none'; return; }
-    bar.style.display = '';
-
-    grid.innerHTML = thresholds.map(t => {
-      const stat    = d.thresholds[String(t)] || {};
-      const hits    = stat.hits    || 0;
-      const wins    = stat.wins    || 0;
-      const losses  = stat.losses  || 0;
-      const rangeStr = stat.range  || (t + '¢');
-      const winRate = stat.win_rate != null ? stat.win_rate.toFixed(1) + '%' : '—';
-      const hitRate = stat.hit_rate != null ? stat.hit_rate.toFixed(1) + '%' : '—';
-      const isTarget = t <= 20;
-      const col = t <= 10 ? '#ffd700'
-                : t <= 20 ? '#ffd700'
-                : t <= 30 ? 'var(--win)'
-                :            'var(--accent)';
-      const icon = t <= 20 ? '🎯' : '✅';
-      return `
-        <div style="background:var(--surface1,#0e1117);border-radius:8px;padding:7px 4px;
-                    border:1px solid ${isTarget ? 'rgba(255,215,0,0.25)' : 'var(--border)'}">
-          <div style="font-size:0.6rem;font-weight:800;color:${col}">${icon} ${rangeStr}</div>
-          <div style="font-size:1.1rem;font-weight:900;color:${col};line-height:1.1">${hits}</div>
-          <div style="font-size:0.55rem;color:var(--text2)">signals</div>
-          <div style="font-size:0.58rem;color:var(--text2);margin-top:3px">${hitRate} of all</div>
-          <div style="font-size:0.6rem;font-weight:700;color:${wins>losses?'var(--win)':'var(--down)'}">
-            ${wins}W / ${losses}L
-          </div>
-          <div style="font-size:0.55rem;color:var(--text2)">win: ${winRate}</div>
-        </div>`;
-    }).join('');
-  } catch(e) {
-    console.warn('[DipStats] error:', e);
-  }
-}
-
 // ═══════════════════════════════════
-// ── TRADE ACTIVITY (dashboard) — shows ONLY the current pending signal ─────────
-function renderTradeActivity(signals) {
-  const card = document.getElementById('trade-activity-card');
-  const box  = document.getElementById('trade-activity-current');
-  if (!card || !box) return;
-
-  // Find the single PENDING signal, if any
-  const pending = (signals || []).find(s => (s.outcome || 'PENDING').toUpperCase() === 'PENDING');
-
-  if (!pending) {
-    card.style.display = 'none';
-    box.innerHTML = '';
-    return;
-  }
-  card.style.display = '';
-
-  let noExecPairs = [];
-  try { noExecPairs = JSON.parse(state.settings?.no_execute_pairs || '[]'); } catch(e) {}
-
-  const s     = pending;
-  const dir   = (s.signal_direction||'').toUpperCase();
-  const isUp  = dir === 'UP';
-  const fill  = (s.limitless_fill||'NEUTRAL').toUpperCase();
-  const noExec= noExecPairs.includes(s.symbol);
-  const mode  = (s.mode||'shadow').toLowerCase();
-
-  let placedHtml = '';
-  if (mode === 'shadow')      placedHtml = '<span class="tr-status trs-noexec">SHADOW</span>';
-  else if (noExec)            placedHtml = '<span class="tr-status trs-noexec">SIGNAL ONLY</span>';
-  else                        placedHtml = '<span class="tr-status trs-placed">ORDER SENT</span>';
-
-  let execHtml = '';
-  if (mode === 'shadow' || noExec) {
-    execHtml = '';
-  } else if (fill === 'FILLED') {
-    const cp = s.contract_price != null ? (parseFloat(s.contract_price)*100).toFixed(1)+'¢' : '—';
-    execHtml = `<span class="tr-status trs-exec">✓ FILLED @ ${cp}</span>`;
-  } else if (fill === 'UNFILLED') {
-    execHtml = '<span class="tr-status trs-unfilled">✗ UNFILLED</span>';
-  } else {
-    execHtml = '<span class="tr-status trs-pending">Checking…</span>';
-  }
-
-  const ot = s.candle_open_time  ? new Date(s.candle_open_time+'Z').toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '—';
-  const ct = s.candle_close_time ? new Date(s.candle_close_time+'Z').toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '—';
-  const rowClass = fill==='FILLED'?'executed': fill==='UNFILLED'?'unfilled':'placed';
-
-  box.innerHTML = `<div class="trade-row ${rowClass}">
-    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap">
-      <span class="tr-pair">${s.symbol||'?'}</span>
-      <span class="tr-dir ${isUp?'up':'dn'}">${isUp?'▲ UP':'▼ DOWN'}</span>
-      <span class="tr-meta">${ot}–${ct} UTC</span>
-      <span class="tr-meta">conf ${s.ml_confidence||'—'}%</span>
-      ${s.contracts_bought!=null?`<span class="tr-meta">${s.contracts_bought} cts</span>`:''}
-      ${s.position_size!=null?`<span class="tr-meta">$${parseFloat(s.position_size).toFixed(2)}</span>`:''}
-    </div>
-    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end">
-      ${placedHtml}
-      ${execHtml}
-    </div>
-  </div>`;
-}
-
-// Called when signals list is refreshed (today + new_signal WS event)
-function refreshTradeActivity() {
-  fetch('/api/signals/today')
-    .then(r => r.json())
-    .then(d => renderTradeActivity(Array.isArray(d) ? d : (d.signals || [])))
-    .catch(() => {});
-}
-
-// ── EXECUTED TRADES TABLE (history page) ───────────────────────────────────
-function loadExecutedTrades() {
-  // Fetch all signals with limitless_fill=FILLED from the signals endpoint
-  fetch('/api/signals?per_page=200&fill=FILLED')
-    .then(r => r.json())
-    .then(data => {
-      const tbody   = document.getElementById('exec-tbody');
-      const summary = document.getElementById('exec-summary');
-      if (!tbody) return;
-
-      const rows = (data.signals || []).filter(s =>
-        (s.limitless_fill||'').toUpperCase() === 'FILLED'
-      );
-
-      if (!rows.length) {
-        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text2);padding:20px">No executed trades yet</td></tr>';
-        if (summary) summary.innerHTML = '';
-        return;
-      }
-
-      tbody.innerHTML = rows.map(s => {
-        const out   = (s.outcome||'PENDING').toUpperCase();
-        const dir   = (s.signal_direction||'').toUpperCase();
-        const isUp  = dir === 'UP';
-        const cp    = s.contract_price  != null ? (parseFloat(s.contract_price)*100).toFixed(1) : '—';
-        const cts   = s.contracts_bought!= null ? parseFloat(s.contracts_bought).toFixed(0) : '—';
-        const size  = s.position_size   != null ? '$'+parseFloat(s.position_size).toFixed(2) : '—';
-        const close = s.close_price     != null ? '$'+parseFloat(s.close_price).toFixed(4)   : '—';
-        const ot    = s.candle_open_time
-          ? new Date(s.candle_open_time+'Z').toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})
-          : '—';
-
-        // Estimated payout for wins
-        let payout = '—';
-        if (out==='WIN' && s.contract_price && s.contracts_bought && s.position_size) {
-          const payout_val = (parseFloat(s.contracts_bought) * 1.0);  // $1 per contract on win
-          const profit = payout_val - parseFloat(s.position_size);
-          payout = `<span style="color:var(--win)">+$${profit.toFixed(2)}</span>`;
-        } else if (out==='LOSS' && s.position_size) {
-          payout = `<span style="color:var(--loss)">-$${parseFloat(s.position_size).toFixed(2)}</span>`;
-        }
-
-        const rowClass = out==='WIN'?'ex-win':out==='LOSS'?'ex-loss':'';
-        const dirSpan  = isUp
-          ? '<span style="color:var(--win);font-weight:700">▲ UP</span>'
-          : '<span style="color:var(--loss);font-weight:700">▼ DOWN</span>';
-        const outSpan  = out==='WIN'
-          ? '<span class="outcome-badge ob-win">WIN</span>'
-          : out==='LOSS'
-          ? '<span class="outcome-badge ob-loss">LOSS</span>'
-          : '<span class="outcome-badge ob-pending">PENDING</span>';
-
-        return `<tr class="${rowClass}">
-          <td>${ot}</td>
-          <td style="font-weight:700">${s.symbol||'?'}</td>
-          <td>${dirSpan}</td>
-          <td style="color:var(--accent2)">${cp}¢</td>
-          <td>${cts}</td>
-          <td>${size}</td>
-          <td>${close}</td>
-          <td>${outSpan}</td>
-          <td>${payout}</td>
-        </tr>`;
-      }).join('');
-
-      // Summary bar
-      if (summary) {
-        const wins   = rows.filter(r=>(r.outcome||'').toUpperCase()==='WIN').length;
-        const losses = rows.filter(r=>(r.outcome||'').toUpperCase()==='LOSS').length;
-        const total  = wins + losses;
-        const wr     = total ? (wins/total*100).toFixed(1) : '—';
-        const totalPnl = rows.reduce((acc, s) => {
-          if ((s.outcome||'').toUpperCase()==='WIN' && s.contracts_bought && s.position_size) {
-            return acc + (parseFloat(s.contracts_bought) - parseFloat(s.position_size));
-          } else if ((s.outcome||'').toUpperCase()==='LOSS' && s.position_size) {
-            return acc - parseFloat(s.position_size);
-          }
-          return acc;
-        }, 0);
-        const pnlColor = totalPnl >= 0 ? 'var(--win)' : 'var(--loss)';
-        summary.innerHTML = `
-          <span><b style="color:var(--text)">${rows.length}</b> executed</span>
-          <span><b style="color:var(--win)">${wins}W</b> / <b style="color:var(--loss)">${losses}L</b></span>
-          <span>WR <b style="color:var(--accent)">${wr}%</b></span>
-          <span>P&L <b style="color:${pnlColor}">${totalPnl>=0?'+':''}$${totalPnl.toFixed(2)}</b></span>
-        `;
-      }
-
-      // Update h-executed counter
-      const hExec = document.getElementById('h-executed');
-      if (hExec) hExec.textContent = rows.length;
-    })
-    .catch(err => console.warn('[execTrades] fetch error:', err));
-}
-
 // HISTORY PAGE
 // ═══════════════════════════════════
 async function loadHistory() {
@@ -1495,10 +981,9 @@ async function loadHistory() {
         <td style="color:var(--win)">${d.wins}</td>
         <td style="color:var(--loss)">${d.losses}</td>
         <td style="color:${c};font-weight:700">${wr.toFixed(1)}%</td>
-        <td style="color:var(--win);font-weight:700">${d.executed_count!=null?d.executed_count:'—'}</td>
         <td><span class="outcome-badge ${d.mode==='live'?'ob-loss':'ob-pending'}" style="padding:2px 8px">${d.mode}</span></td>
       </tr>`;
-    }).join('') || '<tr><td colspan="7" style="text-align:center;color:var(--text2);padding:20px">No history yet</td></tr>';
+    }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--text2);padding:20px">No history yet</td></tr>';
     // Chart
     const labels = data.map(d=>d.date.slice(5)).reverse();
     const wrs    = data.map(d=>d.win_rate).reverse();
@@ -1567,77 +1052,14 @@ async function loadSettings() {
     if (!r.ok) return;
     state.settings = await r.json();
     applySettingsUI();
-    updateCooldownPanel(state.settings);
-  // Update platform badge
-  const _platBadge = document.getElementById('platform-badge');
-  if (_platBadge) {
-    const _ltl  = state.settings.use_limitless !== false;
-    const _poly = !!state.settings.use_polymarket;
-    if (_ltl && _poly)  { _platBadge.textContent = '⚡🟣 LTL+POLY'; _platBadge.style.color = '#ffd700'; }
-    else if (_poly)     { _platBadge.textContent = '🟣 POLY';       _platBadge.style.color = '#c084fc'; }
-    else                { _platBadge.textContent = '⚡ LTL';        _platBadge.style.color = '#63b3ed'; }
-  }
   } catch(e) {}
 }
 function applySettingsUI() {
   const s = state.settings;
   document.getElementById('tgl-live').classList.toggle('on', s.mode==='live');
   document.getElementById('tgl-mart').classList.toggle('on', !!s.use_martingale);
-  document.getElementById('tgl-limitless').classList.toggle('on',
-    s.use_limitless !== undefined ? !!s.use_limitless : true);
-  document.getElementById('tgl-polymarket').classList.toggle('on', !!s.use_polymarket);
-  document.getElementById('inp-poly-size').value      = s.poly_position_size || 10;
-  document.getElementById('inp-poly-max-price').value = s.poly_max_price || 0.50;
-
-  // Check Polymarket credentials — show L1/L2 status + derive button
-  fetch('/api/polymarket/status')
-    .then(r => r.json())
-    .then(d => {
-      const dot    = document.getElementById('poly-cred-dot');
-      const msg    = document.getElementById('poly-cred-msg');
-      const detail = document.getElementById('poly-cred-detail');
-      const pkEl   = document.getElementById('poly-cred-pk');
-      const keyEl  = document.getElementById('poly-cred-key');
-      const walEl  = document.getElementById('poly-cred-wallet');
-      const derSec = document.getElementById('poly-derive-section');
-      if (!dot || !msg) return;
-
-      const creds = d.credentials || {};
-      const hasPK  = creds.POLYMARKET_PRIVATE_KEY;
-      const hasL2  = creds.l2_ready;
-      const auth   = creds.auth_level || 'NONE';
-      const wallet = creds.wallet_address || '';
-
-      // Status dot + headline
-      if (!hasPK) {
-        dot.style.background = 'var(--down)';
-        msg.textContent = '✗ POLYMARKET_PRIVATE_KEY not set';
-        msg.style.color = 'var(--down)';
-      } else if (hasL2) {
-        dot.style.background = 'var(--win)';
-        msg.textContent = '✓ L2 Auth ready';
-        msg.style.color = 'var(--win)';
-      } else {
-        dot.style.background = 'var(--warn)';
-        msg.textContent = '⚠ L1 Auth only (L2 recommended)';
-        msg.style.color = 'var(--warn)';
-      }
-
-      // Detail lines
-      if (detail) {
-        detail.style.display = hasPK ? '' : 'none';
-        if (pkEl)  pkEl.innerHTML  = `<b>Private key:</b> ${hasPK ? '✓ set' : '✗ missing'}`;
-        if (keyEl) keyEl.innerHTML = `<b>API key/secret/passphrase:</b> ${hasL2 ? '✓ set (L2)' : '✗ not set — using L1'}`;
-        if (walEl) walEl.innerHTML = `<b>Wallet:</b> ${wallet ? wallet.slice(0,12)+'…'+wallet.slice(-6) : '—'}`;
-      }
-
-      // Show derive button only if PK is set but L2 is not
-      if (derSec) derSec.style.display = (hasPK && !hasL2) ? '' : 'none';
-    })
-    .catch(() => {
-      const msg = document.getElementById('poly-cred-msg');
-      if (msg) { msg.textContent = 'Could not reach /api/polymarket/status'; msg.style.color='var(--warn)'; }
-    });
+  document.getElementById('tgl-cooldown').classList.toggle('on', !!s.use_cooldown);
+  document.getElementById('tgl-family').classList.toggle('on', !!s.use_family_rotation);
   const ps = s.position_size||10;
   document.getElementById('rng-pos').value  = ps;
   document.getElementById('inp-pos').value  = ps;
@@ -1648,7 +1070,9 @@ function applySettingsUI() {
   const streakEl = document.getElementById('mart-streak-disp');
   if(streakEl){ streakEl.textContent = streak; streakEl.style.color = streak>0?'var(--down)':'var(--win)'; }
   document.getElementById('inp-cp').value   = s.max_contract_price||0.50;
-  // min_confidence is managed per-pair in PAIR_CONFIG — no UI slider needed
+  const conf = s.min_confidence||0.58;
+  document.getElementById('rng-conf').value = conf;
+  document.getElementById('conf-disp').textContent = Math.round(conf*100)+'%';
   // Stop loss
   const sl = s.stop_loss_balance || '';
   document.getElementById('inp-stoploss').value = sl || '';
@@ -1661,7 +1085,8 @@ function applySettingsUI() {
 function toggleSetting(type) {
   if (type==='mode')       state.settings.mode = state.settings.mode==='live'?'shadow':'live';
   if (type==='martingale') state.settings.use_martingale   = !state.settings.use_martingale;
-
+  if (type==='cooldown')   state.settings.use_cooldown     = !state.settings.use_cooldown;
+  if (type==='family')     state.settings.use_family_rotation = !state.settings.use_family_rotation;
   applySettingsUI();
 }
 function quickToggleMode() { toggleSetting('mode'); saveSettings(); }
@@ -1677,11 +1102,10 @@ async function saveSettings() {
     martingale_sequence:   document.getElementById('inp-seq').value.trim(),
     martingale_cap:        parseInt(document.getElementById('inp-cap').value),
     max_contract_price:    parseFloat(document.getElementById('inp-cp').value),
-    use_limitless:         document.getElementById('tgl-limitless').classList.contains('on'),
-    use_polymarket:        document.getElementById('tgl-polymarket').classList.contains('on'),
-    poly_position_size:    parseFloat(document.getElementById('inp-poly-size').value || 10),
-    poly_max_price:        parseFloat(document.getElementById('inp-poly-max-price').value || 0.50),
+    min_confidence:        parseFloat(document.getElementById('rng-conf').value),
+    use_cooldown:          !!state.settings.use_cooldown,
     stop_loss_balance:     slVal,
+    use_family_rotation:   !!state.settings.use_family_rotation,
   };
   try {
     const r = await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
@@ -1759,35 +1183,16 @@ async function checkApproval() {
 async function triggerSignal() {
   const el = document.getElementById('test-result');
   el.style.display = 'block';
-  el.style.borderColor = 'var(--accent)';
-  el.textContent = '⏳ Running signal generation... (up to 30s)';
-  const btn = document.querySelector('[onclick="triggerSignal()"]');
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Running...'; }
+  el.textContent = 'Triggering signal evaluation...';
+  el.style.borderColor = 'var(--border)';
   try {
     const r = await fetch('/api/trigger', {method:'POST'});
     const d = await r.json();
-    if (d.success && d.signal) {
-      el.style.borderColor = 'var(--win)';
-      el.textContent = `✅ Signal generated!
-${d.signal.symbol} ${d.signal.signal_direction} | conf=${(d.signal.ml_confidence*100).toFixed(1)}% | tier=${d.signal.tier}
-Outcome: ${d.signal.outcome}`;
-      toast(`⚡ ${d.signal.symbol} ${d.signal.signal_direction} signal generated!`, 'signal');
-    } else if (d.success) {
-      el.style.borderColor = 'var(--warn)';
-      el.textContent = `ℹ️ ${d.message || 'No qualifying signal this candle'}`;
-      toast('No qualifying signal this candle', 'info');
-    } else {
-      el.style.borderColor = 'var(--down)';
-      el.textContent = `❌ ${d.message || 'Error'}`;
-    }
-    // Reload dashboard immediately
-    await loadTodayStats();
-    await loadTodaySignals();
+    el.textContent = JSON.stringify(d, null, 2);
+    toast('⚡ Signal evaluation triggered', 'signal');
+    setTimeout(() => { loadTodayStats(); loadTodaySignals(); }, 3000);
   } catch(e) {
-    el.style.borderColor = 'var(--down)';
     el.textContent = 'Error: ' + e.message;
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '⚡ Force Signal Now'; }
   }
 }
 
@@ -1807,7 +1212,7 @@ async function init() {
 
 init();
 setInterval(loadPrices,    30000);
-setInterval(()=>{ loadTodayStats(); loadTodaySignals(); refreshTradeActivity(); }, 15000);
+setInterval(()=>{ loadTodayStats(); loadTodaySignals(); }, 15000);
 setInterval(loadPairStats, 300000);
 
 // ═══════════════════════════════════
@@ -1854,17 +1259,9 @@ setInterval(loadPairStats, 300000);
   setInterval(ping, 2000);
 })();
 
-// ═══════════════════════════════════════════════════════
-// LIVE GAUGE  +  BEST-DIP TRACKER  (≤20% target)
-// ═══════════════════════════════════════════════════════
-//
-// Goal: for every emitted signal, track the lowest price
-// the signal-side token (YES for UP, NO for DOWN) reaches
-// during the candle.  Target = ≤ 20% (i.e. the token dips
-// to 20¢ or below from the entry price).
-// The "best_dip" is persisted to the DB via POST
-// /api/signals/{id}/best_entry once the signal resolves.
-//
+// ═══════════════════════════════════
+// LIVE GAUGE + PULLBACK TRACKER
+// ═══════════════════════════════════
 
 const gaugeState = {
   signalId:     null,
@@ -1873,45 +1270,33 @@ const gaugeState = {
   slug:         null,
   conditionId:  null,
   candleClose:  null,
-  entryPct:     null,   // signal-side % at the moment we got the first orderbook tick
-  bestDip:      null,   // lowest signal-side % seen so far
-  currentPct:   null,
-  hitsTarget:   0,      // how many ticks the price was ≤ 20%
-  history:      [],     // [{pct, ts}]
+  history:      [],     // [{pct, ts}]  pct = the "signal side" %
+  lowestPct:    null,
+  hits40:       0,
+  hits20:       0,      // times signal-side % hit ≤20% (best-entry target)
   pullbackChart: null,
   pollTimer:    null,
 };
 
-// Historical dip log — persisted in sessionStorage across signals
+// Historical pullback log stored in sessionStorage across signals
 let pullbackLog = JSON.parse(sessionStorage.getItem('pullbackLog') || '[]');
 
 function savePullbackLog() {
-  try { sessionStorage.setItem('pullbackLog', JSON.stringify(pullbackLog.slice(-200))); } catch(e) {}
+  try { sessionStorage.setItem('pullbackLog', JSON.stringify(pullbackLog.slice(-200))); } catch(e){}
 }
 
 function updateHistoricalStats() {
-  const el = id => document.getElementById(id);
-  if (!pullbackLog.length) {
-    if (el('hist-count')) el('hist-count').textContent = '0';
-    return;
-  }
-  // Guard: only include records where bestDip is a valid number
-  const valid  = pullbackLog.filter(r => typeof r.bestDip === 'number' && !isNaN(r.bestDip));
-  const wins   = valid.filter(r => r.outcome === 'WIN');
-  const losses = valid.filter(r => r.outcome === 'LOSS');
-  const avg    = arr => arr.length
-    ? (arr.reduce((a, b) => a + b.bestDip, 0) / arr.length).toFixed(1) + '¢'
-    : '—';
-  const deepest = valid.length
-    ? valid.reduce((m, r) => Math.min(m, r.bestDip), 100).toFixed(1) + '¢'
-    : '—';
-  if (el('hist-avg-win'))  el('hist-avg-win').textContent  = avg(wins);
-  if (el('hist-avg-loss')) el('hist-avg-loss').textContent = avg(losses);
-  if (el('hist-deepest'))  el('hist-deepest').textContent  = deepest;
-  if (el('hist-count'))    el('hist-count').textContent    = pullbackLog.length;
+  if (!pullbackLog.length) return;
+  const wins   = pullbackLog.filter(r => r.outcome === 'WIN');
+  const losses = pullbackLog.filter(r => r.outcome === 'LOSS');
+  const avg    = arr => arr.length ? (arr.reduce((a,b) => a + b.lowest, 0) / arr.length).toFixed(1) : '—';
+  const deepest = pullbackLog.reduce((m, r) => Math.min(m, r.lowest), 100);
+  document.getElementById('hist-avg-win').textContent   = wins.length   ? avg(wins)   + '%' : '—';
+  document.getElementById('hist-avg-loss').textContent  = losses.length ? avg(losses) + '%' : '—';
+  document.getElementById('hist-deepest').textContent   = pullbackLog.length ? deepest.toFixed(1) + '%' : '—';
+  document.getElementById('hist-count').textContent     = pullbackLog.length;
 }
 
-// ── Sparkline chart ──────────────────────────────────────────────────────────
 function initPullbackChart() {
   const ctx = document.getElementById('pullback-chart');
   if (!ctx) return;
@@ -1937,14 +1322,12 @@ function initPullbackChart() {
         legend: { display: false },
         annotation: {
           annotations: {
-            line20: {
+            line40: {
               type: 'line',
-              yMin: 20, yMax: 20,
-              borderColor: 'rgba(255,77,109,0.65)',
+              yMin: 40, yMax: 40,
+              borderColor: 'rgba(255,77,109,0.6)',
               borderWidth: 1.5,
               borderDash: [4, 4],
-              label: { display: true, content: '20%', position: 'end',
-                       font: { size: 8 }, color: 'rgba(255,77,109,0.85)' }
             }
           }
         }
@@ -1955,291 +1338,154 @@ function initPullbackChart() {
           min: 0, max: 100,
           grid: { color: 'rgba(255,255,255,0.05)' },
           ticks: { color: 'var(--text2)', font: { size: 9 }, stepSize: 25,
-                   callback: v => v + '¢' }
+                   callback: v => v + '%' }
         }
       }
     }
   });
 }
 
-// ── SVG arc + needle ─────────────────────────────────────────────────────────
 function updateGaugeSVG(pct) {
-  // Gauge arc: semicircle from left(0%) through top(50%) to right(100%)
-  // SVG center=(100,100) radius=80
-  // 0%  → (20,  100) left
-  // 50% → (100,  20) top
-  // 100%→ (180, 100) right
+  // pct = 0–100 (the signal-side percentage)
+  // Arc sweeps from 20,100 (left = 0%) to 180,100 (right = 100%) through 100,20 (top = 50%)
   const gaugeArc    = document.getElementById('gauge-arc');
   const gaugeNeedle = document.getElementById('gauge-needle-g');
   if (!gaugeArc || !gaugeNeedle) return;
 
-  const safePct = Math.min(99.5, Math.max(0.5, pct));
-
-  // End point on the semicircle: angle goes from 180° (left) to 0° (right)
-  const angleRad = Math.PI * (1 - safePct / 100);
+  // Compute endpoint on arc: centre (100,100), radius 80, angle from 180° → 0°
+  const angle    = Math.PI - (pct / 100) * Math.PI;
   const cx = 100, cy = 100, r = 80;
-  const ex = cx + r * Math.cos(angleRad);
-  const ey = cy - r * Math.sin(angleRad);
+  const ex = cx + r * Math.cos(angle);
+  const ey = cy - r * Math.sin(angle);
+  const largeArc = pct > 50 ? 1 : 0;
 
-  // largeArc flag: 0 always — our arc never exceeds 180°
-  // sweep-flag: 1 = clockwise (left → top → right)
-  gaugeArc.setAttribute('d', `M 20 100 A 80 80 0 0 1 ${ex.toFixed(2)} ${ey.toFixed(2)}`);
-  // Color meaning: GREEN = cheap entry (low %), RED = expensive (high %)
-  // ≤20% = excellent entry zone (green), 20-50% = good, >50% = expensive (red)
-  const arcColor = pct <= 20 ? '#00e5a0'   // bright green — target zone
-                 : pct <= 50 ? 'var(--accent)'
-                 : 'var(--down)';           // red — too expensive to enter
-  gaugeArc.setAttribute('stroke', arcColor);
+  gaugeArc.setAttribute('d', `M 20 100 A 80 80 0 ${largeArc} 1 ${ex.toFixed(1)} ${ey.toFixed(1)}`);
 
-  // Needle: -90° at 0% (pointing left), 0° at 50% (pointing up), +90° at 100% (pointing right)
-  const needleDeg = -90 + (safePct / 100) * 180;
-  gaugeNeedle.setAttribute('transform', `rotate(${needleDeg},100,100)`);
+  // Colour: accent above 40%, red below
+  const col = pct >= 40 ? 'var(--accent)' : 'var(--down)';
+  gaugeArc.setAttribute('stroke', col);
+
+  // Needle: -90deg = 0%, 0deg = 50%, +90deg = 100%
+  // Use CSS transform style (not SVG transform attribute) so transform-origin works
+  const deg = -90 + (pct / 100) * 180;
+  gaugeNeedle.style.transform = `rotate(${deg}deg)`;
 }
 
-// ── Main render called on every orderbook tick ────────────────────────────────
-function renderGauge(signalAskPct, rawYesAskPct, rawNoAskPct) {
-  // signalAskPct  — the best ASK price for the token we are BUYING (0–100 cents)
-  //                 UP signal   → YES token best ask
-  //                 DOWN signal → NO  token best ask
-  // rawYesAskPct  — YES token best ask (for the YES/NO bar display)
-  // rawNoAskPct   — NO  token best ask (for the YES/NO bar display)
-  //
-  // Lower ask = cheaper entry = better dip opportunity = higher payout.
-  // At 20¢: pay $0.20 per share, win $1.00 → 5× payout.
-  // At 33¢: pay $0.33 per share, win $1.00 → 3× payout.
-  //
-  // We do NOT compute (100 - yesPct) anymore for DOWN signals.
-  // The server now gives us the actual NO ask directly.
-  const signalPct = signalAskPct;
+function renderGauge(yesPct) {
+  // For UP signals → signal side is YES%.  For DOWN → signal side is NO% = 100 - yesPct.
+  const signalPct = gaugeState.direction === 'UP' ? yesPct : (100 - yesPct);
+  const pctEl  = document.getElementById('gauge-pct');
+  const sideLbl = document.getElementById('gauge-side-label');
+  const yesBar = document.getElementById('gauge-yes-bar');
+  const noBar  = document.getElementById('gauge-no-bar');
+  const yesVal = document.getElementById('gauge-yes-val');
+  const noVal  = document.getElementById('gauge-no-val');
 
-  // Infer raw YES/NO for the bar display if not provided
-  const yesPct = rawYesAskPct  != null ? rawYesAskPct  : (gaugeState.direction === 'UP'   ? signalPct : 100 - signalPct);
-  const noPct2 = rawNoAskPct   != null ? rawNoAskPct   : (gaugeState.direction === 'DOWN' ? signalPct : 100 - signalPct);
+  if (pctEl)  pctEl.textContent  = signalPct.toFixed(1) + '%';
+  if (pctEl)  pctEl.setAttribute('fill', signalPct >= 40 ? 'var(--accent)' : 'var(--down)');
+  if (sideLbl) sideLbl.textContent = gaugeState.direction === 'UP' ? 'YES %' : 'NO %';
+  if (yesBar) { yesBar.style.width = yesPct.toFixed(1) + '%'; yesBar.textContent = yesPct >= 10 ? yesPct.toFixed(0) + '%' : ''; }
+  if (noBar)  { noBar.style.width  = (100 - yesPct).toFixed(1) + '%'; noBar.textContent = (100-yesPct) >= 10 ? (100-yesPct).toFixed(0) + '%' : ''; }
+  if (yesVal) yesVal.textContent  = yesPct.toFixed(1) + '%';
+  if (noVal)  noVal.textContent   = (100 - yesPct).toFixed(1) + '%';
 
-  // ── Set entry price on first REAL tick ──────────────────────────────────
-  // Only set if this is a real data point (not the 50% fallback).
-  // We detect fallback by checking if the gauge was called without a slug.
-  const _isRealTick = !!gaugeState.slug;
-  if (gaugeState.entryPct === null && _isRealTick) {
-    gaugeState.entryPct = signalPct;
-    console.log('[Gauge] Entry price locked at', signalPct.toFixed(1) + '¢');
-  }
-
-  gaugeState.currentPct = signalPct;
-
-  // ── Track best dip (lowest signal-side % = best limit entry opportunity) ──
-  // Only update bestDip from real orderbook ticks (not the 50% fallback)
-  if (_isRealTick && (gaugeState.bestDip === null || signalPct < gaugeState.bestDip)) {
-    gaugeState.bestDip = signalPct;
-    // Persist to DB immediately — server-side tracker also does this every 30s
-    // but frontend has higher resolution (every 2s) so can catch deeper dips
-    if (gaugeState.signalId && gaugeState.signalId !== 'pending_load') {
-      fetch(`/api/signals/${gaugeState.signalId}/best_entry`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ best_entry_pct: gaugeState.bestDip }),
-      }).catch(() => {});
-    }
-  }
-
-  // ── Drop % from entry ──
-  const dropPct = gaugeState.entryPct !== null
-    ? ((gaugeState.entryPct - signalPct) / gaugeState.entryPct * 100)
-    : 0;
-
-  // ── Count ticks where signal side ≤ 20% ──
-  if (signalPct <= 20) gaugeState.hitsTarget++;
-
-  // ── History for sparkline ──
-  gaugeState.history.push({ pct: signalPct, ts: Date.now() });
-
-  // ── DOM updates ──
-  const el = id => document.getElementById(id);
-
-  // SVG gauge
   updateGaugeSVG(signalPct);
-  const pctEl = el('gauge-pct');
-  if (pctEl) {
-    pctEl.textContent = signalPct.toFixed(1) + '¢';
-    pctEl.setAttribute('fill', signalPct > 20 ? 'var(--accent)' : 'var(--down)');
-  }
-  const sideLbl = el('gauge-side-label');
-  if (sideLbl) {
-    const payoutX = signalPct > 0 ? (100 / signalPct).toFixed(2) : '∞';
-    const tokenLabel = gaugeState.direction === 'UP' ? 'UP token ask' : 'DOWN token ask';
-    sideLbl.textContent = `${tokenLabel} · ${payoutX}x payout`;
-  }
 
-  // YES/NO bar
-  const yesBar = el('gauge-yes-bar'), noBar = el('gauge-no-bar');
-  const yesVal = el('gauge-yes-val'), noVal = el('gauge-no-val');
-  // YES/NO bar: show actual ask prices for each token (not a complement of each other)
-  // These are independent CLOB books — YES ask + NO ask do NOT necessarily sum to 100.
-  if (yesBar) { yesBar.style.width = yesPct.toFixed(1) + '%'; yesBar.style.flex = 'none'; yesBar.textContent = yesPct >= 10 ? yesPct.toFixed(0) + '%' : ''; }
-  if (noBar)  { noBar.style.width  = noPct2.toFixed(1) + '%';  noBar.style.flex  = 'none'; noBar.textContent  = noPct2 >= 10 ? noPct2.toFixed(0) + '%' : ''; }
-  if (yesVal) yesVal.textContent = yesPct.toFixed(1) + '%';
-  if (noVal)  noVal.textContent  = noPct2.toFixed(1) + '%';
-
-  // Dip tracker stats
-  if (el('dip-best'))    el('dip-best').textContent    = gaugeState.bestDip !== null ? gaugeState.bestDip.toFixed(1) + '¢' : '—';
-  if (el('dip-current')) el('dip-current').textContent = signalPct.toFixed(1) + '¢';
-  if (el('dip-hits'))    el('dip-hits').textContent    = gaugeState.hitsTarget;
-  if (el('dip-drop-pct')) {
-    el('dip-drop-pct').textContent = dropPct >= 0.05 ? dropPct.toFixed(1) + '%' : '0.0%';
-    el('dip-drop-pct').style.color = dropPct >= 20 ? 'var(--win)' : 'var(--warn)';
+  // Pullback tracker update
+  const now = Date.now();
+  gaugeState.history.push({ pct: signalPct, ts: now });
+  if (gaugeState.lowestPct === null || signalPct < gaugeState.lowestPct) {
+    gaugeState.lowestPct = signalPct;
   }
-  const targetHit = el('dip-target-hit');
-  if (targetHit) targetHit.style.display = (gaugeState.bestDip !== null && gaugeState.bestDip <= 20) ? '' : 'none';
+  if (signalPct <= 40) gaugeState.hits40++;
+  if (signalPct <= 20) gaugeState.hits20++;
 
-  // Color dip-best: green if target hit, amber otherwise
-  const dipBestEl = el('dip-best');
-  if (dipBestEl && gaugeState.bestDip !== null) {
-    dipBestEl.style.color = gaugeState.bestDip <= 20 ? 'var(--win)' : 'var(--warn)';
+  // Color the lowest % display: gold if ≤20%, green if ≤40%, else warn
+  const lowestEl = document.getElementById('pt-lowest');
+  if (lowestEl) {
+    lowestEl.textContent = gaugeState.lowestPct !== null ? gaugeState.lowestPct.toFixed(1) + '%' : '—';
+    lowestEl.style.color = gaugeState.lowestPct !== null
+      ? (gaugeState.lowestPct <= 20 ? '#ffd700'
+       : gaugeState.lowestPct <= 40 ? 'var(--win)'
+       : 'var(--warn)')
+      : 'var(--warn)';
+  }
+  document.getElementById('pt-current').textContent = signalPct.toFixed(1) + '%';
+  const hits20El = document.getElementById('pt-hits20');
+  if (hits20El) hits20El.textContent = gaugeState.hits20;
+
+  // Persist new low to DB in real-time whenever a new minimum is recorded
+  if (gaugeState.signalId && gaugeState.lowestPct !== null &&
+      gaugeState.lowestPct === signalPct) {  // only on new-low events
+    fetch(`/api/signals/${gaugeState.signalId}/best_entry`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ best_entry_pct: gaugeState.lowestPct }),
+    }).catch(() => {});
   }
 
-  // Sparkline
+  // Update mini chart
   if (gaugeState.pullbackChart) {
-    const ds   = gaugeState.pullbackChart.data.datasets[0];
-    const lbls = gaugeState.pullbackChart.data.labels;
+    const ds    = gaugeState.pullbackChart.data.datasets[0];
+    const lbls  = gaugeState.pullbackChart.data.labels;
+    const maxPts = 60;
     ds.data.push(signalPct);
     lbls.push('');
-    if (ds.data.length > 60) { ds.data.shift(); lbls.shift(); }
+    if (ds.data.length > maxPts) { ds.data.shift(); lbls.shift(); }
     gaugeState.pullbackChart.update('none');
   }
 }
 
-// ── Orderbook poller ─────────────────────────────────────────────────────────
 async function pollOrderbook() {
+  // Proxy handles all slug/condition_id resolution server-side.
+  // Build params from whatever we have; proxy falls back to DB if empty.
   try {
-    // ── Step 1: try to get slug if we don't have one yet ──────────────────
-    if (!gaugeState.slug) {
-      try {
-        const mi = await fetch('/api/market_info');
-        if (mi.ok) {
-          const md = await mi.json();
-          if (md.market_slug) {
-            gaugeState.slug        = md.market_slug;
-            gaugeState.conditionId = md.condition_id || gaugeState.conditionId;
-            console.log('[Gauge] Slug resolved from market_info:', md.market_slug);
-            connectLimitlessWS(md.market_slug);
-          }
-        }
-      } catch(e) {}
-    }
-
-    // ── Step 2: fetch orderbook ───────────────────────────────────────────
     const params = new URLSearchParams();
     if (gaugeState.slug)        params.set('slug',         gaugeState.slug);
     if (gaugeState.conditionId) params.set('condition_id', gaugeState.conditionId);
 
     const r = await fetch(`/api/orderbook?${params}`);
-    if (!r.ok) {
-      console.warn('[Gauge] orderbook fetch failed:', r.status);
-      // ── Fallback: render gauge at 50% so needle is visible ──────────────
-      if (gaugeState.entryPct === null) renderGauge(50, 50, 50);
-      return;
-    }
+    if (!r.ok) return;
     const data = await r.json();
 
-    if (data.error) {
-      console.warn('[Gauge] orderbook unavailable:', data.error,
-                   '— slug:', gaugeState.slug || 'none yet');
-      // ── Fallback: render gauge at 50% so it's visually alive ─────────────
-      if (gaugeState.entryPct === null) renderGauge(50, 50, 50);
-      return;
+    // Proxy normalises everything into _yes_pct (0–100).
+    // Correct Limitless endpoint: GET /markets/{slug}/orderbook
+    // Returns: adjustedMidpoint | midpoint | lastTradePrice  (all 0–1 floats)
+    let yesPct = null;
+
+    if (data._yes_pct !== undefined && data._yes_pct !== null) {
+      yesPct = parseFloat(data._yes_pct);          // already 0–100
+    } else if (data.adjustedMidpoint !== undefined) {
+      yesPct = parseFloat(data.adjustedMidpoint) * 100;
+    } else if (data.midpoint !== undefined) {
+      yesPct = parseFloat(data.midpoint) * 100;
+    } else if (data.lastTradePrice !== undefined) {
+      yesPct = parseFloat(data.lastTradePrice) * 100;
+    } else if (Array.isArray(data.asks) && data.asks.length > 0) {
+      yesPct = parseFloat(data.asks[0][0]) * 100;
+    } else if (Array.isArray(data.bids) && data.bids.length > 0) {
+      yesPct = parseFloat(data.bids[0][0]) * 100;
     }
 
-    // ── Step 3: extract the CORRECT ask price for the signal direction ─────────
-    //
-    // KEY CONCEPT (Limitless CLOB):
-    //   Every market has TWO separate orderbooks: YES (UP) and NO (DOWN).
-    //   Each has Bids (buy orders) and Asks (sell orders).
-    //   When YOU buy a token you pay the best ASK — the lowest ask price.
-    //   That is your real execution price, NOT the midpoint.
-    //
-    //   UP   signal → bot bought UP   token (YES) → track _yes_ask_pct
-    //   DOWN signal → bot bought DOWN token (NO)  → track _no_ask_pct
-    //
-    //   Best dip = lowest that ask price reached during the candle.
-    //   At 20¢ ask: pay $0.20/share, win $1.00 → 5x payout.
-    //   The old code used midpoint which is NOT what you pay.
-
-    const _dir = gaugeState.direction; // 'UP' or 'DOWN'
-    let signalAskPct = null;
-    let rawYesAskPct = null;
-    let rawNoAskPct  = null;
-
-    if (_dir === 'UP') {
-      if (data._yes_ask_pct != null && !isNaN(parseFloat(data._yes_ask_pct))) {
-        signalAskPct = parseFloat(data._yes_ask_pct);
-        rawYesAskPct = signalAskPct;
-        rawNoAskPct  = data._no_ask_pct != null ? parseFloat(data._no_ask_pct) : null;
-      }
-    } else {
-      if (data._no_ask_pct != null && !isNaN(parseFloat(data._no_ask_pct))) {
-        signalAskPct = parseFloat(data._no_ask_pct);
-        rawNoAskPct  = signalAskPct;
-        rawYesAskPct = data._yes_ask_pct != null ? parseFloat(data._yes_ask_pct) : null;
-      }
+    if (yesPct !== null && !isNaN(yesPct)) {
+      renderGauge(Math.min(100, Math.max(0, yesPct)));
     }
-
-    // Fallback: _yes_pct from server (ask or midpoint, server's choice)
-    if (signalAskPct === null && data._yes_pct != null) {
-      const yp = parseFloat(data._yes_pct);
-      if (!isNaN(yp)) {
-        rawYesAskPct = yp;
-        rawNoAskPct  = data._no_ask_pct != null ? parseFloat(data._no_ask_pct) : (100 - yp);
-        signalAskPct = _dir === 'UP' ? rawYesAskPct : rawNoAskPct;
-        console.warn('[Gauge] Using _yes_pct fallback — DOWN signals may be approximate.');
-      }
-    }
-
-    // Last resort: raw midpoint fields
-    if (signalAskPct === null) {
-      const mp = data.adjustedMidpoint ?? data.midpoint ?? data.lastTradePrice;
-      if (mp != null) {
-        const v = parseFloat(mp);
-        if (!isNaN(v)) {
-          rawYesAskPct = v > 1 ? v : v * 100;
-          rawNoAskPct  = 100 - rawYesAskPct;
-          signalAskPct = _dir === 'UP' ? rawYesAskPct : rawNoAskPct;
-          console.warn('[Gauge] Using raw midpoint as last resort — not real ask price.');
-        }
-      }
-    }
-
-    if (signalAskPct !== null && !isNaN(signalAskPct)) {
-      const clamped = Math.min(99.9, Math.max(0.1, signalAskPct));
-      const payoutX = (100 / clamped).toFixed(2);
-      console.log(
-        `[Gauge] tick dir=${_dir} signalAsk=${clamped.toFixed(1)}¢`
-        + ` yesAsk=${rawYesAskPct != null ? rawYesAskPct.toFixed(1) : '?'}¢`
-        + ` noAsk=${rawNoAskPct != null ? rawNoAskPct.toFixed(1) : '?'}¢`
-        + ` payout=${payoutX}x source=${data._source || 'unknown'}`
-      );
-      renderGauge(clamped, rawYesAskPct, rawNoAskPct);
-    } else {
-      console.warn('[Gauge] no usable ask price — keys:', Object.keys(data));
-      if (gaugeState.entryPct === null) renderGauge(50, 50, 50);
-    }
-  } catch(e) {
-    console.error('[Gauge] pollOrderbook error:', e);
-    if (gaugeState.entryPct === null) renderGauge(50, 50, 50);
-  }
+  } catch(e) {}
 }
 
-// ── Start gauge for a new signal ─────────────────────────────────────────────
 async function startGaugeForSignal(sig) {
-  if (gaugeState.signalId === sig.id) return;
+  // Called when a new PENDING signal is detected
+  if (gaugeState.signalId === sig.id) return; // already tracking
 
-  // Archive previous signal
-  if (gaugeState.signalId && gaugeState.bestDip !== null) {
+  // Record previous signal outcome if it ended
+  if (gaugeState.signalId && gaugeState.lowestPct !== null) {
+    // Will be updated with real outcome on next load; store tentatively
     pullbackLog.push({
       id:      gaugeState.signalId,
       symbol:  gaugeState.symbol,
       dir:     gaugeState.direction,
-      bestDip: gaugeState.bestDip,
-      hitsTarget: gaugeState.hitsTarget,
+      lowest:  gaugeState.lowestPct,
+      hits40:  gaugeState.hits40,
       outcome: 'UNKNOWN',
       ts:      Date.now(),
     });
@@ -2247,24 +1493,18 @@ async function startGaugeForSignal(sig) {
     updateHistoricalStats();
   }
 
-  // Reset state
   gaugeState.signalId    = sig.id;
   gaugeState.symbol      = sig.symbol;
   gaugeState.direction   = sig.signal_direction;
   gaugeState.slug        = sig.market_slug;
   gaugeState.conditionId = sig.condition_id;
   gaugeState.candleClose = sig.candle_close_time;
-  gaugeState.entryPct    = null;
-  // Restore best_dip from DB if available (survives refresh/reconnect)
-  gaugeState.bestDip     = (sig.best_entry_pct != null) ? parseFloat(sig.best_entry_pct) : null;
-  gaugeState.currentPct  = null;
-  gaugeState.hitsTarget  = 0;
   gaugeState.history     = [];
-  if (gaugeState.bestDip !== null) {
-    console.log('[Gauge] Restored bestDip from DB:', gaugeState.bestDip.toFixed(1) + '¢');
-  }
+  gaugeState.lowestPct   = null;
+  gaugeState.hits40      = 0;
+  gaugeState.hits20      = 0;
 
-  // Show card
+  // Show gauge card
   const card = document.getElementById('gauge-card');
   if (card) card.style.display = '';
 
@@ -2275,208 +1515,127 @@ async function startGaugeForSignal(sig) {
     banner.style.background = isUp ? 'rgba(0,229,160,0.1)' : 'rgba(255,77,109,0.1)';
     banner.style.color      = isUp ? 'var(--win)' : 'var(--down)';
     banner.style.border     = `1px solid ${isUp ? 'var(--win)' : 'var(--down)'}`;
-    // Explain: you're buying the signal-side token at its lowest price
-    // UP signal:   UP token is cheap when market doubts direction → buy UP at dip
-    // DOWN signal: DOWN token is cheap when market favours UP     → buy DOWN at dip
-    banner.textContent = isUp
-      ? '⬆ UP signal — buying UP token · best entry when UP% is lowest'
-      : '⬇ DOWN signal — buying DOWN token · best entry when DOWN% is lowest';
+    banner.textContent      = isUp
+      ? `⬆ UP signal — watch for YES% to drop ≤40% for best limit buy`
+      : `⬇ DOWN signal — watch for NO% to drop ≤40% (YES% ≥60%) for best limit buy`;
   }
 
   const lbl = document.getElementById('gauge-market-label');
   if (lbl) lbl.textContent = `${sig.symbol} · closes ${sig.candle_close_time ? sig.candle_close_time.slice(11,16) : '—'} UTC`;
 
-  // Set side labels
-  const side = sig.signal_direction === 'UP' ? 'UP' : 'DOWN';  // token being bought
-  ['dip-side','dip-side-lbl','pt-side'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = side;
-  });
+  // Pre-fill gauge text at 50% while first poll loads
+  const pctEl   = document.getElementById('gauge-pct');
+  const sideLbl = document.getElementById('gauge-side-label');
+  if (pctEl)   { pctEl.textContent = '50.0%'; pctEl.setAttribute('fill','var(--accent)'); }
+  if (sideLbl)   sideLbl.textContent = sig.signal_direction === 'UP' ? 'YES %' : 'NO %';
 
-  // Reset DOM
-  ['dip-best','dip-current','gauge-pct','gauge-yes-val','gauge-no-val'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = '—';
-  });
-  const dh = document.getElementById('dip-hits'); if (dh) dh.textContent = '0';
-  const dd = document.getElementById('dip-drop-pct'); if (dd) dd.textContent = '—';
-  const th = document.getElementById('dip-target-hit'); if (th) th.style.display = 'none';
+  // Show tail pattern indicator if the signal has a dominant directional tail
+  const tailIndicator = document.getElementById('gauge-tail-indicator');
+  const tailIcon      = document.getElementById('gauge-tail-icon');
+  const tailLabel     = document.getElementById('gauge-tail-label');
+  if (tailIndicator && tailIcon && tailLabel) {
+    const tailScore = sig.tail_direction_score || 0;
+    const tailDom   = sig.tail_dominance || 0;
+    const isUp      = sig.signal_direction === 'UP';
+    // Tail confirmed if dominant wick aligns with signal direction and dominance > 0.2
+    const hasTail = (isUp && tailScore > 0.05 && tailDom > 0.2) ||
+                    (!isUp && tailScore < -0.05 && tailDom > 0.2);
+    if (hasTail) {
+      tailIndicator.style.display = '';
+      const pct = Math.abs(tailScore * 100).toFixed(0);
+      tailIcon.textContent  = isUp ? '🪝⬆' : '🪝⬇';
+      tailLabel.textContent = isUp
+        ? `Lower wick tail detected (${pct}% dominance) — dip-then-recover pattern`
+        : `Upper wick tail detected (${pct}% dominance) — spike-then-fall pattern`;
+    } else {
+      tailIndicator.style.display = 'none';
+    }
+  }
+
+  const ptSide = document.getElementById('pt-side');
+  if (ptSide) ptSide.textContent = sig.signal_direction === 'UP' ? 'YES' : 'NO';
 
   initPullbackChart();
-  if (gaugeState.pollTimer) clearInterval(gaugeState.pollTimer);
-  updateGaugeSVG(50);
-  pollOrderbook().catch(()=>{});
-  gaugeState.pollTimer = setInterval(() => { pollOrderbook().catch(()=>{}); }, 2000);
 
-  // Also try Limitless WebSocket for instant real-time ticks
-  if (gaugeState.slug) connectLimitlessWS(gaugeState.slug);
+  if (gaugeState.pollTimer) clearInterval(gaugeState.pollTimer);
+  // Set gauge to 50% while first poll is in-flight (market opens at 50/50)
+  updateGaugeSVG(50);
+  await pollOrderbook();
+  gaugeState.pollTimer = setInterval(pollOrderbook, 3000); // poll every 3s for real-time
 }
 
-// ── Stop gauge when signal resolves ──────────────────────────────────────────
 function stopGauge(outcome) {
-  if (gaugeState.signalId && gaugeState.bestDip !== null) {
-    // Persist best_dip to DB
-    fetch(`/api/signals/${gaugeState.signalId}/best_entry`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ best_entry_pct: gaugeState.bestDip }),
-    }).catch(() => {});
-
-    // Update pullback log
+  // Signal resolved — record outcome in pullback log
+  if (gaugeState.signalId && gaugeState.lowestPct !== null) {
     const existing = pullbackLog.findIndex(r => r.id === gaugeState.signalId);
-    const record = {
-      id:         gaugeState.signalId,
-      symbol:     gaugeState.symbol,
-      dir:        gaugeState.direction,
-      bestDip:    gaugeState.bestDip,
-      hitsTarget: gaugeState.hitsTarget,
-      outcome:    outcome,
-      ts:         Date.now(),
-    };
-    if (existing >= 0) pullbackLog[existing] = record;
-    else pullbackLog.push(record);
+    if (existing >= 0) {
+      pullbackLog[existing].outcome = outcome;
+    } else {
+      pullbackLog.push({
+        id:      gaugeState.signalId,
+        symbol:  gaugeState.symbol,
+        dir:     gaugeState.direction,
+        lowest:  gaugeState.lowestPct,
+        hits40:  gaugeState.hits40,
+        outcome: outcome,
+        ts:      Date.now(),
+      });
+    }
     savePullbackLog();
     updateHistoricalStats();
+
+    // Persist best_entry_pct to DB so the signals table can show it
+    if (gaugeState.signalId) {
+      fetch(`/api/signals/${gaugeState.signalId}/best_entry`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ best_entry_pct: gaugeState.lowestPct }),
+      }).catch(() => {});
+    }
   }
   if (gaugeState.pollTimer) { clearInterval(gaugeState.pollTimer); gaugeState.pollTimer = null; }
-  disconnectLimitlessWS();
-}
-
-// ── Limitless WebSocket live price feed ──────────────────────────────────────
-// Connect directly to wss://ws.limitless.exchange/markets namespace.
-// When a signal is active, subscribe to its market slug for real-time prices.
-// Falls back to HTTP polling if WS unavailable.
-let _ltlWS = null;
-let _ltlWsSlug = null;
-let _ltlWsReady = false;
-
-function connectLimitlessWS(slug) {
-  if (_ltlWsSlug === slug && _ltlWsReady) return; // already connected to this slug
-  disconnectLimitlessWS();
-  if (!slug) return;
-  _ltlWsSlug = slug;
-
-  try {
-    _ltlWS = new WebSocket('wss://ws.limitless.exchange/markets');
-
-    _ltlWS.onopen = () => {
-      _ltlWsReady = true;
-      console.log('[GaugeWS] connected, subscribing to', slug);
-      _ltlWS.send(JSON.stringify({
-        action: 'subscribe_market_prices',
-        marketSlugs: [slug]
-      }));
-    };
-
-    _ltlWS.onmessage = (evt) => {
-      try {
-        const msg = JSON.parse(evt.data);
-        // Limitless sends: { type: 'newPriceData', updatedPrices: { yes: 0.XX, no: 0.XX } }
-        // or: { updatedPrices: { yes: '0.XX', no: '0.XX' } }
-        const prices = msg.updatedPrices || msg.prices || msg.data;
-        if (!prices) return;
-
-        const yes = parseFloat(prices.yes || prices.YES || prices['0'] || 0);
-        if (!yes || isNaN(yes)) return;
-
-        // WS gives us the YES token price — derive direction-correct ask
-        const yesAskFromWS = yes > 1 ? yes : yes * 100;
-        const noAskFromWS  = 100 - yesAskFromWS; // complement — WS only streams YES side
-        const signalAskFromWS = gaugeState.direction === 'UP' ? yesAskFromWS : noAskFromWS;
-        console.log('[GaugeWS] live tick dir=', gaugeState.direction,
-                    'yesAsk=', yesAskFromWS.toFixed(2),
-                    'signalAsk=', signalAskFromWS.toFixed(2),
-                    'payout=', (100/Math.max(0.1,signalAskFromWS)).toFixed(2) + 'x');
-        renderGauge(Math.min(99.9, Math.max(0.1, signalAskFromWS)), yesAskFromWS, noAskFromWS);
-      } catch(e) {}
-    };
-
-    _ltlWS.onerror = (e) => {
-      console.warn('[GaugeWS] error, falling back to HTTP poll');
-      _ltlWsReady = false;
-    };
-
-    _ltlWS.onclose = () => {
-      _ltlWsReady = false;
-      console.log('[GaugeWS] disconnected');
-    };
-  } catch(e) {
-    console.warn('[GaugeWS] WebSocket not available:', e);
-    _ltlWS = null;
-  }
-}
-
-function disconnectLimitlessWS() {
-  if (_ltlWS) {
-    try { _ltlWS.close(); } catch(e) {}
-    _ltlWS = null;
-    _ltlWsReady = false;
-    _ltlWsSlug = null;
-  }
 }
 
 // Hook into existing WebSocket events
 socket.on('new_signal', sig => {
-  refreshTradeActivity();
   if (sig.outcome === 'PENDING') startGaugeForSignal(sig);
 });
 
 socket.on('signal_resolved', sig => {
-  refreshTradeActivity();
   if (sig.id === gaugeState.signalId) stopGauge(sig.outcome);
 });
 
 // On page load, check for any current PENDING signal.
-// Start gauge immediately — orderbook endpoint resolves slug from DB automatically.
-// Retry slug enrichment in background without blocking gauge startup.
+// Retries up to 3× with 5s gap in case shadow slug discovery is still in progress.
 (async function checkPendingOnLoad() {
-  try {
-    const r = await fetch('/api/market_info');
-    if (!r.ok) { updateHistoricalStats(); return; }
-    const d = await r.json();
-
-    if (!d.pending) { updateHistoricalStats(); return; }
-
-    // Start gauge immediately even if slug not yet available —
-    // pollOrderbook will fetch from DB fallback and retry
-    startGaugeForSignal({
-      id:                d.signal_id      || 'pending_load',
-      symbol:            d.symbol         || '',
-      signal_direction:  d.direction      || 'UP',
-      market_slug:       d.market_slug    || null,
-      condition_id:      d.condition_id   || null,
-      candle_close_time: d.candle_close   || null,
-      best_entry_pct:    d.best_entry_pct || null,
-      outcome:           'PENDING',
-    });
-
-    // If slug was missing, poll market_info every 10s until we get it
-    // then patch gaugeState without restarting the gauge
-    if (!d.market_slug) {
-      let _slugRetries = 0;
-      const _slugTimer = setInterval(async () => {
-        _slugRetries++;
-        if (_slugRetries > 18) { clearInterval(_slugTimer); return; } // give up after 3 min
-        try {
-          const r2 = await fetch('/api/market_info');
-          if (!r2.ok) return;
-          const d2 = await r2.json();
-          if (d2.market_slug) {
-            gaugeState.slug        = d2.market_slug;
-            gaugeState.conditionId = d2.condition_id || gaugeState.conditionId;
-            console.log('[Gauge] Slug resolved via retry:', d2.market_slug);
-            connectLimitlessWS(d2.market_slug);
-            clearInterval(_slugTimer);
-          }
-        } catch(e) {}
-      }, 10000);
-    }
-  } catch(e) {
-    console.warn('[Gauge] checkPendingOnLoad error:', e);
+  const MAX_TRIES = 3;
+  for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
+    try {
+      const r = await fetch('/api/market_info');
+      if (r.ok) {
+        const d = await r.json();
+        if (d.pending && d.market_slug) {
+          startGaugeForSignal({
+            id:               d.signal_id || 'pending_load',
+            symbol:           d.symbol,
+            signal_direction: d.direction,
+            market_slug:      d.market_slug,
+            condition_id:     d.condition_id || '',
+            candle_close_time: d.candle_close,
+            outcome:          'PENDING',
+          });
+          break; // success — stop retrying
+        } else if (d.pending && d.slug_missing && attempt < MAX_TRIES - 1) {
+          // Signal exists but slug not yet resolved — wait and retry
+          await new Promise(res => setTimeout(res, 5000));
+          continue;
+        }
+      }
+    } catch(e) {}
+    break;
   }
   updateHistoricalStats();
 })();
-
 
 </script>
 </body>
