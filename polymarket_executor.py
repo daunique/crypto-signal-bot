@@ -92,70 +92,6 @@ _ORDER_TYPES = [
 
 _market_cache: dict = {}
 
-# ── Proxy configuration ──────────────────────────────────────────────────────
-# Polymarket geo-blocks requests from certain regions/hosting providers
-# (including Render's IP ranges in some regions). If POLYMARKET_PROXY_URL is
-# set, every request to clob.polymarket.com is routed through it instead of
-# going out directly. Accepts either an HTTP/HTTPS forward-proxy URL
-# (e.g. "http://user:pass@proxyhost:8080"), a SOCKS5 proxy URL
-# (e.g. "socks5h://user:pass@proxyhost:1080" — note the "h" suffix, which
-# tells requests to resolve DNS through the proxy too, important for
-# correctly appearing as the proxy's region rather than Render's), or the
-# bare "host:port:user:pass" format some proxy providers hand out directly
-# (e.g. "45.80.5.113:12323:user:pass" — auto-converted to an http:// URL).
-# SOCKS support requires the optional "pysocks" package (see requirements.txt).
-#
-# This only changes the network transport — it has no effect on request
-# signing. EIP-712/HMAC signatures are computed over the path/body before
-# the request is sent, so they're identical whether the request goes out
-# directly or through a proxy.
-POLYMARKET_PROXY_URL = os.environ.get("POLYMARKET_PROXY_URL", "").strip()
-
-
-def _normalize_proxy_url(raw: str) -> str:
-    """
-    Accepts either a full proxy URL (e.g. "http://user:pass@host:port" or
-    "socks5h://user:pass@host:port") or the bare "host:port:user:pass"
-    format some proxy providers hand out (e.g. "45.80.5.113:12323:user:pass")
-    and returns a proper URL requests can use.
-
-    Defaults to "http://" scheme when given the bare host:port:user:pass
-    form, since that's the most common transport for these proxy services.
-    If you specifically need SOCKS5, paste the full "socks5h://user:pass@host:port"
-    URL instead of the bare form.
-    """
-    raw = raw.strip()
-    if "://" in raw:
-        # Already a full URL — use as-is.
-        return raw
-
-    parts = raw.split(":")
-    if len(parts) == 4:
-        host, port, user, pwd = parts
-        return f"http://{user}:{pwd}@{host}:{port}"
-    if len(parts) == 2:
-        # host:port with no auth
-        host, port = parts
-        return f"http://{host}:{port}"
-
-    # Unrecognized shape — return as-is and let requests surface a clear error
-    # rather than silently mis-parsing something we don't understand.
-    return raw
-
-
-def _get_proxies() -> dict | None:
-    """
-    Returns a requests-compatible proxies dict if POLYMARKET_PROXY_URL is
-    configured, else None (meaning: connect directly, no proxy).
-    """
-    if not POLYMARKET_PROXY_URL:
-        return None
-    url = _normalize_proxy_url(POLYMARKET_PROXY_URL)
-    return {
-        "http":  url,
-        "https": url,
-    }
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CREDENTIAL HELPERS
@@ -245,7 +181,6 @@ def derive_api_key() -> dict:
             headers=headers,
             data=body_str,
             timeout=15,
-            proxies=_get_proxies(),
         )
         logger.info("[POLY:AUTH] POST /auth/api-key → %d", resp.status_code)
 
@@ -421,7 +356,6 @@ def discover_market(symbol: str) -> dict | None:
             f"{CLOB_BASE}/markets",
             params={"slug": base_slug, "active": "true", "closed": "false"},
             timeout=10,
-            proxies=_get_proxies(),
         )
         logger.info("[POLY:%s] GET /markets?slug=%s → %d", symbol, base_slug, resp.status_code)
         if not resp.ok:
@@ -674,7 +608,6 @@ def place_live_order(
             headers=headers,
             data=body_str,
             timeout=15,
-            proxies=_get_proxies(),
         )
         logger.info("[POLY:%s] POST /order → %d: %s",
                     symbol, resp.status_code, resp.text[:500])
@@ -773,8 +706,7 @@ def check_order_filled(order_id: str, token_id: str | None = None) -> dict:
     path = f"/order/{order_id}"
     try:
         headers = _build_headers("GET", path)
-        resp    = requests.get(f"{CLOB_BASE}{path}", headers=headers, timeout=10,
-                               proxies=_get_proxies())
+        resp    = requests.get(f"{CLOB_BASE}{path}", headers=headers, timeout=10)
         logger.info("[POLY:FILL] GET %s → %d", path, resp.status_code)
 
         if resp.ok:

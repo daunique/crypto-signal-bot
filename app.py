@@ -117,13 +117,6 @@ def create_app():
             ("best_entry_pct", "REAL"),
             ("poly_order_id",  "VARCHAR(120)"),
             ("poly_fill",      "VARCHAR(10) DEFAULT 'NEUTRAL'"),
-            # v3.6 additions — on-chain wallet tracking
-            ("maker_address",  "VARCHAR(64)"),
-            ("signer_address", "VARCHAR(64)"),
-            # v3.7 additions — unconditional fill tracking
-            ("tx_hash",           "VARCHAR(80)"),
-            ("fill_check_status", "VARCHAR(20)"),
-            ("fill_check_count",  "INTEGER DEFAULT 0"),
         ]:
             _add_column("signals", _col, _def)
 
@@ -173,7 +166,7 @@ def create_app():
             ("poly_position_size",   "REAL DEFAULT 10.0"),
             ("poly_max_price",       "REAL DEFAULT 0.5"),
             # v3 additions
-            ("no_execute_pairs",     "TEXT DEFAULT '[\"XRP-USDT\"]'"),
+            ("no_execute_pairs",     "TEXT DEFAULT '[]'"),
             ("cooldown_log",         "TEXT DEFAULT '[]'"),
         ]:
             _add_column("settings", _col, _def)
@@ -183,7 +176,10 @@ def create_app():
                 mode=os.environ.get("DEFAULT_MODE", "shadow"),
                 position_size=float(os.environ.get("DEFAULT_POSITION_SIZE", "10")),
                 min_confidence=0.0,
-                no_execute_pairs='["XRP-USDT"]',
+                # Backtested live-pair selection (see v3.5 migration below for
+                # the rationale): BTC/ETH/BNB execute live with the ATR
+                # regime filter; SOL/XRP/DOGE remain signal-only.
+                no_execute_pairs='["SOL-USDT", "XRP-USDT", "DOGE-USDT"]',
                 cooldown_log='[]',
             ))
             db.session.commit()
@@ -197,32 +193,48 @@ def create_app():
                 _existing.min_confidence = 0.0
                 _changed = True
                 logger.info("[APP] Migration: min_confidence reset to 0.0 (per-pair gates active)")
-            # v3.5: XRP-USDT disabled from live execution again — signal fires but no order placed.
-            # Ensure XRP-USDT is in no_execute_pairs on existing deployments.
+            # v3.3: XRP-USDT reactivated for live trading with invert=True.
+            # Remove XRP-USDT from no_execute_pairs on existing deployments.
             if _existing:
                 import json as _nep_clr_j
                 try:
                     _nep_raw  = _existing.no_execute_pairs or '[]'
                     _nep_list = _nep_raw if isinstance(_nep_raw, list) else _nep_clr_j.loads(_nep_raw)
-                    if 'XRP-USDT' not in _nep_list:
-                        _nep_list.append('XRP-USDT')
+                    if 'XRP-USDT' in _nep_list:
+                        _nep_list.remove('XRP-USDT')
                         _existing.no_execute_pairs = _nep_clr_j.dumps(_nep_list)
                         _changed = True
-                        logger.info("[APP] Migration: XRP-USDT added to no_execute_pairs — live execution disabled")
+                        logger.info("[APP] Migration: XRP-USDT removed from no_execute_pairs — live execution enabled (invert=True)")
                 except Exception:
                     pass
-            # v3.8: SOL-USDT re-enabled for live execution.
-            # Remove SOL-USDT from no_execute_pairs on existing deployments.
+            # v3.5: Backtested ATR-regime-filtered strategy adopted.
+            # Validated combo: BTC-USDT + ETH-USDT + BNB-USDT execute live,
+            # each gated by PAIR_CONFIG[sym]["atr_filter"] (skip top 15%
+            # volatility regime). SOL-USDT, XRP-USDT, DOGE-USDT remain
+            # signal-only — they were NOT part of the backtested live combo
+            # and the ATR filter is not enabled for them (see signal_engine.py
+            # PAIR_CONFIG). April 2026 backtest: 520 signals, 61.35% win rate,
+            # 17.33 signals/day, max loss streak 6 (vs ~10 unfiltered).
+            #
+            # This explicitly SUPERSEDES the v3.4 migration below, which had
+            # set all 6 pairs live — confirmed with the user that the
+            # backtested 3-pair configuration should take precedence.
+            _BACKTESTED_LIVE_PAIRS = {'BTC-USDT', 'ETH-USDT', 'BNB-USDT'}
+            _BACKTESTED_SIGNAL_ONLY = {'SOL-USDT', 'XRP-USDT', 'DOGE-USDT'}
             if _existing:
-                import json as _nep_sol_j
+                import json as _nep_v35_j
                 try:
-                    _nep_raw  = _existing.no_execute_pairs or '[]'
-                    _nep_list = _nep_raw if isinstance(_nep_raw, list) else _nep_sol_j.loads(_nep_raw)
-                    if 'SOL-USDT' in _nep_list:
-                        _nep_list.remove('SOL-USDT')
-                        _existing.no_execute_pairs = _nep_sol_j.dumps(_nep_list)
+                    _nep_raw3 = _existing.no_execute_pairs or '[]'
+                    _nep_list3 = _nep_raw3 if isinstance(_nep_raw3, list) else _nep_v35_j.loads(_nep_raw3)
+                    _target = sorted(_BACKTESTED_SIGNAL_ONLY)
+                    if set(_nep_list3) != _BACKTESTED_SIGNAL_ONLY:
+                        _existing.no_execute_pairs = _nep_v35_j.dumps(_target)
                         _changed = True
-                        logger.info("[APP] Migration: SOL-USDT removed from no_execute_pairs — live execution re-enabled")
+                        logger.info(
+                            "[APP] Migration v3.5: no_execute_pairs set to %s — "
+                            "live execution restricted to backtested combo %s",
+                            _target, sorted(_BACKTESTED_LIVE_PAIRS)
+                        )
                 except Exception:
                     pass
             if _changed:
@@ -731,14 +743,30 @@ def create_app():
         records = DailyStats.query.filter(
             DailyStats.date >= cutoff
         ).order_by(DailyStats.date.desc()).all()
-        return jsonify([r.to_dict() for r in records])
+
+        result = []
+        for r in records:
+            d = r.to_dict()
+            # Count signals filled on Limitless that day (candle_open_time date match)
+            day_start = datetime.combine(r.date, datetime.min.time())
+            day_end   = day_start + timedelta(days=1)
+            executed_count = Signal.query.filter(
+                Signal.candle_open_time >= day_start,
+                Signal.candle_open_time <  day_end,
+                Signal.limitless_fill == "FILLED",
+            ).count()
+            d["executed_count"] = executed_count
+            result.append(d)
+
+        return jsonify(result)
 
     # ── Stats: per-pair ───────────────────────────────────────────────────────
     @app.route("/api/stats/pairs")
     def pair_stats():
-        from signal_engine import get_pair_stats, get_pair_config
-        live   = get_pair_stats()
-        config = get_pair_config()
+        from signal_engine import get_pair_stats, get_pair_config, get_direction_block_status
+        live      = get_pair_stats()
+        config    = get_pair_config()
+        dir_block = get_direction_block_status()
 
         result = {}
         for sym in ["BTC-USDT", "ETH-USDT", "SOL-USDT",
@@ -768,11 +796,29 @@ def create_app():
         date_filter = request.args.get("date_filter")  # today|yesterday|7d|30d
 
         best_dip    = request.args.get("best_dip")   # 5|10|20|30|40 (≤ threshold)
+        fill        = request.args.get("fill")        # FILLED|UNFILLED|NEUTRAL — Limitless fill status
+        active_only = request.args.get("active_only")  # "1" → only pairs currently live-executing
+        date_from   = request.args.get("date_from")     # YYYY-MM-DD, calendar filter start (inclusive)
+        date_to     = request.args.get("date_to")       # YYYY-MM-DD, calendar filter end (inclusive)
 
         q = Signal.query
         if symbol:   q = q.filter(Signal.symbol == symbol)
         if outcome:  q = q.filter(Signal.outcome == outcome)
         if mode:     q = q.filter(Signal.mode == mode)
+        if fill:     q = q.filter(Signal.limitless_fill == fill.upper())
+
+        if active_only == "1":
+            try:
+                import json as _active_json
+                from signal_engine import SYMBOLS as _all_symbols
+                _settings_row = Settings.query.first()
+                _nep_raw = (_settings_row.no_execute_pairs if _settings_row else None) or '[]'
+                _nep = _nep_raw if isinstance(_nep_raw, list) else _active_json.loads(_nep_raw)
+                _live_pairs = [s for s in _all_symbols if s not in _nep]
+                q = q.filter(Signal.symbol.in_(_live_pairs))
+            except Exception:
+                pass
+
         if best_dip:
             try:
                 # Exclusive ranges — each bucket is independent, no overlap:
@@ -808,6 +854,22 @@ def create_app():
                 q = q.filter(Signal.candle_open_time >= _today - timedelta(days=7))
             elif date_filter == "30d":
                 q = q.filter(Signal.candle_open_time >= _today - timedelta(days=30))
+
+        # Calendar-based filtering (new). candle_open_time is stored naive-UTC,
+        # so we compare against naive datetime bounds built from the date
+        # strings — same convention as the preset date_filter block above.
+        if date_from:
+            try:
+                _from_dt = datetime.strptime(date_from, "%Y-%m-%d")
+                q = q.filter(Signal.candle_open_time >= _from_dt)
+            except ValueError:
+                pass
+        if date_to:
+            try:
+                _to_dt = datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)  # inclusive of the whole end day
+                q = q.filter(Signal.candle_open_time < _to_dt)
+            except ValueError:
+                pass
 
         q  = q.order_by(Signal.created_at.desc())
         pg = q.paginate(page=page, per_page=per_page, error_out=False)

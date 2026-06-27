@@ -134,6 +134,30 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 
 /* ── Signal feed ── */
 .signal-feed{display:flex;flex-direction:column;gap:7px;max-height:420px;overflow-y:auto}
+.trade-activity{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+.trade-row{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:6px;background:var(--surface2);border:1px solid var(--border);font-size:0.72rem}
+.trade-row.placed{border-left:3px solid var(--accent2)}
+.trade-row.executed{border-left:3px solid var(--win);background:rgba(0,229,160,0.05)}
+.trade-row.unfilled{border-left:3px solid var(--loss);background:rgba(255,77,109,0.04)}
+.trade-row.pending{border-left:3px solid var(--warn)}
+.tr-pair{font-weight:700;color:var(--text);min-width:72px}
+.tr-dir{font-size:0.7rem;font-weight:700;padding:2px 6px;border-radius:3px}
+.tr-dir.up{background:rgba(0,229,160,0.15);color:var(--win)}
+.tr-dir.dn{background:rgba(255,77,109,0.15);color:var(--loss)}
+.tr-meta{color:var(--text2);font-family:'IBM Plex Mono',monospace;font-size:0.68rem}
+.tr-status{font-size:0.68rem;font-weight:700;padding:2px 7px;border-radius:3px;white-space:nowrap}
+.trs-placed{background:rgba(0,184,168,0.12);color:var(--accent2)}
+.trs-exec{background:rgba(0,229,160,0.15);color:var(--win)}
+.trs-unfilled{background:rgba(255,77,109,0.12);color:var(--loss)}
+.trs-pending{background:rgba(246,201,14,0.12);color:var(--warn)}
+.trs-noexec{background:rgba(90,106,130,0.15);color:var(--text2)}
+/* Executed trades history table */
+.exec-table{width:100%;border-collapse:collapse;font-size:0.71rem;font-family:'IBM Plex Mono',monospace}
+.exec-table th{text-align:left;color:var(--text2);padding:5px 8px;border-bottom:1px solid var(--border);font-weight:500;white-space:nowrap}
+.exec-table td{padding:5px 8px;border-bottom:1px solid rgba(30,40,64,.45);white-space:nowrap}
+.exec-table tr:hover td{background:rgba(255,255,255,.015)}
+.exec-table tr.ex-win td{background:rgba(0,229,160,.025)}
+.exec-table tr.ex-loss td{background:rgba(255,77,109,.025)}
 .signal-feed::-webkit-scrollbar{width:3px}
 .signal-feed::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
 .sig-card{
@@ -343,6 +367,16 @@ input[type=number]:focus{border-color:var(--accent)}
     </div>
   </div>
 
+  <!-- ══ TRADE ACTIVITY — current pending signal only ══ -->
+  <div class="card" id="trade-activity-card" style="display:none">
+    <div class="card-hdr">
+      <span class="card-title">⚡ Trade Activity</span>
+      <span style="font-size:0.68rem;color:var(--text2)">This candle</span>
+    </div>
+    <div id="trade-activity-current">
+    </div>
+  </div>
+
   <!-- ══ LIVE SIGNAL GAUGE + BEST DIP TRACKER ══ -->
   <div class="card" id="gauge-card" style="display:none;overflow:hidden">
     <!-- Fixed header — never scrolls -->
@@ -494,18 +528,24 @@ input[type=number]:focus{border-color:var(--accent)}
   <div class="card">
     <div class="card-hdr">
       <span class="card-title">Signals</span>
-      <div style="display:flex;gap:7px;flex-wrap:wrap">
-        <select id="f-date" onchange="loadSignals()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 8px;font-size:0.75rem">
-          <option value="">All Time</option>
-          <option value="today">Today</option>
-          <option value="yesterday">Yesterday</option>
-          <option value="7d">Last 7 Days</option>
-          <option value="30d">Last 30 Days</option>
-        </select>
+      <div style="display:flex;gap:7px;flex-wrap:wrap;align-items:center">
+        <label style="font-size:0.68rem;color:var(--text2);display:flex;align-items:center;gap:4px">
+          From
+          <input type="date" id="f-date-from" onchange="loadSignals()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 8px;font-size:0.75rem">
+        </label>
+        <label style="font-size:0.68rem;color:var(--text2);display:flex;align-items:center;gap:4px">
+          To
+          <input type="date" id="f-date-to" onchange="loadSignals()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 8px;font-size:0.75rem">
+        </label>
+        <button class="btn btn-ghost" style="font-size:0.7rem;padding:5px 9px" onclick="document.getElementById('f-date-from').value='';document.getElementById('f-date-to').value='';loadSignals()">Clear dates</button>
         <select id="f-sym" onchange="loadSignals()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 8px;font-size:0.75rem">
           <option value="">All Pairs</option>
           <option>BTC-USDT</option><option>ETH-USDT</option><option>SOL-USDT</option>
           <option>XRP-USDT</option><option>BNB-USDT</option><option>DOGE-USDT</option>
+        </select>
+        <select id="f-active" onchange="loadSignals()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 8px;font-size:0.75rem">
+          <option value="">All Pairs (Live + Signal-Only)</option>
+          <option value="1">Active (Live-Execution) Pairs Only</option>
         </select>
         <select id="f-out" onchange="loadSignals()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 8px;font-size:0.75rem">
           <option value="">All Results</option>
@@ -532,7 +572,7 @@ input[type=number]:focus{border-color:var(--accent)}
     </div>
     <div style="overflow-x:auto">
       <table class="tbl">
-        <thead><tr><th>Open</th><th>Close</th><th>Pair</th><th>Direction</th><th>Confidence</th><th>Tier</th><th>Entry</th><th>Close Price</th><th style="white-space:nowrap">Best Dip 🎯</th><th>Result</th><th>Limitless</th><th>Polymarket</th></tr></thead>
+        <thead><tr><th>Open</th><th>Close</th><th>Pair</th><th>Direction</th><th>Confidence</th><th>Tier</th><th>Entry</th><th>Close Price</th><th style="white-space:nowrap">Best Dip 🎯</th><th>Result</th><th>Live</th><th>Limitless</th><th>Polymarket</th></tr></thead>
         <tbody id="signals-tbody"></tbody>
       </table>
     </div>
@@ -542,7 +582,7 @@ input[type=number]:focus{border-color:var(--accent)}
 
 <!-- ══ HISTORY ══ -->
 <div class="page" id="page-history">
-  <div class="page-hdr"><h2>📜 History</h2><p>Daily performance breakdown</p></div>
+  <div class="page-hdr"><h2>📜 History</h2><p>Daily breakdown · executed trades on Limitless</p></div>
   <div class="g2">
     <div class="card">
       <div class="card-hdr"><span class="card-title">30-Day Win Rate</span></div>
@@ -555,14 +595,37 @@ input[type=number]:focus{border-color:var(--accent)}
         <div style="display:flex;justify-content:space-between"><span style="color:var(--text2);font-size:0.83rem">Wins</span><span id="h-wins" style="color:var(--win);font-weight:700">—</span></div>
         <div style="display:flex;justify-content:space-between"><span style="color:var(--text2);font-size:0.83rem">Losses</span><span id="h-losses" style="color:var(--loss);font-weight:700">—</span></div>
         <div style="display:flex;justify-content:space-between"><span style="color:var(--text2);font-size:0.83rem">Avg Win Rate</span><span id="h-wr" style="color:var(--accent);font-weight:700">—</span></div>
+        <div style="display:flex;justify-content:space-between"><span style="color:var(--text2);font-size:0.83rem">Executed Trades</span><span id="h-executed" style="color:var(--win);font-weight:700">—</span></div>
       </div>
     </div>
   </div>
+
+  <!-- ══ EXECUTED TRADES TABLE ══ -->
+  <div class="card">
+    <div class="card-hdr" style="flex-wrap:wrap;gap:6px">
+      <span class="card-title">✅ Executed Trades (Limitless Filled)</span>
+      <span style="font-size:0.68rem;color:var(--text2)">Only orders confirmed filled on-chain</span>
+    </div>
+    <div style="overflow-x:auto;max-height:380px;overflow-y:auto">
+      <table class="exec-table">
+        <thead><tr>
+          <th>Time</th><th>Pair</th><th>Dir</th><th>Entry¢</th>
+          <th>Contracts</th><th>Size $</th><th>Close $</th><th>Result</th><th>Payout</th>
+        </tr></thead>
+        <tbody id="exec-tbody">
+          <tr><td colspan="9" style="text-align:center;color:var(--text2);padding:20px">No executed trades yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div id="exec-summary" style="display:flex;gap:18px;flex-wrap:wrap;padding:10px 4px 2px;font-size:0.7rem;color:var(--text2);border-top:1px solid var(--border);margin-top:8px"></div>
+  </div>
+
+  <!-- Daily Breakdown -->
   <div class="card">
     <div class="card-hdr"><span class="card-title">Daily Breakdown</span></div>
     <div style="overflow-x:auto">
       <table class="tbl">
-        <thead><tr><th>Date</th><th>Signals</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Mode</th></tr></thead>
+        <thead><tr><th>Date</th><th>Signals</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Executed</th><th>Mode</th></tr></thead>
         <tbody id="hist-tbody"></tbody>
       </table>
     </div>
@@ -606,13 +669,6 @@ input[type=number]:focus{border-color:var(--accent)}
           <div class="tgl-sub">Increase stake after each loss using the sequence below, reset on win</div>
         </div>
         <div class="toggle" id="tgl-mart" onclick="toggleSetting('martingale')"></div>
-      </div>
-      <div class="toggle-row">
-        <div>
-          <div class="tgl-lbl">Family Rotation</div>
-          <div class="tgl-sub">Exclude the last signal's pair family (A/B/C) from the next candle</div>
-        </div>
-        <div class="toggle" id="tgl-family-rotation" onclick="toggleSetting('family_rotation')"></div>
       </div>
 
       <div class="form-group" style="margin-top:16px">
@@ -782,7 +838,7 @@ input[type=number]:focus{border-color:var(--accent)}
 // STATE
 // ═══════════════════════════════════
 let state = {
-  settings: {mode:'shadow',position_size:10,use_martingale:false,use_family_rotation:false,max_contract_price:0.50},
+  settings: {mode:'shadow',position_size:10,use_martingale:false,max_contract_price:0.50},
   signalsPage: 1,
   perfChart: null,
   histChart: null,
@@ -792,12 +848,14 @@ let state = {
 // WEBSOCKET
 // ═══════════════════════════════════
 const socket = io({transports:['websocket','polling'],reconnectionAttempts:10,reconnectionDelay:2000});
-socket.on('connect', () => { loadTodayStats(); loadTodaySignals(); });
+socket.on('connect', () => { loadTodayStats(); loadTodaySignals(); refreshTradeActivity(); });
 socket.on('new_signal', sig => {
+  refreshTradeActivity();
   loadTodaySignals(); loadTodayStats();
   toast(`📡 ${sig.symbol} ${sig.signal_direction} ${Number(sig.ml_confidence).toFixed(1)}%`, 'signal');
 });
 socket.on('signal_resolved', sig => {
+  refreshTradeActivity();
   loadTodaySignals(); loadTodayStats(); loadShadowBalance();
   loadSettings();
   const t = sig.outcome==='WIN' ? 'win' : 'loss';
@@ -850,11 +908,11 @@ function showPage(name, el) {
   const mNav = document.getElementById('bn-'+name);
   if (mNav) mNav.classList.add('active');
   window.scrollTo(0,0);
-  if (name==='signals')  loadSignals();
-  if (name==='history')  loadHistory();
+  if (name==='signals')  { loadSettings(); loadSignals(); }
+  if (name==='history') { loadHistory(); loadExecutedTrades(); }
   if (name==='shadow')   { loadShadowBalance(); loadShadowSignals(); }
   if (name==='settings') loadSettings();
-  if (name==='dashboard') loadPairStats();
+  if (name==='dashboard') { loadPairStats(); refreshTradeActivity(); }
 }
 
 // ═══════════════════════════════════
@@ -1153,24 +1211,31 @@ async function loadPerfChart() {
 // SIGNALS PAGE
 // ═══════════════════════════════════
 async function loadSignals() {
-  const sym  = document.getElementById('f-sym').value;
-  const out  = document.getElementById('f-out').value;
-  const date = document.getElementById('f-date').value;
-  const dip  = document.getElementById('f-dip') ? document.getElementById('f-dip').value : '';
+  const sym      = document.getElementById('f-sym').value;
+  const out      = document.getElementById('f-out').value;
+  const dateFrom = document.getElementById('f-date-from') ? document.getElementById('f-date-from').value : '';
+  const dateTo   = document.getElementById('f-date-to')   ? document.getElementById('f-date-to').value   : '';
+  const active   = document.getElementById('f-active')    ? document.getElementById('f-active').value    : '';
+  const dip      = document.getElementById('f-dip') ? document.getElementById('f-dip').value : '';
   const p    = new URLSearchParams({page:state.signalsPage,per_page:25});
-  if (sym)  p.append('symbol',sym);
-  if (out)  p.append('outcome',out);
-  if (date) p.append('date_filter',date);
-  if (dip)  p.append('best_dip',dip);
+  if (sym)      p.append('symbol',sym);
+  if (out)      p.append('outcome',out);
+  if (dateFrom) p.append('date_from',dateFrom);
+  if (dateTo)   p.append('date_to',dateTo);
+  if (active)   p.append('active_only',active);
+  if (dip)      p.append('best_dip',dip);
   try {
     const r = await fetch('/api/signals?'+p);
     if (!r.ok) return;
     const d = await r.json();
     const ts = s => s ? new Date((s.endsWith('Z')?s:s+'Z')).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'UTC'}) : '—';
+    let noExecPairs = [];
+    try { noExecPairs = JSON.parse(state.settings?.no_execute_pairs || '[]'); } catch(e) {}
     document.getElementById('signals-tbody').innerHTML = d.signals.map(s => {
       const dir  = s.signal_direction;
       const out  = (s.outcome||'PENDING').toLowerCase();
       const conf = s.ml_confidence!=null ? Number(s.ml_confidence).toFixed(1) : '—';
+      const isLive = !noExecPairs.includes(s.symbol);
       return `<tr>
         <td style="font-size:0.7rem;color:var(--text2)">${ts(s.candle_open_time)}</td>
         <td style="font-size:0.7rem;color:var(--text2)">${ts(s.candle_close_time)}</td>
@@ -1187,6 +1252,7 @@ async function loadSignals() {
           return `<span style="color:${col};font-weight:700;font-size:0.8rem">${icon} ${n.toFixed(1)}¢</span>`;
         })(s.best_entry_pct)}</td>
         <td><span class="outcome-badge ${out==='win'?'ob-win':out==='loss'?'ob-loss':'ob-pending'}">${s.outcome||'PENDING'}</span></td>
+        <td>${isLive ? '<span class="outcome-badge ob-win">LIVE</span>' : '<span class="outcome-badge ob-neutral">SIGNAL ONLY</span>'}</td>
         <td>${(function(f){return f==='FILLED'?'<span class="outcome-badge ob-win">FILLED</span>':f==='UNFILLED'?'<span class="outcome-badge ob-loss">UNFILLED</span>':'<span class="outcome-badge ob-neutral">–</span>';})(s.limitless_fill||'NEUTRAL')}</td>
         <td>${(function(p,f){
           if(!p) return '<span class="outcome-badge ob-neutral">–</span>';
@@ -1196,7 +1262,7 @@ async function loadSignals() {
                  '<span class="outcome-badge ob-neutral">–</span>';
         })(s.poly_order_id, s.poly_fill||'NEUTRAL')}</td>
       </tr>`;
-    }).join('') || '<tr><td colspan="12" style="text-align:center;color:var(--text2);padding:20px">No signals yet</td></tr>';
+    }).join('') || '<tr><td colspan="13" style="text-align:center;color:var(--text2);padding:20px">No signals yet</td></tr>';
     const pages = document.getElementById('signals-pages');
     pages.innerHTML = Array.from({length:Math.min(d.pages,8)},(_,i)=>
       `<button class="pg-btn ${i+1===state.signalsPage?'active':''}" onclick="setSigPage(${i+1})">${i+1}</button>`
@@ -1255,6 +1321,172 @@ async function loadDipStats() {
 }
 
 // ═══════════════════════════════════
+// ── TRADE ACTIVITY (dashboard) — shows ONLY the current pending signal ─────────
+function renderTradeActivity(signals) {
+  const card = document.getElementById('trade-activity-card');
+  const box  = document.getElementById('trade-activity-current');
+  if (!card || !box) return;
+
+  // Find the single PENDING signal, if any
+  const pending = (signals || []).find(s => (s.outcome || 'PENDING').toUpperCase() === 'PENDING');
+
+  if (!pending) {
+    card.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  card.style.display = '';
+
+  let noExecPairs = [];
+  try { noExecPairs = JSON.parse(state.settings?.no_execute_pairs || '[]'); } catch(e) {}
+
+  const s     = pending;
+  const dir   = (s.signal_direction||'').toUpperCase();
+  const isUp  = dir === 'UP';
+  const fill  = (s.limitless_fill||'NEUTRAL').toUpperCase();
+  const noExec= noExecPairs.includes(s.symbol);
+  const mode  = (s.mode||'shadow').toLowerCase();
+
+  let placedHtml = '';
+  if (mode === 'shadow')      placedHtml = '<span class="tr-status trs-noexec">SHADOW</span>';
+  else if (noExec)            placedHtml = '<span class="tr-status trs-noexec">SIGNAL ONLY</span>';
+  else                        placedHtml = '<span class="tr-status trs-placed">ORDER SENT</span>';
+
+  let execHtml = '';
+  if (mode === 'shadow' || noExec) {
+    execHtml = '';
+  } else if (fill === 'FILLED') {
+    const cp = s.contract_price != null ? (parseFloat(s.contract_price)*100).toFixed(1)+'¢' : '—';
+    execHtml = `<span class="tr-status trs-exec">✓ FILLED @ ${cp}</span>`;
+  } else if (fill === 'UNFILLED') {
+    execHtml = '<span class="tr-status trs-unfilled">✗ UNFILLED</span>';
+  } else {
+    execHtml = '<span class="tr-status trs-pending">Checking…</span>';
+  }
+
+  const ot = s.candle_open_time  ? new Date(s.candle_open_time+'Z').toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '—';
+  const ct = s.candle_close_time ? new Date(s.candle_close_time+'Z').toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '—';
+  const rowClass = fill==='FILLED'?'executed': fill==='UNFILLED'?'unfilled':'placed';
+
+  box.innerHTML = `<div class="trade-row ${rowClass}">
+    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;flex-wrap:wrap">
+      <span class="tr-pair">${s.symbol||'?'}</span>
+      <span class="tr-dir ${isUp?'up':'dn'}">${isUp?'▲ UP':'▼ DOWN'}</span>
+      <span class="tr-meta">${ot}–${ct} UTC</span>
+      <span class="tr-meta">conf ${s.ml_confidence||'—'}%</span>
+      ${s.contracts_bought!=null?`<span class="tr-meta">${s.contracts_bought} cts</span>`:''}
+      ${s.position_size!=null?`<span class="tr-meta">$${parseFloat(s.position_size).toFixed(2)}</span>`:''}
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+      ${placedHtml}
+      ${execHtml}
+    </div>
+  </div>`;
+}
+
+// Called when signals list is refreshed (today + new_signal WS event)
+function refreshTradeActivity() {
+  fetch('/api/signals/today')
+    .then(r => r.json())
+    .then(d => renderTradeActivity(Array.isArray(d) ? d : (d.signals || [])))
+    .catch(() => {});
+}
+
+// ── EXECUTED TRADES TABLE (history page) ───────────────────────────────────
+function loadExecutedTrades() {
+  // Fetch all signals with limitless_fill=FILLED from the signals endpoint
+  fetch('/api/signals?per_page=200&fill=FILLED')
+    .then(r => r.json())
+    .then(data => {
+      const tbody   = document.getElementById('exec-tbody');
+      const summary = document.getElementById('exec-summary');
+      if (!tbody) return;
+
+      const rows = (data.signals || []).filter(s =>
+        (s.limitless_fill||'').toUpperCase() === 'FILLED'
+      );
+
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text2);padding:20px">No executed trades yet</td></tr>';
+        if (summary) summary.innerHTML = '';
+        return;
+      }
+
+      tbody.innerHTML = rows.map(s => {
+        const out   = (s.outcome||'PENDING').toUpperCase();
+        const dir   = (s.signal_direction||'').toUpperCase();
+        const isUp  = dir === 'UP';
+        const cp    = s.contract_price  != null ? (parseFloat(s.contract_price)*100).toFixed(1) : '—';
+        const cts   = s.contracts_bought!= null ? parseFloat(s.contracts_bought).toFixed(0) : '—';
+        const size  = s.position_size   != null ? '$'+parseFloat(s.position_size).toFixed(2) : '—';
+        const close = s.close_price     != null ? '$'+parseFloat(s.close_price).toFixed(4)   : '—';
+        const ot    = s.candle_open_time
+          ? new Date(s.candle_open_time+'Z').toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})
+          : '—';
+
+        // Estimated payout for wins
+        let payout = '—';
+        if (out==='WIN' && s.contract_price && s.contracts_bought && s.position_size) {
+          const payout_val = (parseFloat(s.contracts_bought) * 1.0);  // $1 per contract on win
+          const profit = payout_val - parseFloat(s.position_size);
+          payout = `<span style="color:var(--win)">+$${profit.toFixed(2)}</span>`;
+        } else if (out==='LOSS' && s.position_size) {
+          payout = `<span style="color:var(--loss)">-$${parseFloat(s.position_size).toFixed(2)}</span>`;
+        }
+
+        const rowClass = out==='WIN'?'ex-win':out==='LOSS'?'ex-loss':'';
+        const dirSpan  = isUp
+          ? '<span style="color:var(--win);font-weight:700">▲ UP</span>'
+          : '<span style="color:var(--loss);font-weight:700">▼ DOWN</span>';
+        const outSpan  = out==='WIN'
+          ? '<span class="outcome-badge ob-win">WIN</span>'
+          : out==='LOSS'
+          ? '<span class="outcome-badge ob-loss">LOSS</span>'
+          : '<span class="outcome-badge ob-pending">PENDING</span>';
+
+        return `<tr class="${rowClass}">
+          <td>${ot}</td>
+          <td style="font-weight:700">${s.symbol||'?'}</td>
+          <td>${dirSpan}</td>
+          <td style="color:var(--accent2)">${cp}¢</td>
+          <td>${cts}</td>
+          <td>${size}</td>
+          <td>${close}</td>
+          <td>${outSpan}</td>
+          <td>${payout}</td>
+        </tr>`;
+      }).join('');
+
+      // Summary bar
+      if (summary) {
+        const wins   = rows.filter(r=>(r.outcome||'').toUpperCase()==='WIN').length;
+        const losses = rows.filter(r=>(r.outcome||'').toUpperCase()==='LOSS').length;
+        const total  = wins + losses;
+        const wr     = total ? (wins/total*100).toFixed(1) : '—';
+        const totalPnl = rows.reduce((acc, s) => {
+          if ((s.outcome||'').toUpperCase()==='WIN' && s.contracts_bought && s.position_size) {
+            return acc + (parseFloat(s.contracts_bought) - parseFloat(s.position_size));
+          } else if ((s.outcome||'').toUpperCase()==='LOSS' && s.position_size) {
+            return acc - parseFloat(s.position_size);
+          }
+          return acc;
+        }, 0);
+        const pnlColor = totalPnl >= 0 ? 'var(--win)' : 'var(--loss)';
+        summary.innerHTML = `
+          <span><b style="color:var(--text)">${rows.length}</b> executed</span>
+          <span><b style="color:var(--win)">${wins}W</b> / <b style="color:var(--loss)">${losses}L</b></span>
+          <span>WR <b style="color:var(--accent)">${wr}%</b></span>
+          <span>P&L <b style="color:${pnlColor}">${totalPnl>=0?'+':''}$${totalPnl.toFixed(2)}</b></span>
+        `;
+      }
+
+      // Update h-executed counter
+      const hExec = document.getElementById('h-executed');
+      if (hExec) hExec.textContent = rows.length;
+    })
+    .catch(err => console.warn('[execTrades] fetch error:', err));
+}
+
 // HISTORY PAGE
 // ═══════════════════════════════════
 async function loadHistory() {
@@ -1277,9 +1509,10 @@ async function loadHistory() {
         <td style="color:var(--win)">${d.wins}</td>
         <td style="color:var(--loss)">${d.losses}</td>
         <td style="color:${c};font-weight:700">${wr.toFixed(1)}%</td>
+        <td style="color:var(--win);font-weight:700">${d.executed_count!=null?d.executed_count:'—'}</td>
         <td><span class="outcome-badge ${d.mode==='live'?'ob-loss':'ob-pending'}" style="padding:2px 8px">${d.mode}</span></td>
       </tr>`;
-    }).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--text2);padding:20px">No history yet</td></tr>';
+    }).join('') || '<tr><td colspan="7" style="text-align:center;color:var(--text2);padding:20px">No history yet</td></tr>';
     // Chart
     const labels = data.map(d=>d.date.slice(5)).reverse();
     const wrs    = data.map(d=>d.win_rate).reverse();
@@ -1364,7 +1597,6 @@ function applySettingsUI() {
   const s = state.settings;
   document.getElementById('tgl-live').classList.toggle('on', s.mode==='live');
   document.getElementById('tgl-mart').classList.toggle('on', !!s.use_martingale);
-  document.getElementById('tgl-family-rotation').classList.toggle('on', !!s.use_family_rotation);
   document.getElementById('tgl-limitless').classList.toggle('on',
     s.use_limitless !== undefined ? !!s.use_limitless : true);
   document.getElementById('tgl-polymarket').classList.toggle('on', !!s.use_polymarket);
@@ -1443,7 +1675,6 @@ function applySettingsUI() {
 function toggleSetting(type) {
   if (type==='mode')       state.settings.mode = state.settings.mode==='live'?'shadow':'live';
   if (type==='martingale') state.settings.use_martingale   = !state.settings.use_martingale;
-  if (type==='family_rotation') state.settings.use_family_rotation = !state.settings.use_family_rotation;
 
   applySettingsUI();
 }
@@ -1457,7 +1688,6 @@ async function saveSettings() {
     mode:                  state.settings.mode,
     position_size:         parseFloat(document.getElementById('inp-pos').value),
     use_martingale:        state.settings.use_martingale,
-    use_family_rotation:   state.settings.use_family_rotation,
     martingale_sequence:   document.getElementById('inp-seq').value.trim(),
     martingale_cap:        parseInt(document.getElementById('inp-cap').value),
     max_contract_price:    parseFloat(document.getElementById('inp-cp').value),
@@ -1591,7 +1821,7 @@ async function init() {
 
 init();
 setInterval(loadPrices,    30000);
-setInterval(()=>{ loadTodayStats(); loadTodaySignals(); }, 15000);
+setInterval(()=>{ loadTodayStats(); loadTodaySignals(); refreshTradeActivity(); }, 15000);
 setInterval(loadPairStats, 300000);
 
 // ═══════════════════════════════════
@@ -2201,10 +2431,12 @@ function disconnectLimitlessWS() {
 
 // Hook into existing WebSocket events
 socket.on('new_signal', sig => {
+  refreshTradeActivity();
   if (sig.outcome === 'PENDING') startGaugeForSignal(sig);
 });
 
 socket.on('signal_resolved', sig => {
+  refreshTradeActivity();
   if (sig.id === gaugeState.signalId) stopGauge(sig.outcome);
 });
 

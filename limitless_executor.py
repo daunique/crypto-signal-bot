@@ -56,70 +56,6 @@ _slug_cache:    dict = {}
 _market_cache:  dict = {}
 _page_id_cache: str | None = None
 
-# ── Proxy configuration ──────────────────────────────────────────────────────
-# Same mechanism as polymarket_executor.py — if a region is geo-blocked by
-# Limitless (or its CDN/host-level blocking flags Render's IP ranges), every
-# request to api.limitless.exchange can be routed through a proxy instead.
-# Separate env var from Polymarket's so each exchange can use a different
-# proxy (or the same one) independently.
-# Accepts an HTTP/HTTPS forward-proxy URL (e.g. "http://user:pass@host:8080"),
-# a SOCKS5 URL (e.g. "socks5h://user:pass@host:1080" — the "h" suffix
-# resolves DNS through the proxy too, so the proxy's region is what's seen,
-# not Render's), or the bare "host:port:user:pass" format some proxy
-# providers hand out directly (e.g. "45.80.5.113:12323:user:pass" —
-# auto-converted to an http:// URL). SOCKS support requires the optional
-# "pysocks" package.
-#
-# This only changes network transport — HMAC signatures are computed over
-# the path/body before the request is sent, so they're unaffected by routing
-# through a proxy.
-LIMITLESS_PROXY_URL = os.environ.get("LIMITLESS_PROXY_URL", "").strip()
-
-
-def _normalize_proxy_url(raw: str) -> str:
-    """
-    Accepts either a full proxy URL (e.g. "http://user:pass@host:port" or
-    "socks5h://user:pass@host:port") or the bare "host:port:user:pass"
-    format some proxy providers hand out (e.g. "45.80.5.113:12323:user:pass")
-    and returns a proper URL requests can use.
-
-    Defaults to "http://" scheme when given the bare host:port:user:pass
-    form, since that's the most common transport for these proxy services.
-    If you specifically need SOCKS5, paste the full "socks5h://user:pass@host:port"
-    URL instead of the bare form.
-    """
-    raw = raw.strip()
-    if "://" in raw:
-        # Already a full URL — use as-is.
-        return raw
-
-    parts = raw.split(":")
-    if len(parts) == 4:
-        host, port, user, pwd = parts
-        return f"http://{user}:{pwd}@{host}:{port}"
-    if len(parts) == 2:
-        # host:port with no auth
-        host, port = parts
-        return f"http://{host}:{port}"
-
-    # Unrecognized shape — return as-is and let requests surface a clear error
-    # rather than silently mis-parsing something we don't understand.
-    return raw
-
-
-def _get_proxies() -> dict | None:
-    """
-    Returns a requests-compatible proxies dict if LIMITLESS_PROXY_URL is
-    configured, else None (meaning: connect directly, no proxy).
-    """
-    if not LIMITLESS_PROXY_URL:
-        return None
-    url = _normalize_proxy_url(LIMITLESS_PROXY_URL)
-    return {
-        "http":  url,
-        "https": url,
-    }
-
 # Known page/group slugs per ticker — used as matching hints in active/slugs discovery,
 # and as last-resort fallback if all dynamic strategies fail.
 # Keys are tickers without -USDT suffix; values are the base page slugs on limitless.exchange.
@@ -274,7 +210,8 @@ def _get_crypto_15min_page_id() -> str | None:
         resp = requests.get(
             f"{API_BASE}/market-pages/by-path",
             params={"path": "/crypto/15-min"},
-            timeout=10, proxies=_get_proxies())
+            timeout=10,
+        )
         logger.info("GET /market-pages/by-path?path=/crypto/15-min → %d", resp.status_code)
         if resp.ok:
             page    = resp.json()
@@ -338,7 +275,7 @@ def _discover_slug_via_active_slugs(ticker: str) -> str | None:
     known_page_slug = _KNOWN_SLUGS.get(base_ticker, "")
 
     try:
-        resp = requests.get(f"{API_BASE}/markets/active/slugs", timeout=10, proxies=_get_proxies())
+        resp = requests.get(f"{API_BASE}/markets/active/slugs", timeout=10)
         logger.info("GET /markets/active/slugs → %d", resp.status_code)
         if not resp.ok:
             return None
@@ -519,7 +456,8 @@ def _discover_slug_via_page_markets(ticker: str, page_id: str) -> str | None:
                 "sort":  "deadline",
                 "filters[ticker]": ticker.lower(),
             },
-            timeout=10, proxies=_get_proxies())
+            timeout=10,
+        )
         logger.info("GET /market-pages/%s/markets?ticker=%s → %d",
                     page_id, ticker.lower(), resp.status_code)
         if resp.ok:
@@ -555,7 +493,8 @@ def _discover_slug_via_search(ticker: str) -> str | None:
         resp = requests.get(
             f"{API_BASE}/markets/search",
             params={"q": ticker, "limit": 50},
-            timeout=10, proxies=_get_proxies())
+            timeout=10,
+        )
         logger.info("GET /markets/search?q=%s → %d", ticker, resp.status_code)
         if resp.ok:
             body    = resp.json()
@@ -605,7 +544,7 @@ def get_owner_id(wallet_address: str) -> int | None:
     try:
         path = f"/profiles/{wallet_address}"
         headers = _build_hmac_headers("GET", path)
-        resp = requests.get(f"{API_BASE}{path}", headers=headers, timeout=10, proxies=_get_proxies())
+        resp = requests.get(f"{API_BASE}{path}", headers=headers, timeout=10)
         logger.info("GET /profiles/%s → %d", wallet_address, resp.status_code)
         if resp.ok:
             data = resp.json()
@@ -636,7 +575,7 @@ def get_owner_id(wallet_address: str) -> int | None:
             headers = _build_hmac_headers("GET", path)
         except ValueError:
             headers = {}
-        resp = requests.get(f"{API_BASE}{path}", headers=headers, timeout=10, proxies=_get_proxies())
+        resp = requests.get(f"{API_BASE}{path}", headers=headers, timeout=10)
         logger.info("GET /profiles/public/%s → %d", wallet_address, resp.status_code)
         if resp.ok:
             data = resp.json()
@@ -715,7 +654,7 @@ def fetch_market(slug: str) -> dict | None:
 
     # Step 1: GET /markets/{slug}
     try:
-        resp = requests.get(f"{API_BASE}/markets/{slug}", timeout=10, proxies=_get_proxies())
+        resp = requests.get(f"{API_BASE}/markets/{slug}", timeout=10)
         logger.info("GET /markets/%s → %d", slug, resp.status_code)
         if resp.status_code == 404:
             return None
@@ -729,7 +668,7 @@ def fetch_market(slug: str) -> dict | None:
 
     # Step 2: GET /markets/{slug}/orderbook — required for exchange addr + token IDs
     try:
-        resp2 = requests.get(f"{API_BASE}/markets/{slug}/orderbook", timeout=10, proxies=_get_proxies())
+        resp2 = requests.get(f"{API_BASE}/markets/{slug}/orderbook", timeout=10)
         logger.info("GET /markets/%s/orderbook → %d", slug, resp2.status_code)
         if resp2.ok:
             ob = resp2.json() or {}
@@ -1154,7 +1093,8 @@ def place_live_order(
             f"{API_BASE}{path}",
             headers=headers,
             data=body_str,      # data= not json= — body must match HMAC signature
-            timeout=15, proxies=_get_proxies())
+            timeout=15,
+        )
         logger.info("[%s] POST /orders → %d: %s",
                     symbol, resp.status_code, resp.text[:800])
 
@@ -1252,7 +1192,7 @@ def get_fee_rate_bps(maker_addr: str) -> int:
     try:
         path = f"/profiles/{maker_addr}"
         headers = _build_hmac_headers("GET", path)
-        resp = requests.get(f"{API_BASE}{path}", headers=headers, timeout=10, proxies=_get_proxies())
+        resp = requests.get(f"{API_BASE}{path}", headers=headers, timeout=10)
         if resp.ok:
             data = resp.json()
             rank = data.get("rank") or {}
@@ -1305,7 +1245,7 @@ def _get_condition_id_from_positions(market_slug: str, symbol: str) -> str | Non
     try:
         path    = "/portfolio/positions"
         headers = _build_hmac_headers("GET", path)
-        resp    = requests.get(f"{API_BASE}{path}", headers=headers, timeout=10, proxies=_get_proxies())
+        resp    = requests.get(f"{API_BASE}{path}", headers=headers, timeout=10)
         if not resp.ok:
             logger.warning("[%s] GET /portfolio/positions → %d", symbol, resp.status_code)
             return None
@@ -1386,7 +1326,8 @@ def claim_winnings(market_slug: str, signal_direction: str, symbol: str, cond_id
             f"{API_BASE}{path}",
             headers=headers,
             data=body_str,
-            timeout=15, proxies=_get_proxies())
+            timeout=15,
+        )
 
         logger.info(
             "[%s] POST /portfolio/redeem → %d: %s",
@@ -1430,39 +1371,30 @@ def claim_winnings(market_slug: str, signal_direction: str, symbol: str, cond_id
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ORDER FILL VERIFICATION  (via /portfolio/history — on-chain source of truth)
+# ORDER FILL VERIFICATION  (via /portfolio/trades — on-chain source of truth)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def check_order_filled(market_slug: str, order_id: str) -> dict:
     """
     Verify whether an order was actually executed on Limitless by checking
-    GET /portfolio/history — the on-chain source of truth.
+    GET /portfolio/trades — the on-chain source of truth.
 
-    NOTE: This previously called GET /portfolio/trades, which is not a real
-    Limitless endpoint (confirmed via Limitless's own docs/AI assistant —
-    the correct endpoint is /portfolio/history, cursor-paginated, returning
-    AMM trades, CLOB fills, splits, merges, etc., each with market info,
-    token amounts, price, and on-chain transaction hash). That mistake meant
-    every fill check was silently failing against a dead endpoint and every
-    order — filled or not — came back NOT_FOUND.
-
-    This is stronger than checking /markets/{slug}/user-orders because fills
-    only appear once the blockchain confirms the trade. A limit order can
-    show as LIVE in user-orders indefinitely if never matched, but it will
-    NEVER appear in /portfolio/history unless it was executed on-chain.
+    This is stronger than checking /markets/{slug}/user-orders because trades
+    only appear once the blockchain confirms the fill. A limit order can show
+    as LIVE in user-orders indefinitely if never matched, but it will NEVER
+    appear in /portfolio/trades unless it was executed on-chain.
 
     This is the correct source for martingale decisions: an OKX WIN does not
     mean the Limitless position was filled. Only a confirmed trade does.
 
-    Falls back to GET /markets/{slug}/user-orders if the history endpoint fails.
+    Falls back to GET /markets/{slug}/user-orders if trades endpoint fails.
 
     Returns:
         dict with keys:
-          filled   (bool)  — True if a confirmed on-chain fill was found
-          status   (str)   — "FILLED", "NOT_FOUND", "SHADOW", or "ERROR"
-          trade    (dict)  — the matching history entry if found, else None
-          tx_hash  (str)   — on-chain transaction hash if found, else None
-          error    (str)   — error message on failure
+          filled  (bool)   — True if a confirmed on-chain trade was found
+          status  (str)    — "FILLED", "NOT_FOUND", "SHADOW", or "ERROR"
+          trade   (dict)   — the matching trade record if found, else None
+          error   (str)    — error message on failure
     """
     if not market_slug or not order_id:
         return {"filled": False, "status": "ERROR", "error": "missing slug or order_id",
@@ -1472,107 +1404,61 @@ def check_order_filled(market_slug: str, order_id: str) -> dict:
         return {"filled": False, "status": "SHADOW",
                 "error": "shadow order — not on-chain", "trade": None}
 
-    # ── Primary: GET /portfolio/history ──────────────────────────────────────
-    # Cursor-paginated. Returns all account activity (AMM trades, CLOB fills,
-    # splits, merges, etc.) for this wallet. We match on market slug (each
-    # entry has market.slug) and a buy-type entry (e.g. "Limit Buy" /
-    # "Market Buy" — we accept anything containing "buy", case-insensitive,
-    # since exact type strings aren't guaranteed stable). Paginates via
-    # nextCursor until either a match is found, no more pages remain, or a
-    # sane page cap is hit (this is a single 15-min market, so the match
-    # should appear within the first page or two of recent activity).
+    # ── Primary: GET /portfolio/trades ───────────────────────────────────────
+    # Returns all on-chain executed trades for this wallet. We match on
+    # market slug (each trade has market.slug) and optionally transactionHash
+    # if we stored it. Since we store order_id from POST /orders response,
+    # we match on market slug as the reliable key — slug is unique per 15-min
+    # window, so one slug = one trade per candle.
     try:
-        cursor      = None
-        page_cap    = 5     # generous — one signal's activity should be recent
-        page_limit  = 50
-        pages_seen  = 0
+        path    = "/portfolio/trades"
+        headers = _build_hmac_headers("GET", path)
+        resp    = requests.get(f"{API_BASE}{path}", headers=headers, timeout=10)
 
-        while pages_seen < page_cap:
-            path   = "/portfolio/history"
-            qs     = f"?limit={page_limit}" + (f"&cursor={cursor}" if cursor else "")
-            headers = _build_hmac_headers("GET", path)
-            resp    = requests.get(f"{API_BASE}{path}{qs}", headers=headers, timeout=10, proxies=_get_proxies())
+        logger.info("[FILL-CHECK] GET /portfolio/trades → %d", resp.status_code)
 
-            logger.info("[FILL-CHECK] GET %s%s → %d", path, qs, resp.status_code)
+        if resp.ok:
+            trades = resp.json() if resp.text else []
+            if not isinstance(trades, list):
+                trades = trades.get("trades") or trades.get("data") or []
 
-            if not resp.ok:
-                logger.warning(
-                    "[FILL-CHECK] /portfolio/history failed %d — falling back to user-orders",
-                    resp.status_code
-                )
-                break
+            for trade in trades:
+                mkt      = trade.get("market") or {}
+                t_slug   = mkt.get("slug") or ""
+                t_hash   = trade.get("transactionHash") or ""
+                strategy = (trade.get("strategy") or "").lower()
 
-            payload = resp.json() if resp.text else {}
-            entries = payload.get("data") or payload.get("history") or []
-            if not isinstance(entries, list):
-                entries = []
-
-            for entry in entries:
-                mkt       = entry.get("market") or {}
-                e_slug    = mkt.get("slug") or ""
-                e_type    = (entry.get("type") or "").lower()
-                t_hash    = (
-                    entry.get("transactionHash")
-                    or entry.get("txHash")
-                    or entry.get("tx_hash")
-                    or ""
-                )
-
-                # Match: same market slug, and a buy-side fill (not a sell,
-                # split, merge, or redeem). Accept any "*buy*" type string
-                # (e.g. "Limit Buy", "Market Buy") rather than an exact match,
-                # since the precise label isn't guaranteed stable across
-                # order types.
-                if market_slug and market_slug in e_slug and "buy" in e_type:
+                # Match: trade's market slug contains our slug (slugs are unique
+                # per 15-min window so this is safe), and it's a Buy (not a sell/redeem)
+                if market_slug and market_slug in t_slug and strategy == "buy":
                     logger.info(
-                        "[FILL-CHECK] ✓ On-chain fill confirmed | slug=%s type=%s "
-                        "txHash=%s amount=%s",
-                        e_slug, entry.get("type"), t_hash, entry.get("amount")
+                        "[FILL-CHECK] ✓ On-chain trade confirmed | slug=%s "
+                        "txHash=%s collateral=%s outcomeTokenPrice=%s",
+                        t_slug, t_hash,
+                        trade.get("collateralAmount"), trade.get("outcomeTokenPrice")
                     )
                     return {
-                        "filled":  True,
-                        "status":  "FILLED",
-                        "trade":   entry,
-                        "tx_hash": t_hash or None,
-                        "error":   None,
+                        "filled": True,
+                        "status": "FILLED",
+                        "trade":  trade,
+                        "error":  None,
                     }
 
-            pages_seen += 1
-            cursor = payload.get("nextCursor")
-            if not cursor:
-                logger.info(
-                    "[FILL-CHECK] No on-chain fill found for slug=%s after %d page(s), "
-                    "no more pages",
-                    market_slug, pages_seen
-                )
-                if pages_seen == 1 and entries:
-                    logger.info(
-                        "[FILL-CHECK][DIAGNOSTIC] Dumping up to 3 raw history entries "
-                        "to inspect actual field names/values (no match found):"
-                    )
-                    for _i, _e in enumerate(entries[:3]):
-                        logger.info("[FILL-CHECK][DIAGNOSTIC] entry[%d] raw keys=%s", _i, list(_e.keys()))
-                        logger.info("[FILL-CHECK][DIAGNOSTIC] entry[%d] raw=%s", _i, _e)
-                break
+            logger.info(
+                "[FILL-CHECK] No on-chain trade found for slug=%s in %d trades",
+                market_slug, len(trades)
+            )
+            # Confirmed: no trade on-chain — order was not executed
+            return {"filled": False, "status": "NOT_FOUND", "trade": None, "error": None}
 
         else:
-            logger.info(
-                "[FILL-CHECK] No on-chain fill found for slug=%s after %d page(s) "
-                "(page cap reached)",
-                market_slug, pages_seen
+            logger.warning(
+                "[FILL-CHECK] /portfolio/trades failed %d — falling back to user-orders",
+                resp.status_code
             )
 
-        # Primary path found no on-chain fill match — don't give up yet.
-        # The fallback below matches on the exact order_id (a more precise
-        # key than slug-substring matching), so try it before concluding
-        # the order never filled.
-        logger.info(
-            "[FILL-CHECK] No slug match in /portfolio/history — trying "
-            "order_id-based fallback before concluding NOT_FOUND"
-        )
-
     except Exception as e:
-        logger.warning("[FILL-CHECK] /portfolio/history error: %s — falling back", e)
+        logger.warning("[FILL-CHECK] /portfolio/trades error: %s — falling back", e)
 
     # ── Fallback: GET /markets/{slug}/user-orders ─────────────────────────────
     # Less reliable (shows LIVE unfilled orders too) but better than nothing.
@@ -1580,13 +1466,13 @@ def check_order_filled(market_slug: str, order_id: str) -> dict:
         path    = f"/markets/{market_slug}/user-orders"
         params  = "?statuses=MATCHED&statuses=LIVE&limit=100"
         headers = _build_hmac_headers("GET", path)
-        resp    = requests.get(f"{API_BASE}{path}{params}", headers=headers, timeout=10, proxies=_get_proxies())
+        resp    = requests.get(f"{API_BASE}{path}{params}", headers=headers, timeout=10)
 
         logger.info("[FILL-CHECK] fallback GET %s%s → %d", path, params, resp.status_code)
 
         if not resp.ok:
             return {
-                "filled": False, "status": "ERROR", "trade": None, "tx_hash": None,
+                "filled": False, "status": "ERROR", "trade": None,
                 "error": f"HTTP {resp.status_code}: {resp.text[:200]}",
             }
 
@@ -1602,97 +1488,14 @@ def check_order_filled(market_slug: str, order_id: str) -> dict:
                     "[FILL-CHECK] fallback: order_id=%s status=%s filled=%s",
                     order_id, status, filled
                 )
-                return {"filled": filled, "status": status, "trade": None, "tx_hash": None, "error": None}
+                return {"filled": filled, "status": status, "trade": None, "error": None}
 
         logger.info(
             "[FILL-CHECK] fallback: order_id=%s NOT FOUND in %d user-orders",
             order_id, len(orders)
         )
-        return {"filled": False, "status": "NOT_FOUND", "trade": None, "tx_hash": None, "error": None}
+        return {"filled": False, "status": "NOT_FOUND", "trade": None, "error": None}
 
     except Exception as e:
         logger.error("[FILL-CHECK] fallback exception for order_id=%s: %s", order_id, e)
-        return {"filled": False, "status": "ERROR", "trade": None, "tx_hash": None, "error": str(e)}
-
-
-def check_order_filled_diagnostic(market_slug: str, order_id: str) -> dict:
-    """
-    Last-resort diagnostic check, called once at candle close right before
-    job_recheck_fills gives up on a signal. Uses a DELIBERATELY RELAXED match
-    (slug only — ignores the "buy" type filter that check_order_filled()
-    requires) so that if the real trade is present in /portfolio/history but
-    our type-string matching is wrong, we still find it and log its exact
-    raw fields. This makes the giveup log line self-contained: even a short
-    log excerpt around the giveup moment will show real API data instead of
-    just "gave up, no idea why".
-
-    Returns:
-        dict with keys:
-          filled      (bool) — True only if a slug match AND the relaxed
-                                "buy"-ish heuristic both succeed
-          status      (str)  — human-readable outcome
-          tx_hash     (str)  — tx hash if a slug match was found, else None
-          raw_sample  (str)  — str() of the first slug-matching entry found
-                                (any type), or a short diagnostic message if
-                                none was found at all
-    """
-    if not market_slug or not order_id:
-        return {"filled": False, "status": "ERROR", "tx_hash": None, "raw_sample": "missing slug/order_id"}
-
-    if str(order_id).startswith("shadow_"):
-        return {"filled": False, "status": "SHADOW", "tx_hash": None, "raw_sample": "shadow order"}
-
-    try:
-        path    = "/portfolio/history"
-        qs      = "?limit=50"
-        headers = _build_hmac_headers("GET", path)
-        resp    = requests.get(f"{API_BASE}{path}{qs}", headers=headers, timeout=10, proxies=_get_proxies())
-
-        logger.info("[FILL-CHECK][FINAL] GET %s%s → %d", path, qs, resp.status_code)
-
-        if not resp.ok:
-            return {
-                "filled": False, "status": "HTTP_ERROR", "tx_hash": None,
-                "raw_sample": f"HTTP {resp.status_code}: {resp.text[:300]}",
-            }
-
-        payload = resp.json() if resp.text else {}
-        entries = payload.get("data") or payload.get("history") or []
-        if not isinstance(entries, list):
-            entries = []
-
-        if not entries:
-            return {
-                "filled": False, "status": "EMPTY_RESPONSE", "tx_hash": None,
-                "raw_sample": f"/portfolio/history returned 0 entries (raw keys={list(payload.keys())})",
-            }
-
-        for entry in entries:
-            mkt    = entry.get("market") or {}
-            e_slug = mkt.get("slug") or ""
-            if market_slug and market_slug in e_slug:
-                e_type = (entry.get("type") or "")
-                t_hash = (
-                    entry.get("transactionHash")
-                    or entry.get("txHash")
-                    or entry.get("tx_hash")
-                    or None
-                )
-                _filled = "buy" in e_type.lower()
-                return {
-                    "filled":     _filled,
-                    "status":     f"SLUG_MATCH type={e_type!r}",
-                    "tx_hash":    t_hash,
-                    "raw_sample": str(entry),
-                }
-
-        return {
-            "filled": False, "status": "NO_SLUG_MATCH", "tx_hash": None,
-            "raw_sample": (
-                f"no entry matched slug={market_slug!r} in {len(entries)} entries; "
-                f"first entry sample={entries[0]!r}"
-            ),
-        }
-
-    except Exception as e:
-        return {"filled": False, "status": "EXCEPTION", "tx_hash": None, "raw_sample": str(e)}
+        return {"filled": False, "status": "ERROR", "trade": None, "error": str(e)}

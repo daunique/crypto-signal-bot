@@ -47,6 +47,10 @@ from apscheduler.triggers.interval import IntervalTrigger
 logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler(timezone="UTC")
 
+# Throttle for the early fill-check inside job_track_best_dip (runs every 3s,
+# but we only want to hit the Limitless fill-status API every ~10s).
+_last_early_fill_check_ts = 0.0
+
 
 def _ctx():
     from app import app
@@ -195,69 +199,101 @@ def job_generate_signal():
                 _pair_cooldown_excludes = []
 
             # ── Pair family rotation ──────────────────────────────────────────
-            # Family groupings (v3 signal_engine):
+            # Family groupings (user-defined):
             #   Family A: BTC-USDT + ETH-USDT
             #   Family B: DOGE-USDT + SOL-USDT
             #   Family C: XRP-USDT + BNB-USDT
-            # Family rotation is gated by settings.use_family_rotation.
-            # When OFF, no family is excluded and every candle is eligible.
-            # When ON, rotates A→B→C→A: after a signal fires from a family,
-            # the next candle must come from a different family (hard block —
-            # no fall-through). v3 engine uses a single excluded_family string,
-            # not a list, and enforces strict rotation with no fallthrough.
+            # Family rotation is always active — rotates A→B→C→A.
+            # Falls through (skips candle) if no signal qualifies outside excluded family.
             _preferred_families = None
-            _excluded_family    = None   # v3: single string, not a list
             _FAMILY_MAP = {
                 "BTC-USDT":  "A", "ETH-USDT":  "A",
                 "DOGE-USDT": "B", "SOL-USDT":  "B",
                 "XRP-USDT":  "C", "BNB-USDT":  "C",
             }
-            if getattr(settings, 'use_family_rotation', False):
-                try:
-                    # Look at last signal overall (including PENDING — covers the
-                    # 15-min window while the current signal is waiting to resolve).
-                    _last_resolved = Signal.query.filter(
-                        Signal.outcome.in_(['WIN', 'LOSS', 'UNKNOWN'])
-                    ).order_by(Signal.candle_open_time.desc()).first()
+            # Family rotation is ALWAYS ON — no toggle needed.
+            # After a signal fires from a family, the next candle must come
+            # from a different family. Prevents consecutive BTC/ETH spam.
+            # Families: A = BTC+ETH | B = DOGE+SOL | C = XRP+BNB
+            _excluded_family = None
+            try:
+                # Look at last signal overall (including PENDING — covers the
+                # 15-min window while the current signal is waiting to resolve).
+                _last_resolved = Signal.query.filter(
+                    Signal.outcome.in_(['WIN', 'LOSS', 'UNKNOWN'])
+                ).order_by(Signal.candle_open_time.desc()).first()
 
-                    _last_any = Signal.query.order_by(
-                        Signal.candle_open_time.desc()
-                    ).first()
+                _last_any = Signal.query.order_by(
+                    Signal.candle_open_time.desc()
+                ).first()
 
-                    # Use the more recent of the two
-                    _ref_sig = None
-                    if _last_any and _last_resolved:
-                        _ref_sig = _last_any if (
-                            _last_any.candle_open_time >= _last_resolved.candle_open_time
-                        ) else _last_resolved
-                    else:
-                        _ref_sig = _last_any or _last_resolved
+                # Use the more recent of the two
+                _ref_sig = None
+                if _last_any and _last_resolved:
+                    _ref_sig = _last_any if (
+                        _last_any.candle_open_time >= _last_resolved.candle_open_time
+                    ) else _last_resolved
+                else:
+                    _ref_sig = _last_any or _last_resolved
 
-                    if _ref_sig:
-                        _excl = _FAMILY_MAP.get(_ref_sig.symbol)
-                        _excluded_family    = _excl  # v3: single string
-                        _preferred_families = [f for f in ['A', 'B', 'C'] if f != _excl]
-                        logger.info(
-                            '[GENERATE] Family rotation | last=%s family=%s → '
-                            'excluding family %s | eligible=%s',
-                            _ref_sig.symbol, _excl,
-                            _excluded_family, _preferred_families
-                        )
-                    else:
-                        _excluded_family    = None
-                        _preferred_families = None
-                        logger.info('[GENERATE] Family rotation | no previous signal — all families eligible')
-                except Exception as _fe:
-                    logger.warning('[GENERATE] Family rotation check error: %s — allowing all families', _fe)
-                    _excluded_family    = None
+                if _ref_sig:
+                    _excl = _FAMILY_MAP.get(_ref_sig.symbol)
+                    _excluded_families  = [_excl] if _excl else None
+                    _preferred_families = [f for f in ['A', 'B', 'C'] if f != _excl]
+                    logger.info(
+                        '[GENERATE] Family rotation | last=%s family=%s → '
+                        'excluding family %s | eligible=%s',
+                        _ref_sig.symbol, _excl,
+                        _excluded_families, _preferred_families
+                    )
+                else:
+                    _excluded_families  = None
                     _preferred_families = None
-            else:
-                logger.info('[GENERATE] Family rotation disabled in settings — all families eligible')
+                    logger.info('[GENERATE] Family rotation | no previous signal — all families eligible')
+            except Exception as _fe:
+                logger.warning('[GENERATE] Family rotation check error: %s — allowing all families', _fe)
+                _excluded_families  = None
+                _preferred_families = None
 
-            # NOTE: v3 signal_engine removed the Directional Saturation Filter
-            # (blocked_directions). The pullback-recovery quality gate now serves
-            # as the primary signal filter. The dir_saturation_history column is
-            # still written for backwards-compat but is no longer read here.
+            # ── Rule 2: Directional Saturation Filter ────────────────────────
+            # If the same direction has lost ≥3 times in the last 6 signals,
+            # raise the confidence floor for that direction.
+            # This prevents the engine chasing a losing directional trend with
+            # low-conviction signals.
+            #
+            # FIX (signal_engine v5 / RSI(2) swap): the old ML engine's
+            # confidence was a model probability that could exceed 0.67.
+            # The new engine's confidence is a fixed backtested win rate per
+            # pair/direction, which only ranges ~0.558-0.612 (see
+            # signal_engine._BACKTEST_WIN_RATE). A 0.67 floor is therefore
+            # unreachable by ANY signal under the new engine — once Rule 2
+            # tripped, that direction would be blocked permanently (in
+            # practice, until enough time passed for the losses to age out
+            # of the 6-event window on their own, making the "block" do
+            # nothing extra beyond what the window expiry already does).
+            # 0.60 sits near the top of the engine's real range, so it still
+            # meaningfully raises the bar without being unreachable.
+            _blocked_directions = {}
+            try:
+                import json as _json_r2
+                _sat_raw = getattr(settings, 'dir_saturation_history', '[]') or '[]'
+                _sat_history = _sat_raw if isinstance(_sat_raw, list) else _json_r2.loads(_sat_raw)
+                _window = _sat_history[-6:]  # last 6 signals
+                for _chk_dir in ('UP', 'DOWN'):
+                    _dir_losses = sum(
+                        1 for e in _window
+                        if e.get('dir') == _chk_dir and e.get('result') == 'LOSS'
+                    )
+                    if _dir_losses >= 3:
+                        _blocked_directions[_chk_dir] = 0.60
+                        logger.info(
+                            '[GENERATE] Rule2 dir-saturation: %s has %d/6 losses → '
+                            'floor raised to 0.60',
+                            _chk_dir, _dir_losses
+                        )
+            except Exception as _r2e:
+                logger.warning('[GENERATE] Rule2 saturation check error: %s', _r2e)
+                _blocked_directions = {}
 
             # Get signal from engine first — it computes the correct candle boundary
             _exclude_list = _pair_cooldown_excludes or None
@@ -265,7 +301,8 @@ def job_generate_signal():
                 min_confidence=min_conf,
                 exclude=_exclude_list,
                 preferred_families=_preferred_families,
-                excluded_family=_excluded_family,   # v3: single string, not a list
+                excluded_families=_excluded_families,
+                blocked_directions=_blocked_directions if _blocked_directions else None,
             )
             if not sig:
                 logger.info("[GENERATE] No qualifying signal this candle")
@@ -375,17 +412,17 @@ def job_generate_signal():
             _poly_order_id = None
 
             # ── No-execute pairs: signal fires normally but NO live order ────
-            # SOL-USDT (and any other pairs in this list) will generate signals,
+            # XRP-USDT (and any other pairs in this list) will generate signals,
             # appear on the dashboard, and track dip/resolve outcomes —
             # but the actual Limitless / Polymarket orders are skipped.
             _no_execute = []
             try:
                 import json as _nep_j
-                _nep_raw = getattr(settings, 'no_execute_pairs', '["XRP-USDT"]') or '["XRP-USDT"]'
+                _nep_raw = getattr(settings, 'no_execute_pairs', '[]') or '[]'
                 _no_execute = _nep_raw if isinstance(_nep_raw, list) else _nep_j.loads(_nep_raw)
             except Exception as _nepe:
                 logger.warning('[GENERATE] no_execute_pairs read error: %s', _nepe)
-                _no_execute = ['XRP-USDT']
+                _no_execute = []
 
             _is_no_execute_pair = sig['symbol'] in _no_execute
             if _is_no_execute_pair:
@@ -505,8 +542,6 @@ def job_generate_signal():
             # NEVER blocked by Limitless market discovery retries (up to 150s).
             _mkt_slug = order.get("slug")         if order.get("success") else None
             _cond_id  = order.get("condition_id") if order.get("success") else None
-            _maker_addr  = order.get("maker")  if order.get("success") else None
-            _signer_addr = order.get("signer") if order.get("success") else None
 
             # Also check cache immediately (may already be populated from
             # a prior candle's discovery run) so slug is set when possible.
@@ -540,18 +575,6 @@ def job_generate_signal():
                 telegram_sent     = False,
                 poly_order_id     = _poly_order_id,
                 poly_fill         = ("PENDING" if _poly_order_id else "NEUTRAL"),
-                maker_address     = _maker_addr,
-                signer_address    = _signer_addr,
-                # Start tracking on-chain fill from the moment the order is
-                # placed — NOT at candle close. This lets job_recheck_fills
-                # (every 30s) catch a fill whenever it actually happens during
-                # the 15-min window, including in the final seconds before close.
-                fill_check_status = (
-                    "PENDING_CHECK"
-                    if (order_id and not str(order_id).startswith("shadow_"))
-                    else "NEUTRAL"
-                ),
-                limitless_fill    = "NEUTRAL",
             )
             db.session.add(signal_obj)
             db.session.commit()
@@ -799,108 +822,39 @@ def job_track_best_dip():
         except Exception as _e:
             logger.warning("[DIP_TRACK] Unhandled error: %s", _e)
 
-
-def job_recheck_fills():
-    """
-    Runs every 30s. Re-polls Limitless /portfolio/trades for any signal whose
-    fill status is still PENDING_CHECK — i.e. not yet confirmed on-chain.
-    Keeps polling until either:
-      - a confirmed fill is found (status → FILLED, tx_hash saved), or
-      - the signal's own candle_close_time is reached (status → UNFILLED,
-        stops checking — the 15-min window for this trade is over)
-
-    Tracking is bounded strictly to [candle_open_time, candle_close_time] —
-    it never polls past the candle this signal belongs to. This runs
-    independently of martingale; it exists purely to track the on-chain
-    order through to a final, confirmed state within its own window instead
-    of relying on a single check at candle close.
-    """
-    with _ctx():
+        # ── Early fill check (separate try block — must not break dip tracking) ──
+        # Checks Limitless fill status while the signal is still PENDING, so the
+        # dashboard's "Checking…" badge resolves to FILLED/UNFILLED within seconds
+        # of order placement instead of waiting the full 15-minute candle.
+        # Throttled to once every ~10s (this job runs every 3s) to avoid
+        # hammering the Limitless API with redundant fill-status calls.
+        global _last_early_fill_check_ts
         try:
-            from models import Signal
-            from extensions import db
-            from limitless_executor import check_order_filled
+            import time as _time_efc
+            _now_efc = _time_efc.time()
+            if _now_efc - _last_early_fill_check_ts >= 10:
+                _last_early_fill_check_ts = _now_efc
 
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
+                from models import Signal as _DipSigModel
+                _p = _DipSigModel.query.filter(
+                    _DipSigModel.outcome == "PENDING"
+                ).order_by(_DipSigModel.candle_open_time.desc()).first()
 
-            pending_checks = Signal.query.filter(
-                Signal.fill_check_status == "PENDING_CHECK"
-            ).order_by(Signal.candle_open_time.desc()).limit(20).all()
-
-            if not pending_checks:
-                return
-
-            for sig in pending_checks:
-                try:
-                    if not sig.order_id or str(sig.order_id).startswith("shadow_"):
-                        sig.fill_check_status = "NEUTRAL"
-                        sig.limitless_fill    = "NEUTRAL"
-                        db.session.commit()
-                        continue
-
-                    # Stop checking once this signal's own candle has closed —
-                    # never poll past the window the trade actually belongs to.
-                    # Before giving up, run ONE final diagnostic check that logs
-                    # the raw API response unconditionally — this guarantees the
-                    # giveup log line is self-contained with real evidence, even
-                    # if earlier per-attempt logs aren't visible in whatever log
-                    # excerpt gets reviewed later.
-                    if sig.candle_close_time and now >= sig.candle_close_time:
-                        try:
-                            from limitless_executor import check_order_filled_diagnostic
-                            _final = check_order_filled_diagnostic(sig.market_slug, sig.order_id)
-                        except Exception as _diage:
-                            _final = {"filled": False, "status": "DIAG_ERROR", "raw_sample": str(_diage)}
-
-                        if _final.get("filled"):
-                            sig.limitless_fill    = "FILLED"
-                            sig.fill_check_status = "FILLED"
-                            sig.tx_hash            = _final.get("tx_hash") or sig.tx_hash
-                            logger.info(
-                                "[RECHECK] ✓ Final check caught fill at candle close | "
-                                "%s order=%s tx_hash=%s",
-                                sig.symbol, sig.order_id, sig.tx_hash
-                            )
-                        else:
-                            sig.limitless_fill    = "UNFILLED"
-                            sig.fill_check_status = "UNFILLED"
-                            logger.warning(
-                                "[RECHECK] ✗ Candle closed (%s) before fill confirmed after %d "
-                                "attempt(s) — %s order=%s | final_check_status=%s "
-                                "raw_sample=%s",
-                                sig.candle_close_time, sig.fill_check_count or 0,
-                                sig.symbol, sig.order_id,
-                                _final.get("status"), _final.get("raw_sample")
-                            )
-                        db.session.commit()
-                        continue
-
-                    _fc = check_order_filled(sig.market_slug, sig.order_id)
-                    sig.fill_check_count = (sig.fill_check_count or 0) + 1
-
-                    if _fc.get("filled"):
-                        sig.limitless_fill    = "FILLED"
-                        sig.fill_check_status = "FILLED"
-                        sig.tx_hash            = _fc.get("tx_hash") or sig.tx_hash
-                        logger.info(
-                            "[RECHECK] ✓ Confirmed on-chain after %d attempt(s) | %s order=%s tx_hash=%s",
-                            sig.fill_check_count, sig.symbol, sig.order_id, sig.tx_hash
-                        )
-                    else:
-                        logger.info(
-                            "[RECHECK] still unconfirmed (attempt %d, closes %s) | %s order=%s status=%s",
-                            sig.fill_check_count, sig.candle_close_time,
-                            sig.symbol, sig.order_id, _fc.get("status")
-                        )
-                        # status stays PENDING_CHECK — will be re-polled next cycle,
-                        # right up until candle_close_time is reached above.
-
-                    db.session.commit()
-                except Exception as _se:
-                    logger.warning("[RECHECK] error checking signal id=%s: %s", sig.id, _se)
-
-        except Exception as _e:
-            logger.warning("[RECHECK] Unhandled error: %s", _e)
+                if _p and (_p.limitless_fill or "NEUTRAL") == "NEUTRAL":
+                    _oid = _p.order_id
+                    if _oid and not str(_oid).startswith("shadow_") and _p.market_slug:
+                        from limitless_executor import check_order_filled
+                        _fc = check_order_filled(_p.market_slug, _oid)
+                        if _fc.get("filled"):
+                            _p.limitless_fill = "FILLED"
+                            db.session.commit()
+                            logger.info("[DIP_TRACK][FILL] %s order=%s CONFIRMED FILLED (early check)",
+                                        _p.symbol, _oid)
+                        # If not yet filled, leave as NEUTRAL — resolve job will
+                        # do the authoritative UNFILLED determination at candle close
+                        # (an order can still fill in the remaining window).
+        except Exception as _efe:
+            logger.debug("[DIP_TRACK][FILL] early fill check error: %s", _efe)
 
 
 def job_resolve_outcomes():
@@ -1076,7 +1030,7 @@ def job_resolve_outcomes():
 
                         # Per-pair tracker
                         try:
-                            record_outcome(sym, outcome)
+                            record_outcome(sym, outcome, direction=sig.direction)
                         except Exception:
                             pass
 
@@ -1115,89 +1069,6 @@ def job_resolve_outcomes():
                                 f"conditionId={getattr(sig, 'condition_id', 'N/A')}"
                             )
 
-                        # ── On-chain fill check — runs for EVERY live signal ──────
-                        # Independent of martingale. Verifies whether the order
-                        # was actually executed on-chain via Limitless
-                        # /portfolio/trades, and persists tx_hash + fill status
-                        # regardless of which features are enabled.
-                        #
-                        # job_recheck_fills() has been polling this signal every
-                        # 30s since the moment the order was placed (not just
-                        # since candle close), so by the time we get here the
-                        # fill may already be confirmed. If so, trust that
-                        # result instead of re-querying the API.
-                        _was_filled  = False
-                        _fill_status = "NEUTRAL"
-                        _order_id    = sig.order_id
-                        _mkt_slug    = sig.market_slug
-                        try:
-                            from limitless_executor import check_order_filled
-                            from models import Signal as _SigModel
-                            _sig_rec = _SigModel.query.get(sig.id)
-
-                            _already_known = (
-                                _sig_rec is not None
-                                and _sig_rec.fill_check_status in ("FILLED", "NEUTRAL")
-                            )
-
-                            if not _order_id or str(_order_id).startswith("shadow_"):
-                                _was_filled  = False
-                                _fill_status = "NEUTRAL"
-                            elif _already_known:
-                                # job_recheck_fills already settled this — reuse it.
-                                _was_filled  = (_sig_rec.fill_check_status == "FILLED")
-                                _fill_status = _sig_rec.fill_check_status
-                                logger.info(
-                                    "[RESOLVE] Fill already confirmed by recheck job | %s order=%s status=%s",
-                                    sym, _order_id, _fill_status
-                                )
-                            else:
-                                _fill_check  = check_order_filled(_mkt_slug, _order_id)
-                                _was_filled  = _fill_check.get("filled", False)
-                                _fill_status = _fill_check.get("status", "UNKNOWN")
-
-                                if _sig_rec is not None:
-                                    _sig_rec.fill_check_count = (_sig_rec.fill_check_count or 0) + 1
-                                    if _was_filled:
-                                        _sig_rec.tx_hash = _fill_check.get("tx_hash") or _sig_rec.tx_hash
-
-                            if _sig_rec is not None:
-                                if str(_order_id).startswith("shadow_") or not _order_id:
-                                    _sig_rec.limitless_fill    = "NEUTRAL"
-                                    _sig_rec.fill_check_status = "NEUTRAL"
-                                elif _was_filled:
-                                    _sig_rec.limitless_fill    = "FILLED"
-                                    _sig_rec.fill_check_status = "FILLED"
-                                elif not _already_known:
-                                    _sig_rec.limitless_fill    = "UNFILLED"
-                                    # Mark for the dedicated re-check job (job_recheck_fills)
-                                    # to keep polling until confirmed or attempts run out.
-                                    _sig_rec.fill_check_status = "PENDING_CHECK"
-                                # else: leave PENDING_CHECK/UNFILLED as the recheck job set it
-
-                                # Polymarket fill check (runs regardless of Limitless fill)
-                                if _sig_rec.poly_order_id and _sig_rec.poly_fill in (None, "PENDING", "NEUTRAL"):
-                                    try:
-                                        from polymarket_executor import check_order_filled as _poly_fill_fn
-                                        _pf = _poly_fill_fn(_sig_rec.poly_order_id)
-                                        if _pf.get("filled"):
-                                            _sig_rec.poly_fill = "FILLED"
-                                        elif _pf.get("status") not in ("SHADOW", "ERROR", "NO_ORDER_ID"):
-                                            _sig_rec.poly_fill = "UNFILLED"
-                                        logger.info("[RESOLVE][POLY] Fill: order=%s status=%s poly_fill=%s",
-                                            _sig_rec.poly_order_id, _pf.get("status"), _sig_rec.poly_fill)
-                                    except Exception as _pfe:
-                                        logger.warning("[RESOLVE][POLY] Fill check error: %s", _pfe)
-
-                                db.session.commit()
-                                logger.info(
-                                    "[RESOLVE] Fill check | %s order=%s status=%s filled=%s tx_hash=%s",
-                                    sym, _order_id, _fill_status, _was_filled,
-                                    getattr(_sig_rec, 'tx_hash', None)
-                                )
-                        except Exception as _fe:
-                            logger.warning(f"[RESOLVE] Fill check error: {_fe}")
-
                         # ── Martingale streak update ──────────────────────
                         # Streak moves ONLY when Limitless confirms an on-chain fill.
                         # Three possible outcomes:
@@ -1209,14 +1080,71 @@ def job_resolve_outcomes():
                         # "Frozen" means the streak integer is untouched so the
                         # same stake fires again next candle. Neither penalised
                         # nor rewarded — the sequence just waits for a real fill.
-                        # Reuses the unconditional fill check above — martingale
-                        # no longer re-derives _was_filled/_fill_status itself.
+                        # ── Limitless / Polymarket fill check — ALWAYS runs ──────────
+                        # Previously this entire block was nested inside
+                        # `if _ms.use_martingale:` which meant limitless_fill
+                        # was NEVER checked (stuck at default 'NEUTRAL') for
+                        # any account with martingale turned off. Fill status
+                        # must be checked regardless of martingale setting —
+                        # martingale is a STAKE strategy that consumes the
+                        # fill result, it should not gate whether we check it.
+                        _was_filled  = False
+                        _fill_status = "UNKNOWN"
                         try:
                             from models import Settings as _MSettings
+                            from limitless_executor import check_order_filled
                             _ms = _MSettings.query.first()
+
+                            _order_id = sig.order_id
+                            _mkt_slug = sig.market_slug
+
+                            if not _order_id or str(_order_id).startswith("shadow_"):
+                                _was_filled  = False
+                                _fill_status = "NO_ORDER_ID"
+                            else:
+                                _fill_check  = check_order_filled(_mkt_slug, _order_id)
+                                _was_filled  = _fill_check.get("filled", False)
+                                _fill_status = _fill_check.get("status", "UNKNOWN")
+
+                            # Persist Limitless fill status on the signal record
+                            try:
+                                from models import Signal as _SigModel
+                                _sig_rec = _SigModel.query.get(sig.id)
+                                if _sig_rec:
+                                    if str(_order_id).startswith("shadow_") or _fill_status == "NO_ORDER_ID":
+                                        _sig_rec.limitless_fill = "NEUTRAL"
+                                    else:
+                                        _sig_rec.limitless_fill = "FILLED" if _was_filled else "UNFILLED"
+
+                                    # Polymarket fill check (runs regardless of Limitless fill)
+                                    if _sig_rec.poly_order_id and _sig_rec.poly_fill in (None, "PENDING", "NEUTRAL"):
+                                        try:
+                                            from polymarket_executor import check_order_filled as _poly_fill_fn
+                                            _pf = _poly_fill_fn(_sig_rec.poly_order_id)
+                                            if _pf.get("filled"):
+                                                _sig_rec.poly_fill = "FILLED"
+                                            elif _pf.get("status") not in ("SHADOW", "ERROR", "NO_ORDER_ID"):
+                                                _sig_rec.poly_fill = "UNFILLED"
+                                            logger.info("[RESOLVE][POLY] Fill: order=%s status=%s poly_fill=%s",
+                                                _sig_rec.poly_order_id, _pf.get("status"), _sig_rec.poly_fill)
+                                        except Exception as _pfe:
+                                            logger.warning("[RESOLVE][POLY] Fill check error: %s", _pfe)
+
+                                    db.session.commit()
+                                    logger.info(
+                                        "[RESOLVE] Fill check complete | order=%s status=%s filled=%s limitless_fill=%s",
+                                        _order_id, _fill_status, _was_filled, _sig_rec.limitless_fill
+                                    )
+                            except Exception as _fe:
+                                logger.warning(f"[RESOLVE] limitless_fill persist error: {_fe}")
+                        except Exception as _fce:
+                            logger.warning(f"[RESOLVE] Fill check block error: {_fce}")
+
+                        # ── Martingale stake update — only runs when martingale is ON ───
+                        # Uses the _was_filled / _fill_status computed above (unconditionally).
+                        try:
                             if _ms and _ms.use_martingale:
                                 cap       = int(_ms.martingale_cap or 10)
-                                # Parse custom sequence
                                 _raw_seq = _ms.martingale_sequence or "1,1.5,2,3,4.5,6.7"
                                 try:
                                     _MART_SEQ = [round(float(x.strip()), 1)
@@ -1428,19 +1356,6 @@ def start_scheduler():
         coalesce=True,
     )
 
-    # Re-poll Limitless for any signal still awaiting on-chain confirmation.
-    # Keeps trying every 30s, independent of OKX resolution / martingale,
-    # until either the trade is confirmed filled or its own candle closes.
-    scheduler.add_job(
-        job_recheck_fills,
-        IntervalTrigger(seconds=30),
-        id="recheck_fills",
-        replace_existing=True,
-        misfire_grace_time=20,
-        max_instances=1,
-        coalesce=True,
-    )
-
     scheduler.add_job(
         job_generate_signal,
         CronTrigger(minute="0,15,30,45", second="1"),
@@ -1477,6 +1392,5 @@ def start_scheduler():
         "[SCHEDULER] Started | "
         "resolve@:00/:15/:30/:45+0s | "
         "generate@:00/:15/:30/:45+1s | "
-        "recheck_fills@every30s | "
         "daily@23:59 | retrain@02/06/10/14/18/22:05-UTC"
     )

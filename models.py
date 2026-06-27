@@ -29,14 +29,9 @@ class Signal(db.Model):
     contract_price    = db.Column(db.Float)
     telegram_sent     = db.Column(db.Boolean, default=False)
     limitless_fill    = db.Column(db.String(10), default='NEUTRAL')
-    tx_hash           = db.Column(db.String(80),  default=None) # on-chain tx hash once Limitless confirms the fill
-    fill_check_status = db.Column(db.String(20),  default=None) # PENDING_CHECK / FILLED / UNFILLED / NEUTRAL
-    fill_check_count  = db.Column(db.Integer,      default=0)   # how many times we've polled for a fill
     best_entry_pct    = db.Column(db.Float, default=None)
     poly_order_id     = db.Column(db.String(120), default=None) # Polymarket order ID
     poly_fill         = db.Column(db.String(10),  default='NEUTRAL') # FILLED/UNFILLED/NEUTRAL  # FILLED, UNFILLED, NEUTRAL
-    maker_address     = db.Column(db.String(64),  default=None) # on-chain smart wallet (maker) used for this live order
-    signer_address    = db.Column(db.String(64),  default=None) # on-chain EOA signer used for this live order
 
     def to_dict(self):
         return {
@@ -65,11 +60,6 @@ class Signal(db.Model):
             'best_entry_pct':    round(self.best_entry_pct, 1) if self.best_entry_pct is not None else None,
             'poly_order_id':     self.poly_order_id,
             'poly_fill':         self.poly_fill or 'NEUTRAL',
-            'maker_address':     self.maker_address,
-            'signer_address':    self.signer_address,
-            'tx_hash':           self.tx_hash,
-            'fill_check_status': self.fill_check_status,
-            'fill_check_count':  self.fill_check_count or 0,
         }
 
 
@@ -129,7 +119,7 @@ class Settings(db.Model):
     poly_max_price       = db.Column(db.Float,   default=0.50)  # Polymarket max contract price
     max_contract_price   = db.Column(db.Float, default=0.50)
     min_confidence       = db.Column(db.Float, default=0.0)   # 0.0 = disabled; per-pair thresholds in PAIR_CONFIG are the real gates
-    no_execute_pairs     = db.Column(db.Text, default='["XRP-USDT"]')  # JSON list: signal fires but NO live order placed
+    no_execute_pairs     = db.Column(db.Text, default='[]')  # JSON list: signal fires but NO live order placed
     cooldown_log         = db.Column(db.Text, default='[]')   # JSON list of cooldown events [{ts,pair,reason,candles,tier}]
     updated_at           = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -155,7 +145,7 @@ class Settings(db.Model):
             'poly_max_price':         self.poly_max_price or 0.50,
             'max_contract_price':     self.max_contract_price,
             'min_confidence':         self.min_confidence,
-            'no_execute_pairs':       self.no_execute_pairs or '["XRP-USDT"]',
+            'no_execute_pairs':       self.no_execute_pairs or '[]',
             'cooldown_log':           self.cooldown_log or '[]',
         }
 
