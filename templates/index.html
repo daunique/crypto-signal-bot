@@ -528,24 +528,18 @@ input[type=number]:focus{border-color:var(--accent)}
   <div class="card">
     <div class="card-hdr">
       <span class="card-title">Signals</span>
-      <div style="display:flex;gap:7px;flex-wrap:wrap;align-items:center">
-        <label style="font-size:0.68rem;color:var(--text2);display:flex;align-items:center;gap:4px">
-          From
-          <input type="date" id="f-date-from" onchange="loadSignals()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 8px;font-size:0.75rem">
-        </label>
-        <label style="font-size:0.68rem;color:var(--text2);display:flex;align-items:center;gap:4px">
-          To
-          <input type="date" id="f-date-to" onchange="loadSignals()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 8px;font-size:0.75rem">
-        </label>
-        <button class="btn btn-ghost" style="font-size:0.7rem;padding:5px 9px" onclick="document.getElementById('f-date-from').value='';document.getElementById('f-date-to').value='';loadSignals()">Clear dates</button>
+      <div style="display:flex;gap:7px;flex-wrap:wrap">
+        <select id="f-date" onchange="loadSignals()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 8px;font-size:0.75rem">
+          <option value="">All Time</option>
+          <option value="today">Today</option>
+          <option value="yesterday">Yesterday</option>
+          <option value="7d">Last 7 Days</option>
+          <option value="30d">Last 30 Days</option>
+        </select>
         <select id="f-sym" onchange="loadSignals()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 8px;font-size:0.75rem">
           <option value="">All Pairs</option>
           <option>BTC-USDT</option><option>ETH-USDT</option><option>SOL-USDT</option>
           <option>XRP-USDT</option><option>BNB-USDT</option><option>DOGE-USDT</option>
-        </select>
-        <select id="f-active" onchange="loadSignals()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 8px;font-size:0.75rem">
-          <option value="">All Pairs (Live + Signal-Only)</option>
-          <option value="1">Active (Live-Execution) Pairs Only</option>
         </select>
         <select id="f-out" onchange="loadSignals()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 8px;font-size:0.75rem">
           <option value="">All Results</option>
@@ -572,7 +566,7 @@ input[type=number]:focus{border-color:var(--accent)}
     </div>
     <div style="overflow-x:auto">
       <table class="tbl">
-        <thead><tr><th>Open</th><th>Close</th><th>Pair</th><th>Direction</th><th>Confidence</th><th>Tier</th><th>Entry</th><th>Close Price</th><th style="white-space:nowrap">Best Dip 🎯</th><th>Result</th><th>Live</th><th>Limitless</th><th>Polymarket</th></tr></thead>
+        <thead><tr><th>Open</th><th>Close</th><th>Pair</th><th>Direction</th><th>Confidence</th><th>Tier</th><th>Entry</th><th>Close Price</th><th style="white-space:nowrap">Best Dip 🎯</th><th>Result</th><th>Limitless</th><th>Polymarket</th></tr></thead>
         <tbody id="signals-tbody"></tbody>
       </table>
     </div>
@@ -908,7 +902,7 @@ function showPage(name, el) {
   const mNav = document.getElementById('bn-'+name);
   if (mNav) mNav.classList.add('active');
   window.scrollTo(0,0);
-  if (name==='signals')  { loadSettings(); loadSignals(); }
+  if (name==='signals')  loadSignals();
   if (name==='history') { loadHistory(); loadExecutedTrades(); }
   if (name==='shadow')   { loadShadowBalance(); loadShadowSignals(); }
   if (name==='settings') loadSettings();
@@ -1211,31 +1205,24 @@ async function loadPerfChart() {
 // SIGNALS PAGE
 // ═══════════════════════════════════
 async function loadSignals() {
-  const sym      = document.getElementById('f-sym').value;
-  const out      = document.getElementById('f-out').value;
-  const dateFrom = document.getElementById('f-date-from') ? document.getElementById('f-date-from').value : '';
-  const dateTo   = document.getElementById('f-date-to')   ? document.getElementById('f-date-to').value   : '';
-  const active   = document.getElementById('f-active')    ? document.getElementById('f-active').value    : '';
-  const dip      = document.getElementById('f-dip') ? document.getElementById('f-dip').value : '';
+  const sym  = document.getElementById('f-sym').value;
+  const out  = document.getElementById('f-out').value;
+  const date = document.getElementById('f-date').value;
+  const dip  = document.getElementById('f-dip') ? document.getElementById('f-dip').value : '';
   const p    = new URLSearchParams({page:state.signalsPage,per_page:25});
-  if (sym)      p.append('symbol',sym);
-  if (out)      p.append('outcome',out);
-  if (dateFrom) p.append('date_from',dateFrom);
-  if (dateTo)   p.append('date_to',dateTo);
-  if (active)   p.append('active_only',active);
-  if (dip)      p.append('best_dip',dip);
+  if (sym)  p.append('symbol',sym);
+  if (out)  p.append('outcome',out);
+  if (date) p.append('date_filter',date);
+  if (dip)  p.append('best_dip',dip);
   try {
     const r = await fetch('/api/signals?'+p);
     if (!r.ok) return;
     const d = await r.json();
     const ts = s => s ? new Date((s.endsWith('Z')?s:s+'Z')).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'UTC'}) : '—';
-    let noExecPairs = [];
-    try { noExecPairs = JSON.parse(state.settings?.no_execute_pairs || '[]'); } catch(e) {}
     document.getElementById('signals-tbody').innerHTML = d.signals.map(s => {
       const dir  = s.signal_direction;
       const out  = (s.outcome||'PENDING').toLowerCase();
       const conf = s.ml_confidence!=null ? Number(s.ml_confidence).toFixed(1) : '—';
-      const isLive = !noExecPairs.includes(s.symbol);
       return `<tr>
         <td style="font-size:0.7rem;color:var(--text2)">${ts(s.candle_open_time)}</td>
         <td style="font-size:0.7rem;color:var(--text2)">${ts(s.candle_close_time)}</td>
@@ -1252,7 +1239,6 @@ async function loadSignals() {
           return `<span style="color:${col};font-weight:700;font-size:0.8rem">${icon} ${n.toFixed(1)}¢</span>`;
         })(s.best_entry_pct)}</td>
         <td><span class="outcome-badge ${out==='win'?'ob-win':out==='loss'?'ob-loss':'ob-pending'}">${s.outcome||'PENDING'}</span></td>
-        <td>${isLive ? '<span class="outcome-badge ob-win">LIVE</span>' : '<span class="outcome-badge ob-neutral">SIGNAL ONLY</span>'}</td>
         <td>${(function(f){return f==='FILLED'?'<span class="outcome-badge ob-win">FILLED</span>':f==='UNFILLED'?'<span class="outcome-badge ob-loss">UNFILLED</span>':'<span class="outcome-badge ob-neutral">–</span>';})(s.limitless_fill||'NEUTRAL')}</td>
         <td>${(function(p,f){
           if(!p) return '<span class="outcome-badge ob-neutral">–</span>';
@@ -1262,7 +1248,7 @@ async function loadSignals() {
                  '<span class="outcome-badge ob-neutral">–</span>';
         })(s.poly_order_id, s.poly_fill||'NEUTRAL')}</td>
       </tr>`;
-    }).join('') || '<tr><td colspan="13" style="text-align:center;color:var(--text2);padding:20px">No signals yet</td></tr>';
+    }).join('') || '<tr><td colspan="12" style="text-align:center;color:var(--text2);padding:20px">No signals yet</td></tr>';
     const pages = document.getElementById('signals-pages');
     pages.innerHTML = Array.from({length:Math.min(d.pages,8)},(_,i)=>
       `<button class="pg-btn ${i+1===state.signalsPage?'active':''}" onclick="setSigPage(${i+1})">${i+1}</button>`

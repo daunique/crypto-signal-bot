@@ -5,85 +5,6 @@ Signals delivered via Telegram. Auto-executes on [Limitless Exchange](https://li
 
 ---
 
-## 🪰 Deploy to Fly.io (Step-by-Step)
-
-> **Why Fly instead of Render?** Fly gives you a real Docker container with
-> persistent always-on compute, which matches this bot's requirements better
-> than Render's free tier. The bot **must** run as exactly **one** machine,
-> always on — APScheduler runs in-process inside the single gunicorn worker,
-> so a second machine (autoscaling) or an idle-stopped machine causes
-> duplicate signal generation and duplicate live order execution. `fly.toml`
-> in this repo already pins `min_machines_running = 1`,
-> `auto_stop_machines = "off"`, and `auto_start_machines = false` to enforce
-> this — don't change those settings unless you also rework the scheduler to
-> use a distributed lock.
-
-### Step 1 — Install flyctl
-```bash
-curl -L https://fly.io/install.sh | sh
-export FLYCTL_INSTALL="$HOME/.fly"
-export PATH="$FLYCTL_INSTALL/bin:$PATH"
-```
-(On Termux, `fly-deploy.sh` in this repo does this for you automatically.)
-
-### Step 2 — Log in
-```bash
-flyctl auth login
-```
-
-### Step 3 — Launch the app
-From inside the project folder (where `Dockerfile` and `fly.toml` live):
-```bash
-flyctl launch --copy-config --name your-app-name --no-deploy --yes
-```
-This reads the existing `fly.toml` instead of generating a new one. Update
-the `app = "..."` line in `fly.toml` to match your chosen app name.
-
-### Step 4 — Set secrets
-Same variables as `.env.example`, set via `flyctl secrets set` instead of a
-dashboard:
-```bash
-flyctl secrets set SECRET_KEY=$(openssl rand -hex 32)
-flyctl secrets set DATABASE_URL=postgresql://user:password@host:5432/dbname
-flyctl secrets set LIMITLESS_TOKEN_ID=your_token_id
-flyctl secrets set LIMITLESS_TOKEN_SECRET=your_base64_secret
-flyctl secrets set LIMITLESS_PRIVATE_KEY=0xyour_wallet_private_key
-flyctl secrets set LIMITLESS_SMART_WALLET=0xyour_smart_wallet_address
-flyctl secrets set TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-flyctl secrets set TELEGRAM_CHAT_ID=your_telegram_chat_id
-```
-`DEFAULT_MODE` and `DEFAULT_POSITION_SIZE` are already set as plain (non-secret)
-env vars in `fly.toml` — edit them there if you want different defaults.
-
-> Use a Postgres `DATABASE_URL` (e.g. Supabase), not SQLite — Fly's
-> filesystem is ephemeral on redeploy just like Render's, so SQLite data
-> would be lost on every deploy.
-
-### Step 5 — Deploy
-```bash
-flyctl deploy
-```
-Or from Termux, run `bash fly-deploy.sh`, which wraps all of the above and
-also checks afterward that exactly one machine is running.
-
-### Step 6 — Verify only one machine is running
-```bash
-flyctl machines list
-```
-You should see exactly **one** machine. If you ever see more than one,
-destroy the extra immediately:
-```bash
-flyctl machines destroy <extra-machine-id>
-```
-
-### Step 7 — Watch logs
-```bash
-flyctl logs
-```
-Your dashboard will be live at: `https://your-app-name.fly.dev`
-
----
-
 ## 🚀 Deploy to Render (Step-by-Step)
 
 ### Step 1 — GitHub Setup
@@ -113,6 +34,63 @@ Go to your service → **Environment** tab → Add each:
 ### Step 4 — Deploy
 Click **Deploy** in Render. First deploy takes ~3-5 minutes.  
 Your dashboard will be live at: `https://your-service-name.onrender.com`
+
+---
+
+## 🚀 Deploy to Fly.io (Step-by-Step)
+
+This repo also ships a `Dockerfile` + `fly.toml` for Fly.io. Fly has no free always-on
+tier, but unlike Render's free tier it never idles your machine — important here since
+the signal engine's scheduler must run 24/7 even with the dashboard closed.
+
+### Step 1 — Install flyctl & log in
+```bash
+curl -L https://fly.io/install.sh | sh
+flyctl auth login
+```
+
+### Step 2 — Launch (from this project folder)
+```bash
+flyctl launch --no-deploy
+```
+- Choose an app name (or accept the suggested one) and a region.
+- When asked "Would you like to set up a Postgres database?" → **No** if you're
+  using Supabase (recommended, see `DATABASE_URL` below); say **Yes** if you want
+  Fly's own Postgres instead.
+- This won't overwrite the included `fly.toml` if you keep its app name in sync —
+  edit the `app = "..."` line in `fly.toml` to match the name you picked.
+
+### Step 3 — Set secrets
+Same values as the Render env vars, set via `flyctl secrets` instead of a dashboard:
+```bash
+flyctl secrets set \
+  SECRET_KEY="$(openssl rand -hex 32)" \
+  DATABASE_URL="postgresql://user:password@host:5432/dbname" \
+  LIMITLESS_TOKEN_ID="..." \
+  LIMITLESS_TOKEN_SECRET="..." \
+  LIMITLESS_PRIVATE_KEY="0x..." \
+  LIMITLESS_SMART_WALLET="0x..." \
+  TELEGRAM_BOT_TOKEN="..." \
+  TELEGRAM_CHAT_ID="..."
+```
+(`DEFAULT_MODE`, `DEFAULT_POSITION_SIZE`, and `PORT` are already set as plain
+env vars in `fly.toml` — no need to repeat them as secrets.)
+
+### Step 4 — Deploy
+```bash
+flyctl deploy
+```
+First deploy builds the Docker image and takes a few minutes. Your dashboard
+will be live at: `https://your-app-name.fly.dev`
+
+### Notes specific to Fly
+- `fly.toml` pins `min_machines_running = 1` and `auto_stop_machines = false` —
+  this app keeps one in-process APScheduler running the candle-signal loop,
+  so it must never idle-stop or scale to a second machine (that would double
+  every signal and order).
+- Logs: `flyctl logs`. Shell into the running machine: `flyctl ssh console`.
+- To bump resources later: edit the `[[vm]]` block in `fly.toml`, then
+  `flyctl deploy` again.
 
 ---
 
@@ -176,26 +154,6 @@ Resolution rule matches `job_resolve_outcomes` exactly: signal UP wins if next c
 - Signal frequency (~10.5–11.8/day per direction per pair) is what the RSI(2) rule actually produces on this data — it was NOT tuned to hit any particular target count.
 - These numbers come from historical backtesting and are not a guarantee of future performance. Market conditions change.
 
-### Live-Pair Selection & ATR Regime Filter (current configuration)
-After backtesting every 2-, 3-, 4-, 5-, and 6-pair combination against 12 candidate confluence filters (ATR regime, EMA trend, VWAP deviation, volume z-score, ADX, Stochastic, MACD histogram turn, time-of-day), the best loss-streak-vs-volume tradeoff found was:
-
-- **Live execution**: BTC-USDT + ETH-USDT + BNB-USDT only, each gated by an additional ATR(14) volatility-regime filter (`PAIR_CONFIG[sym]["atr_filter"] = 0.85`) — skips a signal if it falls in the most volatile 15% of that pair's own trailing 96-candle (1-day) ATR history.
-- **Signal-only (no live orders)**: SOL-USDT, XRP-USDT, DOGE-USDT — these were not part of the validated live combo and do NOT have the ATR filter applied (a wider sweep showed this filter helps some pairs and hurts others; it is only enabled where it was actually validated).
-
-April 2026 backtest (30 days, BTC+ETH+BNB combined, ATR filter active):
-
-| Metric | Value |
-|---|---|
-| Signals | 520 (319W / 201L) |
-| Win rate | 61.35% |
-| Signals/day | 17.33 |
-| Max loss streak | 6 (vs ~10 unfiltered) |
-| Days at/above 50% win rate | 26/30 |
-
-This is implemented as a per-pair `atr_filter` value in `signal_engine.py`'s `PAIR_CONFIG`, enforced inside `get_signal_for_symbol()` — a signal is fully discarded (not redirected to another pair) if it fails the ATR check, then normal family-rotation/pick_best_signal logic proceeds with whatever candidates remain. `Settings.no_execute_pairs` (migration v3.5 in `app.py`) keeps SOL/XRP/DOGE generating and tracking signals exactly as before, just without live order placement.
-
-**This supersedes an earlier v3.4 migration** that had set all 6 pairs live — confirmed with the user that the backtested 3-pair configuration should take precedence over that earlier instruction.
-
 ### Signal Timing
 - **:00, :15, :30, :45** UTC — Signal evaluated at candle open
 - **:00, :15, :30, :45 (+0s vs +1s)** UTC — Outcome resolved at the SAME boundary, just before the next signal generates
@@ -209,7 +167,7 @@ This is implemented as a per-pair `atr_filter` value in `signal_engine.py`'s `PA
 - **Martingale mode**, if enabled, multiplies stake size after each loss per a configurable sequence — this materially increases risk of large drawdowns during the loss streaks described above. Test thoroughly in Shadow mode first.
 
 ### Signal Tiers
-Tier is now a fixed label (`T2`) rather than a volume-spike-derived classification — the old T1/T2 split was tied to the ML engine's confidence + volume-spike logic, which no longer exists. The dashboard's "confidence" / "tier" fields are now populated from the fixed backtested win-rate table above, for display purposes only — they do not gate or filter live signals (the RSI(2) threshold, plus the ATR regime filter on BTC/ETH/BNB, are the only gates).
+Tier is now a fixed label (`T2`) rather than a volume-spike-derived classification — the old T1/T2 split was tied to the ML engine's confidence + volume-spike logic, which no longer exists. The dashboard's "confidence" / "tier" fields are now populated from the fixed backtested win-rate table above, for display purposes only — they do not gate or filter live signals (the RSI(2) threshold is the only gate).
 
 ---
 
@@ -224,12 +182,6 @@ Tier is now a fixed label (`T2`) rather than a volume-spike-derived classificati
 | Contract Price Cap | $0.01–$0.50 | Max per contract |
 | Min Confidence | 0.0–1.0 | 0.0 = disabled (default). Confidence is now a fixed backtested win-rate per pair/direction, not a live ML score — see Signal Engine section above |
 
-### Signal Log Filters
-The Signal Log page (`/api/signals`) now supports:
-- **Live column**: shows whether each row's pair is currently configured for live execution (`LIVE`) or signal-only (`SIGNAL ONLY`), computed against the live `Settings.no_execute_pairs` value at view-time — not a stored historical flag, so it always reflects the current configuration.
-- **Calendar date range filter** (`date_from` / `date_to`, `YYYY-MM-DD`), replacing the old preset-only dropdown (Today/Yesterday/7d/30d). The preset `date_filter` param still works server-side for any other caller, but the dashboard UI now uses two date pickers.
-- **Active Pairs filter** (`active_only=1`): restricts the table to only the pairs currently set for live execution.
-
 ---
 
 ## 📁 File Structure
@@ -237,7 +189,7 @@ The Signal Log page (`/api/signals`) now supports:
 ```
 crypto-signal-bot/
 ├── app.py              # Flask app + all API routes
-├── wsgi.py             # Render/Gunicorn entrypoint
+├── wsgi.py             # Gunicorn entrypoint (Render or Fly.io)
 ├── extensions.py       # db + socketio instances
 ├── models.py           # SQLAlchemy DB models
 ├── signal_engine.py    # OKX data fetch + RSI(2) signal generation (no ML)
@@ -250,6 +202,8 @@ crypto-signal-bot/
 │   └── index.html      # Full dashboard UI
 ├── requirements.txt    # Python dependencies (scikit-learn removed — no longer used)
 ├── render.yaml         # Render deployment config
+├── Dockerfile          # Fly.io container build
+├── fly.toml            # Fly.io deployment config
 ├── .env.example        # Environment variable template
 └── .gitignore
 ```

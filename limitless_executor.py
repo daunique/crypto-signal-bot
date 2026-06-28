@@ -970,7 +970,7 @@ def place_live_order(
     # 1. Env check
     if not os.environ.get("LIMITLESS_PRIVATE_KEY", "").strip():
         return {"success": False,
-                "error": "LIMITLESS_PRIVATE_KEY not set — set it in Render env vars"}
+                "error": "LIMITLESS_PRIVATE_KEY not set — set it as an env var (Render) or secret (Fly)"}
     try:
         _build_hmac_headers("GET", "/ping")   # raises if no auth creds
     except ValueError as e:

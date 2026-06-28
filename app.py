@@ -24,8 +24,9 @@ def create_app():
     # ── Database URL ────────────────────────────────────────────────────────
     # Supabase provides postgres:// URIs — SQLAlchemy 2.x requires postgresql://.
     # Render free tier has NO IPv6. Supabase DNS resolves to IPv6 by default,
-    # causing "Network is unreachable". We pre-resolve to IPv4 via a custom
-    # creator function that forces AF_INET DNS lookup before connecting.
+    # causing "Network is unreachable" — but on platforms with real IPv6 (e.g.
+    # Fly.io) this rewrite is simply a no-op once you're already using the
+    # pooler host, so it's safe to leave in place regardless of host.
     import socket as _socket
     import psycopg2 as _psycopg2
     from urllib.parse import urlparse as _urlparse
@@ -176,10 +177,7 @@ def create_app():
                 mode=os.environ.get("DEFAULT_MODE", "shadow"),
                 position_size=float(os.environ.get("DEFAULT_POSITION_SIZE", "10")),
                 min_confidence=0.0,
-                # Backtested live-pair selection (see v3.5 migration below for
-                # the rationale): BTC/ETH/BNB execute live with the ATR
-                # regime filter; SOL/XRP/DOGE remain signal-only.
-                no_execute_pairs='["SOL-USDT", "XRP-USDT", "DOGE-USDT"]',
+                no_execute_pairs='[]',
                 cooldown_log='[]',
             ))
             db.session.commit()
@@ -207,33 +205,21 @@ def create_app():
                         logger.info("[APP] Migration: XRP-USDT removed from no_execute_pairs — live execution enabled (invert=True)")
                 except Exception:
                     pass
-            # v3.5: Backtested ATR-regime-filtered strategy adopted.
-            # Validated combo: BTC-USDT + ETH-USDT + BNB-USDT execute live,
-            # each gated by PAIR_CONFIG[sym]["atr_filter"] (skip top 15%
-            # volatility regime). SOL-USDT, XRP-USDT, DOGE-USDT remain
-            # signal-only — they were NOT part of the backtested live combo
-            # and the ATR filter is not enabled for them (see signal_engine.py
-            # PAIR_CONFIG). April 2026 backtest: 520 signals, 61.35% win rate,
-            # 17.33 signals/day, max loss streak 6 (vs ~10 unfiltered).
-            #
-            # This explicitly SUPERSEDES the v3.4 migration below, which had
-            # set all 6 pairs live — confirmed with the user that the
-            # backtested 3-pair configuration should take precedence.
-            _BACKTESTED_LIVE_PAIRS = {'BTC-USDT', 'ETH-USDT', 'BNB-USDT'}
-            _BACKTESTED_SIGNAL_ONLY = {'SOL-USDT', 'XRP-USDT', 'DOGE-USDT'}
+            # v3.4: ETH-USDT and DOGE-USDT reactivated for live trading.
+            # All 6 pairs now execute live orders — no signal-only pairs remain.
             if _existing:
-                import json as _nep_v35_j
+                import json as _nep_clr_j2
                 try:
-                    _nep_raw3 = _existing.no_execute_pairs or '[]'
-                    _nep_list3 = _nep_raw3 if isinstance(_nep_raw3, list) else _nep_v35_j.loads(_nep_raw3)
-                    _target = sorted(_BACKTESTED_SIGNAL_ONLY)
-                    if set(_nep_list3) != _BACKTESTED_SIGNAL_ONLY:
-                        _existing.no_execute_pairs = _nep_v35_j.dumps(_target)
+                    _nep_raw2  = _existing.no_execute_pairs or '[]'
+                    _nep_list2 = _nep_raw2 if isinstance(_nep_raw2, list) else _nep_clr_j2.loads(_nep_raw2)
+                    _removed = [p for p in ('ETH-USDT', 'DOGE-USDT') if p in _nep_list2]
+                    if _removed:
+                        _nep_list2 = [p for p in _nep_list2 if p not in ('ETH-USDT', 'DOGE-USDT')]
+                        _existing.no_execute_pairs = _nep_clr_j2.dumps(_nep_list2)
                         _changed = True
                         logger.info(
-                            "[APP] Migration v3.5: no_execute_pairs set to %s — "
-                            "live execution restricted to backtested combo %s",
-                            _target, sorted(_BACKTESTED_LIVE_PAIRS)
+                            "[APP] Migration: %s removed from no_execute_pairs — "
+                            "all 6 pairs now execute live orders.", _removed
                         )
                 except Exception:
                     pass
@@ -253,7 +239,7 @@ def create_app():
             if smart_w_env:
                 logger.warning(
                     "[APP] LIMITLESS_SMART_WALLET is set (%s). "
-                    "If using MetaMask/EOA, REMOVE this env var from Render so maker=signer=EOA.",
+                    "If using MetaMask/EOA, REMOVE this env var (Render dashboard or `flyctl secrets unset`) so maker=signer=EOA.",
                     smart_w_env
                 )
             if maker and signer and maker.lower() != signer.lower():
@@ -280,7 +266,7 @@ def create_app():
             if not _poly_pk:
                 logger.warning(
                     "[APP][POLY] POLYMARKET_PRIVATE_KEY not set — "
-                    "Polymarket execution disabled. Add key to Render env vars."
+                    "Polymarket execution disabled. Add key as an env var (Render) or secret (Fly)."
                 )
             else:
                 logger.info(
@@ -797,28 +783,12 @@ def create_app():
 
         best_dip    = request.args.get("best_dip")   # 5|10|20|30|40 (≤ threshold)
         fill        = request.args.get("fill")        # FILLED|UNFILLED|NEUTRAL — Limitless fill status
-        active_only = request.args.get("active_only")  # "1" → only pairs currently live-executing
-        date_from   = request.args.get("date_from")     # YYYY-MM-DD, calendar filter start (inclusive)
-        date_to     = request.args.get("date_to")       # YYYY-MM-DD, calendar filter end (inclusive)
 
         q = Signal.query
         if symbol:   q = q.filter(Signal.symbol == symbol)
         if outcome:  q = q.filter(Signal.outcome == outcome)
         if mode:     q = q.filter(Signal.mode == mode)
         if fill:     q = q.filter(Signal.limitless_fill == fill.upper())
-
-        if active_only == "1":
-            try:
-                import json as _active_json
-                from signal_engine import SYMBOLS as _all_symbols
-                _settings_row = Settings.query.first()
-                _nep_raw = (_settings_row.no_execute_pairs if _settings_row else None) or '[]'
-                _nep = _nep_raw if isinstance(_nep_raw, list) else _active_json.loads(_nep_raw)
-                _live_pairs = [s for s in _all_symbols if s not in _nep]
-                q = q.filter(Signal.symbol.in_(_live_pairs))
-            except Exception:
-                pass
-
         if best_dip:
             try:
                 # Exclusive ranges — each bucket is independent, no overlap:
@@ -854,22 +824,6 @@ def create_app():
                 q = q.filter(Signal.candle_open_time >= _today - timedelta(days=7))
             elif date_filter == "30d":
                 q = q.filter(Signal.candle_open_time >= _today - timedelta(days=30))
-
-        # Calendar-based filtering (new). candle_open_time is stored naive-UTC,
-        # so we compare against naive datetime bounds built from the date
-        # strings — same convention as the preset date_filter block above.
-        if date_from:
-            try:
-                _from_dt = datetime.strptime(date_from, "%Y-%m-%d")
-                q = q.filter(Signal.candle_open_time >= _from_dt)
-            except ValueError:
-                pass
-        if date_to:
-            try:
-                _to_dt = datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)  # inclusive of the whole end day
-                q = q.filter(Signal.candle_open_time < _to_dt)
-            except ValueError:
-                pass
 
         q  = q.order_by(Signal.created_at.desc())
         pg = q.paginate(page=page, per_page=per_page, error_out=False)
@@ -1107,7 +1061,7 @@ def create_app():
         """
         One-time call to generate L2 API credentials from the private key.
         Returns { api_key, api_secret, api_passphrase } — add these to
-        Render env vars as POLYMARKET_API_KEY / _SECRET / _PASSPHRASE.
+        env vars (Render) or secrets (Fly) as POLYMARKET_API_KEY / _SECRET / _PASSPHRASE.
 
         Must have POLYMARKET_PRIVATE_KEY set first.
         Can only be called in shadow or live mode (not unauthenticated).
@@ -1199,7 +1153,7 @@ def create_app():
                 "If approved=false: visit limitless.exchange with your SMART wallet "
                 "(not the EOA signer) and place one manual trade — this triggers approval. "
                 "Set LIMITLESS_SMART_WALLET=0xefFA501072810d9CE08D5D299bf086Abd6D61b73 "
-                "in your Render env vars."
+                "as an env var (Render) or secret (Fly)."
             ),
         })
 

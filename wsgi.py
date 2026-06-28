@@ -1,5 +1,5 @@
 """
-Render/Gunicorn entrypoint.
+Gunicorn entrypoint — works unchanged on Render or Fly.io.
 gevent monkey_patch MUST be first before any other import.
 psycogreen makes psycopg2 gevent-compatible (patches its wait callback).
 """
