@@ -17,7 +17,7 @@ Polymarket CLOB supports two auth levels:
   This executor uses L2 when all three L2 env vars are set, otherwise
   falls back to L1 automatically.
 
-CREDENTIALS (env vars on Render, secrets on Fly)
+CREDENTIALS (Render env vars)
 ──────────────────────────────
   Required always:
     POLYMARKET_PRIVATE_KEY     — EOA wallet private key (0x... or raw hex)
@@ -160,7 +160,7 @@ def derive_api_key() -> dict:
     This is signed with the private key (L1 style) and returns:
       { apiKey, secret, passphrase }
 
-    Call this ONCE, then add the three values as env vars (Render) or secrets (Fly):
+    Call this ONCE, then add the three values to Render env vars:
       POLYMARKET_API_KEY        = apiKey
       POLYMARKET_API_SECRET     = secret
       POLYMARKET_API_PASSPHRASE = passphrase
@@ -202,7 +202,7 @@ def derive_api_key() -> dict:
             }
 
         logger.info(
-            "[POLY:AUTH] ✓ L2 API credentials derived — add these as env vars (Render) or secrets (Fly):\n"
+            "[POLY:AUTH] ✓ L2 API credentials derived — add these to Render env vars:\n"
             "  POLYMARKET_API_KEY        = %s\n"
             "  POLYMARKET_API_SECRET     = %s\n"
             "  POLYMARKET_API_PASSPHRASE = %s",

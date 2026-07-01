@@ -1,14 +1,29 @@
+# Keep the image small and never bake secrets into it
 .env
-.git
-.gitignore
+.env.*
+!.env.example
+*.db
+*.sqlite3
 __pycache__/
 *.pyc
 *.pyo
-*.db
-*.sqlite3
+.DS_Store
+*.egg-info/
+dist/
+build/
 .venv/
 venv/
 *.log
 instance/
-README.md
+
+# Git / CI metadata not needed inside the container
+.git/
+.gitignore
+.github/
+
+# Local-only deploy scripts (Termux / Render specific) — not needed at runtime
 deploy.sh
+render.yaml
+
+# Docs
+README.md

@@ -203,57 +203,62 @@ def job_generate_signal():
             #   Family A: BTC-USDT + ETH-USDT
             #   Family B: DOGE-USDT + SOL-USDT
             #   Family C: XRP-USDT + BNB-USDT
-            # Family rotation is always active — rotates A→B→C→A.
-            # Falls through (skips candle) if no signal qualifies outside excluded family.
+            #
+            # Gated by settings.use_family_rotation (Settings model, default
+            # False). OFF by default: every family is eligible every candle,
+            # same as today's pick_best_signal() behavior with no rotation
+            # applied. ON: after a signal fires from a family, the next
+            # candle must come from a different family, preventing
+            # consecutive BTC/ETH-style spam. Toggle lives in Settings UI.
             _preferred_families = None
+            _excluded_families  = None
             _FAMILY_MAP = {
                 "BTC-USDT":  "A", "ETH-USDT":  "A",
                 "DOGE-USDT": "B", "SOL-USDT":  "B",
                 "XRP-USDT":  "C", "BNB-USDT":  "C",
             }
-            # Family rotation is ALWAYS ON — no toggle needed.
-            # After a signal fires from a family, the next candle must come
-            # from a different family. Prevents consecutive BTC/ETH spam.
-            # Families: A = BTC+ETH | B = DOGE+SOL | C = XRP+BNB
-            _excluded_family = None
-            try:
-                # Look at last signal overall (including PENDING — covers the
-                # 15-min window while the current signal is waiting to resolve).
-                _last_resolved = Signal.query.filter(
-                    Signal.outcome.in_(['WIN', 'LOSS', 'UNKNOWN'])
-                ).order_by(Signal.candle_open_time.desc()).first()
+            if getattr(settings, 'use_family_rotation', False):
+                try:
+                    # Look at last signal overall (including PENDING — covers
+                    # the 15-min window while the current signal is waiting
+                    # to resolve).
+                    _last_resolved = Signal.query.filter(
+                        Signal.outcome.in_(['WIN', 'LOSS', 'UNKNOWN'])
+                    ).order_by(Signal.candle_open_time.desc()).first()
 
-                _last_any = Signal.query.order_by(
-                    Signal.candle_open_time.desc()
-                ).first()
+                    _last_any = Signal.query.order_by(
+                        Signal.candle_open_time.desc()
+                    ).first()
 
-                # Use the more recent of the two
-                _ref_sig = None
-                if _last_any and _last_resolved:
-                    _ref_sig = _last_any if (
-                        _last_any.candle_open_time >= _last_resolved.candle_open_time
-                    ) else _last_resolved
-                else:
-                    _ref_sig = _last_any or _last_resolved
+                    # Use the more recent of the two
+                    _ref_sig = None
+                    if _last_any and _last_resolved:
+                        _ref_sig = _last_any if (
+                            _last_any.candle_open_time >= _last_resolved.candle_open_time
+                        ) else _last_resolved
+                    else:
+                        _ref_sig = _last_any or _last_resolved
 
-                if _ref_sig:
-                    _excl = _FAMILY_MAP.get(_ref_sig.symbol)
-                    _excluded_families  = [_excl] if _excl else None
-                    _preferred_families = [f for f in ['A', 'B', 'C'] if f != _excl]
-                    logger.info(
-                        '[GENERATE] Family rotation | last=%s family=%s → '
-                        'excluding family %s | eligible=%s',
-                        _ref_sig.symbol, _excl,
-                        _excluded_families, _preferred_families
-                    )
-                else:
+                    if _ref_sig:
+                        _excl = _FAMILY_MAP.get(_ref_sig.symbol)
+                        _excluded_families  = [_excl] if _excl else None
+                        _preferred_families = [f for f in ['A', 'B', 'C'] if f != _excl]
+                        logger.info(
+                            '[GENERATE] Family rotation ON | last=%s family=%s → '
+                            'excluding family %s | eligible=%s',
+                            _ref_sig.symbol, _excl,
+                            _excluded_families, _preferred_families
+                        )
+                    else:
+                        _excluded_families  = None
+                        _preferred_families = None
+                        logger.info('[GENERATE] Family rotation ON | no previous signal — all families eligible')
+                except Exception as _fe:
+                    logger.warning('[GENERATE] Family rotation check error: %s — allowing all families', _fe)
                     _excluded_families  = None
                     _preferred_families = None
-                    logger.info('[GENERATE] Family rotation | no previous signal — all families eligible')
-            except Exception as _fe:
-                logger.warning('[GENERATE] Family rotation check error: %s — allowing all families', _fe)
-                _excluded_families  = None
-                _preferred_families = None
+            else:
+                logger.debug('[GENERATE] Family rotation OFF (use_family_rotation=False) — all families eligible')
 
             # ── Rule 2: Directional Saturation Filter ────────────────────────
             # If the same direction has lost ≥3 times in the last 6 signals,

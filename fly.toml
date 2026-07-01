@@ -1,42 +1,45 @@
-# Fly.io deployment config for the SignalBot (crypto-signal-bot)
+# ─────────────────────────────────────────────────────────────────────────
+# SignalBot — fly.toml
 #
-# This app runs a long-lived in-process APScheduler (15-min candle signal loop)
-# and a Flask-SocketIO websocket dashboard, both inside ONE gunicorn worker
-# (-w 1, same as Render). That means:
-#   - Do NOT autoscale this app to multiple machines — a second machine would
-#     run its own scheduler and double-fire trades/signals.
-#   - Do NOT let Fly auto-stop the machine on idle — the scheduler must keep
-#     running 24/7 even with no dashboard viewers connected.
-#
-# Replace "your-app-name" below with the name you choose at `fly launch`,
-# and update LIMITLESS_SMART_WALLET / other non-secret values as needed.
+# CRITICAL: this app must run as exactly ONE machine, ALWAYS ON.
+# APScheduler (in scheduler.py) runs in-process inside the single gunicorn
+# worker. If Fly spins up a second machine (autoscaling) or stops this one
+# when idle, you get duplicate signal generation and duplicate live orders.
+# That's why auto_stop_machines / auto_start_machines are "off" and
+# min_machines_running = 1 below. Do not change these without re-architecting
+# the scheduler to use a distributed lock.
+# ─────────────────────────────────────────────────────────────────────────
 
-app = "your-app-name"
-primary_region = "iad"  # change to the region closest to you / your exchange APIs
+app = "btcbot-candle-oracle"   # change to your actual Fly app name
+primary_region = "iad"          # pick the region closest to your exchange/DB
 
 [build]
 
 [env]
+  PORT = "8080"
   FLASK_ENV = "production"
   DEFAULT_MODE = "shadow"
   DEFAULT_POSITION_SIZE = "10"
-  PORT = "8080"
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = false   # keep the scheduler alive — do not idle-stop
-  auto_start_machines = true
-  min_machines_running = 1     # exactly one instance, always on
+  auto_stop_machines = "off"     # never idle-stop — scheduler must stay alive
+  auto_start_machines = false    # don't auto-start a 2nd machine on traffic
+  min_machines_running = 1       # always exactly 1 machine running
   processes = ["app"]
 
   [[http_service.checks]]
     grace_period = "30s"
     interval = "30s"
     method = "GET"
-    timeout = "5s"
-    path = "/api/health"
+    timeout = "10s"
+    path = "/"
 
 [[vm]]
   size = "shared-cpu-1x"
   memory = "1gb"
+  processes = ["app"]
+
+[processes]
+  app = "gunicorn --worker-class geventwebsocket.gunicorn.workers.GeventWebSocketWorker -w 1 --timeout 120 --bind 0.0.0.0:8080 wsgi:app"
