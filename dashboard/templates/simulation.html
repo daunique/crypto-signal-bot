@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>PolyBot — Simulation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<div class="bg-grid"></div>
+<div class="bg-glow"></div>
+
+<header class="topbar">
+  <div class="topbar-brand">
+    <span class="brand-mark">◆</span>
+    <span class="brand-name">POLYBOT — SIM</span>
+  </div>
+  <div class="topbar-status" id="topbar-status">
+    <span class="pulse-dot" id="pulse-dot"></span>
+    <span id="status-label">SIMULATING</span>
+  </div>
+</header>
+
+<main class="app-main">
+  <section class="view" id="view-overview">
+    <div class="view-head">
+      <h1>Simulation</h1>
+      <span class="view-sub">no wallet · no real orders · live prices only</span>
+    </div>
+
+    <div class="panel" style="border-color:var(--gold); margin-bottom:18px;">
+      <div style="font-size:12px; color:var(--text-mute); line-height:1.6;">
+        <b style="color:var(--gold);">Best-case estimate, not a guarantee.</b>
+        Assumes every simulated order fills at the observed price —
+        real execution can fail to fill. Longer runs give a more
+        trustworthy picture than a short one.
+      </div>
+    </div>
+
+    <div class="hero-balance">
+      <span class="hero-label">Simulated Balance</span>
+      <span class="hero-value" id="hero-balance">$0.00</span>
+      <div class="hero-chips">
+        <span class="chip chip-mode" id="chip-elapsed">0.0h running</span>
+      </div>
+    </div>
+
+    <div class="stat-grid">
+      <div class="stat-card glow-edge">
+        <span class="stat-label">Total Profit</span>
+        <span class="stat-value" id="total-profit">$0.0000</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">Return</span>
+        <span class="stat-value" id="return-pct">0.00%</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">Win Rate</span>
+        <span class="stat-value accent" id="win-rate">0.0%</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label">Trades</span>
+        <span class="stat-value" id="trade-count">0</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><span>Balance Range</span></div>
+      <div class="settings-row"><span>Peak</span><b id="peak-balance">$0.00</b></div>
+      <div class="settings-row"><span>Trough</span><b id="trough-balance">$0.00</b></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><span>Recent Simulated Trades</span></div>
+      <div class="trade-list" id="sim-trades-list"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+  const fmt = (n, d=4) => (Number(n) || 0).toFixed(d);
+  const fmtMoney = (n, d=2) => '$' + fmt(n, d);
+
+  async function refresh(){
+    try{
+      const r = await fetch('/api/simulation/summary');
+      const d = await r.json();
+
+      document.getElementById('hero-balance').textContent = fmtMoney(d.current_balance, 2);
+      document.getElementById('chip-elapsed').textContent = `${d.elapsed_hours}h running`;
+
+      const profitEl = document.getElementById('total-profit');
+      profitEl.textContent = (d.total_profit >= 0 ? '+' : '') + fmtMoney(d.total_profit);
+      profitEl.style.color = d.total_profit >= 0 ? 'var(--yes)' : 'var(--no)';
+
+      const returnEl = document.getElementById('return-pct');
+      returnEl.textContent = (d.return_pct >= 0 ? '+' : '') + fmt(d.return_pct, 2) + '%';
+      returnEl.style.color = d.return_pct >= 0 ? 'var(--yes)' : 'var(--no)';
+
+      document.getElementById('win-rate').textContent = fmt(d.win_rate, 1) + '%';
+      document.getElementById('trade-count').textContent = d.trade_count ?? 0;
+      document.getElementById('peak-balance').textContent = fmtMoney(d.peak_balance);
+      document.getElementById('trough-balance').textContent = fmtMoney(d.trough_balance);
+
+      const tradesR = await fetch('/api/simulation/trades');
+      const trades = await tradesR.json();
+      const list = document.getElementById('sim-trades-list');
+      if (!trades.length){
+        list.innerHTML = '<div class="empty-state">No simulated trades yet — waiting for a real edge to appear</div>';
+      } else {
+        list.innerHTML = trades.map(t => `
+          <div class="trade-card profit">
+            <div class="trade-left">
+              <span class="trade-pair">${t.pair}</span>
+              <span class="trade-meta">combined $${t.combined_cost} · ${t.shares} shares</span>
+            </div>
+            <div class="trade-right">
+              <div class="trade-profit pos">+${fmtMoney(t.profit)}</div>
+            </div>
+          </div>
+        `).join('');
+      }
+    }catch(e){ console.error(e); }
+  }
+
+  refresh();
+  setInterval(refresh, 3000);
+</script>
+</body>
+</html>
