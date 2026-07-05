@@ -83,27 +83,54 @@ fly launch --no-deploy
 #    across all users.
 
 # 5. Create the persistent volume (must match fly.toml's
-#    [[mounts]] source name exactly: "polybot_data")
+#    [[mounts]] source name exactly: "polybot_data", and must be
+#    created in the SAME region as primary_region in fly.toml, "lhr")
 fly volumes create polybot_data --size 1 --region lhr
 
-# 6. Set your secrets — NEVER put these in fly.toml or commit them.
+# 6. VERIFY the volume actually exists before deploying — do not
+#    skip this. If step 5 failed silently or targeted the wrong
+#    app, you will not find out until `fly deploy` fails with:
+#    "creating a new machine in group 'app' requires an unattached
+#    'polybot_data' volume" — catching it here is much clearer.
+fly volumes list
+#    You should see a row with Name "polybot_data", State "created",
+#    Region "lhr". If the list is empty or doesn't show it, re-run
+#    step 5 — check you're targeting the right app with `fly apps list`
+#    and, if needed, add `-a your-actual-app-name` to the volumes
+#    create command to be explicit about which app it attaches to.
+
+# 7. Set your secrets — NEVER put these in fly.toml or commit them.
 #    This is the Fly equivalent of your .env file:
 fly secrets set PRIVATE_KEY="your_wallet_private_key_here"
 fly secrets set FUNDER_ADDRESS="your_proxy_or_funder_address_here"
 fly secrets set WALLET_SIGNATURE_TYPE="1"
 
-# 7. Deploy
+# 8. Deploy
 fly deploy
 
-# 8. Watch logs to confirm it started correctly
+# 9. Watch logs to confirm it started correctly
 fly logs
 
-# 9. Open your dashboard (Fly gives you a URL like
-#    https://your-polybot-app-name.fly.dev)
+# 10. Open your dashboard (Fly gives you a URL like
+#     https://your-polybot-app-name.fly.dev)
 fly open
 ```
 
 Since secrets are set via `fly secrets set` rather than a `.env` file inside the container, `config.py`'s `os.getenv(...)` calls read them identically either way — no code changes needed between VPS and Fly.io deployment.
+
+### Troubleshooting: "requires an unattached 'polybot_data' volume"
+
+If `fly deploy` fails with this exact error, it means step 5 above either wasn't run, ran against a different app than the one you're deploying, or ran in a different region than `fly.toml`'s `primary_region`. Fix:
+
+```bash
+fly apps list                              # confirm your app's exact name
+fly volumes list -a your-actual-app-name   # confirm no volume exists yet
+fly volumes create polybot_data --size 1 --region lhr -a your-actual-app-name
+fly volumes list -a your-actual-app-name   # confirm it now shows up
+fly deploy
+```
+
+If a volume with a different name already exists (e.g. from an earlier `fly launch` that auto-created one with a name like `your_app_name_data`), either rename `fly.toml`'s `[[mounts]] source` to match the existing volume, or delete the unused one with `fly volumes destroy <volume-id>` and create `polybot_data` fresh — don't leave two volumes for the same app, since only one will actually get mounted.
 
 **Run `preflight.py` inside the deployed container before trusting it with funds**, the same as you would on a VPS:
 
@@ -352,6 +379,15 @@ The important design point: **discovery and edge-detection always run on both du
 Workflow this enables: run BOTH for a while to get a baseline, or toggle to one duration for a focused test, then check the comparison panel — it tells you which duration would have performed better even during the time it wasn't live.
 
 ## Changelog
+
+**2026-07-05 (later — Fly.io volume deployment failure fix)**
+
+- **Fixed a real gap in the Fly.io deployment instructions that caused an actual failed deploy**: `fly deploy` correctly rejected the deployment with `"creating a new machine in group 'app' requires an unattached 'polybot_data' volume"` — the volume referenced in `fly.toml`'s `[[mounts]]` block hadn't actually been created before deploying was attempted. The original instructions had the create-volume step in the right order, but nothing verified it had actually succeeded before moving on to `fly deploy`, so a silent failure at that step (wrong app targeted, a transient CLI issue, `fly launch` not having fully registered the app yet) would only surface much later as a confusing deploy-time error.
+- Added an explicit verification step (`fly volumes list`) between volume creation and deployment, so a failure is caught immediately with a clear next action, not discovered later at deploy time.
+- Added a dedicated **Troubleshooting** section under the Fly.io deployment instructions covering this exact error message, including how to confirm which app a volume is attached to and what to do if a differently-named volume already exists from an earlier `fly launch` (a common cause: `fly launch` can auto-create its own default-named volume before you've customized `fly.toml`, leaving two volumes competing for the same mount).
+- Added an inline comment directly in `fly.toml`'s `[[mounts]]` block pointing to the fix, since that's the file someone is most likely already looking at when this error occurs.
+
+
 
 **2026-07-05 (Fly.io deployment + no-wallet simulation mode)**
 

@@ -24,6 +24,14 @@ primary_region = "lhr"          # London — matches this bot's documented
 [[mounts]]
   source = "polybot_data"
   destination = "/app/data"
+  # If `fly deploy` fails with "requires an unattached 'polybot_data'
+  # volume" — this volume hasn't been created yet for this app. Fix:
+  #   fly volumes create polybot_data --size 1 --region lhr
+  # then `fly volumes list` to confirm it shows up before retrying
+  # `fly deploy`. See README "Troubleshooting" under Fly.io deployment
+  # for the full walkthrough, including what to do if a
+  # differently-named volume already exists from an earlier
+  # `fly launch`.
   # Persistent volume — trades.db, runtime_settings.json, and the
   # derived API credentials debug mirror all live here. WITHOUT
   # this mount, all of that is wiped on every redeploy/restart,
