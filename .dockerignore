@@ -1,29 +1,26 @@
-# Keep the image small and never bake secrets into it
+# Never bake secrets into the image — Fly secrets are set via
+# `fly secrets set`, not via .env baked into the container.
 .env
-.env.*
-!.env.example
-*.db
-*.sqlite3
+
+# Local data — this gets created fresh in the container and
+# persisted via the Fly volume mount instead (see fly.toml).
+data/trades.db
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/runtime_settings.json
+data/derived_api_creds.json
+
+# Python
 __pycache__/
 *.pyc
-*.pyo
-.DS_Store
-*.egg-info/
-dist/
-build/
-.venv/
 venv/
-*.log
-instance/
+.venv/
 
-# Git / CI metadata not needed inside the container
+# OS / editors
+.DS_Store
+*.swp
+
+# Git
 .git/
 .gitignore
-.github/
-
-# Local-only deploy scripts (Termux / Render specific) — not needed at runtime
-deploy.sh
-render.yaml
-
-# Docs
-README.md

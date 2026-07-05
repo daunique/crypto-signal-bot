@@ -1,45 +1,52 @@
-# ─────────────────────────────────────────────────────────────────────────
-# SignalBot — fly.toml
+# POLYBOT — Fly.io Configuration
 #
-# CRITICAL: this app must run as exactly ONE machine, ALWAYS ON.
-# APScheduler (in scheduler.py) runs in-process inside the single gunicorn
-# worker. If Fly spins up a second machine (autoscaling) or stops this one
-# when idle, you get duplicate signal generation and duplicate live orders.
-# That's why auto_stop_machines / auto_start_machines are "off" and
-# min_machines_running = 1 below. Do not change these without re-architecting
-# the scheduler to use a distributed lock.
-# ─────────────────────────────────────────────────────────────────────────
+# IMPORTANT: this app needs to run CONTINUOUSLY (it's a live
+# trading bot, not a request/response web service), so
+# auto_stop_machines/auto_start_machines below are set to keep it
+# always-on. Fly's default free-tier behavior stops idle machines —
+# that's fine for a website, but would silently pause your bot
+# whenever the dashboard isn't being actively hit, which is NOT
+# what you want for a bot that needs to react to WebSocket price
+# events in real time regardless of whether anyone's looking at
+# the dashboard.
 
-app = "btcbot-candle-oracle"   # change to your actual Fly app name
-primary_region = "iad"          # pick the region closest to your exchange/DB
+app = "your-polybot-app-name"  # CHANGE THIS — must be globally unique on Fly
+primary_region = "lhr"          # London — matches this bot's documented
+                                  # latency guidance (close to Polymarket's
+                                  # CLOB server). Change only if you have a
+                                  # specific reason to prefer elsewhere.
 
 [build]
 
 [env]
-  PORT = "8080"
-  FLASK_ENV = "production"
-  DEFAULT_MODE = "shadow"
-  DEFAULT_POSITION_SIZE = "10"
+  PORT = "5000"
+
+[[mounts]]
+  source = "polybot_data"
+  destination = "/app/data"
+  # Persistent volume — trades.db, runtime_settings.json, and the
+  # derived API credentials debug mirror all live here. WITHOUT
+  # this mount, all of that is wiped on every redeploy/restart,
+  # since Fly's container filesystem is otherwise ephemeral.
 
 [http_service]
-  internal_port = 8080
+  internal_port = 5000
   force_https = true
-  auto_stop_machines = "off"     # never idle-stop — scheduler must stay alive
-  auto_start_machines = false    # don't auto-start a 2nd machine on traffic
-  min_machines_running = 1       # always exactly 1 machine running
-  processes = ["app"]
+  auto_stop_machines = false   # Bot must keep running even with no
+  auto_start_machines = true    # dashboard traffic — do not let Fly
+  min_machines_running = 1      # treat this like an idle website.
 
   [[http_service.checks]]
     grace_period = "30s"
     interval = "30s"
     method = "GET"
-    timeout = "10s"
-    path = "/"
+    path = "/api/health"
+    protocol = "http"
+    timeout = "5s"
 
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "1gb"
-  processes = ["app"]
-
-[processes]
-  app = "gunicorn --worker-class geventwebsocket.gunicorn.workers.GeventWebSocketWorker -w 1 --timeout 120 --bind 0.0.0.0:8080 wsgi:app"
+  memory = "512mb"
+  # 512mb is enough for this bot's actual footprint (Flask dashboard
+  # + asyncio WebSocket loop + SQLite). Bump to 1gb only if you
+  # expand well beyond the current 12 tracked pairs.

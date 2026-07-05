@@ -1,14 +1,30 @@
+# Secrets — never commit
 .env
-*.db
-*.sqlite3
+
+# Database (including WAL/SHM sidecar files from WAL mode)
+data/trades.db
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
+# Runtime state — this is live operational state (e.g. the 5min/
+# 15min toggle), not code. Don't commit it, or you'll overwrite
+# your live VPS toggle choice on every deploy.
+data/runtime_settings.json
+
+# API key debug mirror — only the public key is stored here (never
+# the secret/passphrase), but it shouldn't be committed as a matter
+# of good hygiene since it identifies which key is in use.
+data/derived_api_creds.json
+
+# Python
 __pycache__/
 *.pyc
-*.pyo
-.DS_Store
-*.egg-info/
-dist/
-build/
-.venv/
 venv/
+.venv/
+
+# OS
+.DS_Store
+
+# Logs
 *.log
-instance/
