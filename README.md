@@ -88,10 +88,7 @@ fly launch --no-deploy
 fly volumes create polybot_data --size 1 --region lhr
 
 # 6. VERIFY the volume actually exists before deploying — do not
-#    skip this. If step 5 failed silently or targeted the wrong
-#    app, you will not find out until `fly deploy` fails with:
-#    "creating a new machine in group 'app' requires an unattached
-#    'polybot_data' volume" — catching it here is much clearer.
+#    skip this.
 fly volumes list
 #    You should see a row with Name "polybot_data", State "created",
 #    Region "lhr". If the list is empty or doesn't show it, re-run
@@ -105,8 +102,15 @@ fly secrets set PRIVATE_KEY="your_wallet_private_key_here"
 fly secrets set FUNDER_ADDRESS="your_proxy_or_funder_address_here"
 fly secrets set WALLET_SIGNATURE_TYPE="1"
 
-# 8. Deploy
-fly deploy
+# 8. Deploy WITH --ha=false — THIS FLAG IS REQUIRED, NOT OPTIONAL.
+#    Fly's default behavior for any app with an [http_service]
+#    section is to provision 2 machines for high availability. This
+#    bot must run as exactly ONE instance — two independent bot
+#    processes would trade against the SAME wallet and write to the
+#    SAME SQLite database with no coordination between them, causing
+#    duplicate trades and corrupted capital tracking. --ha=false
+#    tells Fly to only ever create/run 1 machine for this app.
+fly deploy --ha=false
 
 # 9. Watch logs to confirm it started correctly
 fly logs
@@ -120,14 +124,18 @@ Since secrets are set via `fly secrets set` rather than a `.env` file inside the
 
 ### Troubleshooting: "requires an unattached 'polybot_data' volume"
 
-If `fly deploy` fails with this exact error, it means step 5 above either wasn't run, ran against a different app than the one you're deploying, or ran in a different region than `fly.toml`'s `primary_region`. Fix:
+This error has **two different possible causes** — check them in this order:
+
+**Cause 1 (most likely): you deployed without `--ha=false`.** Fly's default behavior provisions 2 machines for any app with an `[http_service]` section, and each machine needs its own attached volume with the same name. If only one `polybot_data` volume exists — which is all you actually want, since this bot must only ever run as a single instance — the second machine's creation fails with exactly this error, even though a volume genuinely exists and step 5 above succeeded correctly. This is why step 8 above includes `--ha=false`: it tells Fly to only ever create 1 machine, matching the 1 volume you created. If you deployed with plain `fly deploy` (no flag) and hit this error, this is almost certainly why — re-run as `fly deploy --ha=false`.
+
+**Cause 2 (less likely, but check if Cause 1 doesn't resolve it): the volume genuinely wasn't created, or was created against the wrong app/region.**
 
 ```bash
 fly apps list                              # confirm your app's exact name
-fly volumes list -a your-actual-app-name   # confirm no volume exists yet
+fly volumes list -a your-actual-app-name   # confirm whether a volume actually exists
 fly volumes create polybot_data --size 1 --region lhr -a your-actual-app-name
 fly volumes list -a your-actual-app-name   # confirm it now shows up
-fly deploy
+fly deploy --ha=false
 ```
 
 If a volume with a different name already exists (e.g. from an earlier `fly launch` that auto-created one with a name like `your_app_name_data`), either rename `fly.toml`'s `[[mounts]] source` to match the existing volume, or delete the unused one with `fly volumes destroy <volume-id>` and create `polybot_data` fresh — don't leave two volumes for the same app, since only one will actually get mounted.
@@ -377,6 +385,17 @@ Settings has a live toggle — 5 MIN / BOTH / 15 MIN — for choosing which mark
 The important design point: **discovery and edge-detection always run on both durations regardless of the toggle.** When a duration is toggled off, any real edge it finds gets logged as an "observed opportunity" — same numbers you'd have gotten if it had actually traded, just not executed. This means Settings also shows a side-by-side **5min vs 15min comparison panel** with real trades, real profit, and win rate for whichever duration is live, plus the observed-only potential for whichever is off. "Combined potential" (real + observed profit) is the fairest number for deciding which one to scale into, since it isn't biased by which side happened to be toggled on longer.
 
 Workflow this enables: run BOTH for a while to get a baseline, or toggle to one duration for a focused test, then check the comparison panel — it tells you which duration would have performed better even during the time it wasn't live.
+
+## Changelog
+
+**2026-07-05 (correction — the actual root cause of the volume deploy failure)**
+
+The previous changelog entry below ("Fly.io volume deployment failure fix") diagnosed this error as a missing volume-creation step. That fix was necessary but incomplete — the SAME error recurred on a second deploy attempt even after following those steps, which pointed to a different, more fundamental cause.
+
+- **Root cause identified: Fly's default behavior provisions 2 machines for any app with an `[http_service]` section, and each one needs its own attached volume with the same name.** With only 1 `polybot_data` volume created (correctly, by the earlier fix), the second machine's creation fails with the exact same "requires an unattached volume" error — even though the volume genuinely exists and is correctly attached to the first machine. Confirmed via Fly's own documentation for their metrics autoscaler feature, which explicitly instructs using `--ha=false` because "the autoscaler only works on a single Machine."
+- **This isn't just a deployment quirk — running 2 machines would be actively unsafe for this specific bot.** Two independent bot processes would trade against the same wallet and write to the same SQLite `trades.db` with zero coordination between them: duplicate trades, conflicting capital-allocation decisions, and a corrupted view of what's actually been traded. This system was built as a single-instance design from the start (in-process asyncio state, no distributed locking anywhere) and was never intended to run as more than one instance.
+- **Fixed by making `--ha=false` a required part of the deploy command** (`fly deploy --ha=false`), not an optional flag mentioned in passing. Updated `fly.toml`'s inline comments and the README's Troubleshooting section to lead with this as the most likely cause, with the original volume-creation checks demoted to a secondary check.
+- This is a direct instance of a broader lesson worth naming: the first fix addressed a real, legitimate error condition (the volume genuinely might not have existed), but treating an error message's most literal interpretation as the full explanation — without checking why creating that exact resource still wouldn't have been sufficient — meant the same failure recurred. The correction here came only after the user reported the identical error a second time, which is the signal that should have prompted checking Fly's multi-machine defaults immediately rather than re-asserting the same volume-creation diagnosis.
 
 ## Changelog
 

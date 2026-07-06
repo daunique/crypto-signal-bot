@@ -1,6 +1,22 @@
 # POLYBOT — Fly.io Configuration
 #
-# IMPORTANT: this app needs to run CONTINUOUSLY (it's a live
+# CRITICAL — SINGLE MACHINE ONLY, NOT JUST A PREFERENCE:
+# This bot must run as exactly ONE instance, never more. Fly's
+# default behavior for apps with an [http_service] section is to
+# provision 2 machines for high availability — but running two
+# independent bot processes would mean two instances trading
+# against the SAME wallet, writing to the SAME SQLite trades.db,
+# and each independently deciding capital allocation with no
+# awareness of the other. That's not just wasteful, it's actively
+# unsafe: duplicate trades, corrupted/conflicting database writes,
+# and capital-tracking that no longer reflects reality. This is why
+# `fly deploy --ha=false` is REQUIRED (see deployment steps below),
+# not optional — deploying without it will silently try to run 2
+# machines, and if you also see "requires an unattached
+# 'polybot_data' volume" on a SECOND machine, this default 2-machine
+# behavior — not a volume creation failure — is almost certainly why.
+#
+# IMPORTANT: this app also needs to run CONTINUOUSLY (it's a live
 # trading bot, not a request/response web service), so
 # auto_stop_machines/auto_start_machines below are set to keep it
 # always-on. Fly's default free-tier behavior stops idle machines —
@@ -25,13 +41,13 @@ primary_region = "lhr"          # London — matches this bot's documented
   source = "polybot_data"
   destination = "/app/data"
   # If `fly deploy` fails with "requires an unattached 'polybot_data'
-  # volume" — this volume hasn't been created yet for this app. Fix:
-  #   fly volumes create polybot_data --size 1 --region lhr
-  # then `fly volumes list` to confirm it shows up before retrying
-  # `fly deploy`. See README "Troubleshooting" under Fly.io deployment
-  # for the full walkthrough, including what to do if a
-  # differently-named volume already exists from an earlier
-  # `fly launch`.
+  # volume" — this is very likely Fly's default 2-machine HA
+  # behavior (see the CRITICAL note at the top of this file), which
+  # needs 2 volumes with this same name to satisfy — NOT what you
+  # want for this bot, which must only ever run as 1 instance. Fix
+  # by deploying with `fly deploy --ha=false` (see README
+  # "Troubleshooting" under Fly.io deployment for the full
+  # walkthrough), rather than creating a second volume.
   # Persistent volume — trades.db, runtime_settings.json, and the
   # derived API credentials debug mirror all live here. WITHOUT
   # this mount, all of that is wiped on every redeploy/restart,
