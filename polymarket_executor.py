@@ -939,11 +939,30 @@ def place_live_order(
         tick_size = 0.01
     decimals = max(0, len(market.get("tick_size", "0.01").split(".")[-1])) if "." in str(market.get("tick_size", "0.01")) else 2
 
-    price = min(max_contract_price, round(1 - tick_size, decimals))
-    price = round(round(price / tick_size) * tick_size, decimals)
-    size  = round(position_size_usd / price, 4)
-    maker_amount = int(round(price * size * 1_000_000))  # pUSD, 6 decimals
-    taker_amount = int(round(size * 1_000_000))           # outcome token, 6 decimals
+    if order_type == "FOK":
+        # True market order: spend exactly position_size_usd, no price floor
+        # on shares received — a max_contract_price cap doesn't apply here
+        # the way it does for a resting GTC limit, since FOK means "fill
+        # immediately at whatever the market offers, or cancel entirely."
+        # taker_amount=1 (the smallest representable unit) means "accept at
+        # least this many shares back" is trivially satisfied at any real
+        # execution price — the tradeoff a true market order accepts is
+        # exactly this: execution certainty over price certainty.
+        maker_amount = int(round(position_size_usd * 1_000_000))
+        taker_amount = 1
+        price = round(1 - tick_size, decimals)   # informational only, for logging/response
+        size  = round(position_size_usd / max(price, tick_size), 4)
+        logger.warning(
+            "[POLY:%s] FOK market order — spend $%.2f (makerAmount=%d), no price "
+            "floor (takerAmount=%d, accepts any execution price).",
+            symbol, position_size_usd, maker_amount, taker_amount
+        )
+    else:
+        price = min(max_contract_price, round(1 - tick_size, decimals))
+        price = round(round(price / tick_size) * tick_size, decimals)
+        size  = round(position_size_usd / price, 4)
+        maker_amount = int(round(price * size * 1_000_000))  # pUSD, 6 decimals
+        taker_amount = int(round(size * 1_000_000))           # outcome token, 6 decimals
 
     ts_ms = int(time.time() * 1000)
     salt  = ts_ms * 1000 + random.randint(0, 999)
@@ -1279,13 +1298,19 @@ def get_market_resolution(condition_id: str = None, slug: str = None) -> dict:
 
 
 def poll_market_resolution(condition_id: str = None, slug: str = None,
-                            attempts: int = 4, delay_s: float = 1.5) -> dict:
+                            attempts: int = 12, delay_s: float = 1.5) -> dict:
     """
-    Bounded retry wrapper — see get_market_resolution()'s caveat on timing.
-    This is the FAST path only, called from job_resolve_outcomes at the
-    candle boundary; job_reconcile_resolutions (scheduler.py) re-checks on a
-    much more relaxed schedule and corrects the record if this fast path
-    didn't catch it — see that job's docstring for why.
+    Bounded retry wrapper — see get_market_resolution()'s caveat on timing
+    (~18s total by default). This used to be a much tighter budget (4
+    attempts, 1.5s apart — ~6s total) purely because job_resolve_outcomes
+    needed to stay fast to avoid delaying job_generate_signal, which used to
+    fire in the same tick. Generate and resolve are fully decoupled now
+    (independent 1-min / 5-min schedules, each pending signal resolved on
+    its own thread), so there's no longer a good reason to give up on
+    Polymarket's own (Chainlink-backed) resolution quickly — the tight
+    budget was the main reason resolution fell to OKX far more often than
+    it needed to. job_reconcile_resolutions remains as a safety net for
+    genuinely slow outliers.
     """
     result = {}
     for attempt in range(1, attempts + 1):

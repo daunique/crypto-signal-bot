@@ -1068,30 +1068,45 @@ def place_live_order(
         )
 
     # 5. Build + sign order
-    price        = round(min(max_contract_price, 0.99), 2)
-    size         = round(position_size_usd / price, 4)
-    maker_amount = int(round(price * size * 1_000_000))
-    taker_amount = int(round(size * 1_000_000))
-    salt         = int(time.time() * 1000)
+    salt = int(time.time() * 1000)
 
     if order_type == "FOK":
-        # Limitless's own SDK docs describe FOK's HIGH-LEVEL convenience call
-        # as taking only makerAmount (spend $X, get whatever the SDK's own
-        # price lookup determines). We build the signed order at the raw
-        # wire level instead, where the EIP-712 struct requires BOTH
-        # makerAmount and takerAmount unconditionally (see ORDER_TYPES below)
-        # — so takerAmount here still serves as a minimum-shares-received
-        # guard (equivalently, a maximum price), the same as it does for
-        # GTC/FAK. This has NOT been live-tested against Limitless's API —
-        # log the real numbers being sent so the first few live fills can be
-        # checked by hand against what Limitless's own order history shows.
+        # True market order: spend exactly position_size_usd, no price floor
+        # on shares received. max_contract_price doesn't apply here the way
+        # it does for a resting GTC limit — FOK means "fill immediately at
+        # whatever the market offers, in full, or cancel entirely," and a
+        # price cap would contradict that. The EIP-712 struct still requires
+        # a takerAmount field (it's not optional at the wire level even
+        # though Limitless's own SDK convenience method for FOK only asks
+        # the caller for makerAmount) — takerAmount=1 (the smallest
+        # representable unit) means "accept at least this many shares back"
+        # is trivially satisfied at any real execution price, which is
+        # exactly the tradeoff a true market order accepts: execution
+        # certainty over price certainty.
+        # price/size are informational only for FOK (logging/response/history
+        # display) — the actual wire-level constraint is taker_amount=1
+        # above, not this value. Using a real placeholder number (rather
+        # than None) here avoids a whole class of "what if this is None"
+        # bugs in downstream code (logging format strings, Signal fields,
+        # frontend display) that would be easy to introduce and hard to
+        # fully audit for by leaving this genuinely null.
+        price        = 0.99
+        maker_amount = int(round(position_size_usd * 1_000_000))
+        taker_amount = 1
+        size         = round(position_size_usd / price, 4)
         logger.warning(
-            "[%s/%s] FOK order — spend $%.2f USDC (makerAmount=%d), require >= "
-            "%.4f shares back (takerAmount=%d) => effective price cap $%.4f. "
-            "Verify the actual fill price in Limitless's own order history "
-            "for the first few live FOK orders.",
-            symbol, timeframe, position_size_usd, maker_amount, size, taker_amount, price
+            "[%s/%s] FOK market order — spend $%.2f USDC (makerAmount=%d), no "
+            "price floor (takerAmount=%d, accepts any execution price). This "
+            "has not been live-tested against Limitless's API — verify the "
+            "actual fill price in Limitless's own order history for the "
+            "first few live FOK orders.",
+            symbol, timeframe, position_size_usd, maker_amount, taker_amount
         )
+    else:
+        price        = round(min(max_contract_price, 0.99), 2)
+        size         = round(position_size_usd / price, 4)
+        maker_amount = int(round(price * size * 1_000_000))
+        taker_amount = int(round(size * 1_000_000))
 
     # signer = maker for EOA accounts (the wallet signs for itself).
     order = {
@@ -1126,6 +1141,7 @@ def place_live_order(
     payload = {
         "order":      {**order, "signature": signature, "signatureType": 0,
                        "price": round(price, 2)},        # price must be float 0.01-0.99, max 2 decimals
+                                                            # (0.99 placeholder for FOK — see above)
         "orderType":  order_type,
         "marketSlug": slug,
         "ownerId":    owner_id,
@@ -1174,13 +1190,13 @@ def place_live_order(
                     or result.get("orderId")
                     or str(salt))
 
-        logger.info("[%s] ORDER ✓ dir=%s %.4f shares @ $%.4f id=%s slug=%s",
+        logger.info("[%s] ORDER ✓ dir=%s %.4f shares (est.) @ $%.4f (est.) id=%s slug=%s",
                     symbol, signal_direction, size, price, order_id, slug)
         return {
             "success":            True,
             "order_id":           str(order_id),
-            "contracts":          size,
-            "price_per_contract": price,
+            "contracts":          size,   # estimate for FOK — real fill confirmed separately
+            "price_per_contract": price,  # estimate for FOK — see check_order_filled / check_order_status_batch
             "total_spent":        position_size_usd,
             "slug":               slug,
             "condition_id":       market.get("conditionId") or market.get("condition_id") or market.get("condId"),
@@ -1598,18 +1614,26 @@ def get_market_resolution(slug: str) -> dict:
     }
 
 
-def poll_market_resolution(slug: str, attempts: int = 4, delay_s: float = 1.0) -> dict:
+def poll_market_resolution(slug: str, attempts: int = 12, delay_s: float = 1.5) -> dict:
     """
     Calls get_market_resolution() repeatedly until winningOutcomeIndex is set
-    or the attempt budget runs out. This is the FAST path only — it's called
-    from job_resolve_outcomes, which fires at the exact candle boundary and
-    needs to stay quick since job_generate_signal fires 1 second later and
-    would otherwise find the previous signal still PENDING and skip the new
-    candle. In production, Limitless resolution can take meaningfully longer
-    than this budget — job_reconcile_resolutions (scheduler.py) re-checks on
-    a much more relaxed schedule and corrects the record once the real
-    answer is in, so this function intentionally does not try to wait long
-    enough to catch every case itself.
+    or the attempt budget runs out (~18s total by default).
+
+    This budget used to be much tighter (4 attempts, 1s apart — ~4s total)
+    because job_resolve_outcomes needed to stay fast so it wouldn't delay
+    job_generate_signal, which used to fire 1 second after it in the same
+    tick. That's no longer true — resolve runs on its own independent
+    5-minute schedule, fully decoupled from generate (every 1 minute), and
+    each pending signal's resolution check runs in its own thread rather
+    than blocking the others. There's no longer a good reason to give up on
+    Limitless's own (Chainlink-backed) resolution quickly and fall through
+    to OKX — the old short budget was the main reason resolution_source
+    showed OKX_FALLBACK far more often than it needed to, relying on
+    job_reconcile_resolutions to correct it later rather than getting it
+    right the first time.
+
+    job_reconcile_resolutions still exists as a safety net for the genuinely
+    slow outlier case, but with this wider budget it should rarely need to.
     """
     result = {}
     for attempt in range(1, attempts + 1):

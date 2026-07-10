@@ -197,7 +197,14 @@ def _generate_for_timeframe(timeframe, settings, mode, max_cp, no_exec):
             )
             continue
 
-        is_no_execute = symbol in no_exec
+        # no_execute_pairs entries are now "SYMBOL:timeframe" (e.g.
+        # "BTC-USDT:5m") — live execution can be disabled independently per
+        # timeframe, not just per pair, since a pair's two timeframe streams
+        # are otherwise fully independent (their own PairLadder, their own
+        # thresholds). A bare "SYMBOL" entry (no ":timeframe") is also
+        # honored as "disable both timeframes", for backward compatibility
+        # with any pre-existing saved settings from before this change.
+        is_no_execute = (f"{symbol}:{timeframe}" in no_exec) or (symbol in no_exec)
 
         ltl_ready = (use_limitless and not is_no_execute
                      and _ladder_ready(symbol, timeframe, 'limitless', sig['magnitude']))
@@ -243,8 +250,15 @@ def _generate_for_timeframe(timeframe, settings, mode, max_cp, no_exec):
                                          order_type=getattr(settings, 'limitless_order_type', 'GTC') or 'GTC')
                 if _result.get("success"):
                     order = _result
-                    contracts = _result.get("contracts", 0)
-                    contract_price = _result.get("price_per_contract", max_cp)
+                    # .get(key, default) only falls back when the key is ABSENT —
+                    # for a FOK market order, contracts/price_per_contract are
+                    # explicitly None (genuinely unknown until the fill is
+                    # confirmed separately), so the key IS present and .get's
+                    # default would never kick in without this explicit check.
+                    contracts = _result.get("contracts")
+                    contracts = contracts if contracts is not None else 0
+                    contract_price = _result.get("price_per_contract")
+                    contract_price = contract_price if contract_price is not None else max_cp
                     order_id = _result.get("order_id")
                     try:
                         _slug_for_price = _result.get("slug") or _result.get("market_slug")

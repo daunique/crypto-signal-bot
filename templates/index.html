@@ -795,7 +795,7 @@ input[type=number]:focus{border-color:var(--accent)}
           <option value="GTC">Limit (GTC) — rests on the book until filled or cancelled</option>
           <option value="FOK">Market (FOK) — fills immediately in full, or not at all</option>
         </select>
-        <div class="form-hint">Max Contract Price above still applies either way — for Market orders it's the worst price you'll accept, not a target.</div>
+        <div class="form-hint">Market orders ignore this cap entirely — they spend the full position size at whatever price is available, prioritizing execution over price. This cap only applies to Limit (GTC) orders.</div>
       </div>
     </div>
 
@@ -981,15 +981,33 @@ input[type=number]:focus{border-color:var(--accent)}
     <div class="card">
       <div class="card-hdr"><span class="card-title">Live Execution per Pair</span></div>
       <div class="form-hint" style="margin-bottom:10px">
-        Tap a pair to enable/disable it. A disabled pair still generates signals and feeds its per-pair stats and ML tuning — it just skips placing a real order on Limitless or Polymarket. Signal-only pairs show a 👁 badge on the Dashboard.
+        Tap a pair+timeframe to enable/disable it independently — e.g. BTC 5m can be live while BTC 15m is signal-only. A disabled stream still generates signals and feeds its per-pair stats — it just skips placing a real order on Limitless or Polymarket. Signal-only streams show a 👁 badge on the Dashboard.
       </div>
-      <div id="live-exec-pills" style="display:flex;gap:6px;flex-wrap:wrap">
-        <span class="pair-pill active" data-pair="BTC-USDT" onclick="toggleLiveExecPill(this)">BTC</span>
-        <span class="pair-pill active" data-pair="ETH-USDT" onclick="toggleLiveExecPill(this)">ETH</span>
-        <span class="pair-pill active" data-pair="SOL-USDT" onclick="toggleLiveExecPill(this)">SOL</span>
-        <span class="pair-pill active" data-pair="XRP-USDT" onclick="toggleLiveExecPill(this)">XRP</span>
-        <span class="pair-pill active" data-pair="BNB-USDT" onclick="toggleLiveExecPill(this)">BNB</span>
-        <span class="pair-pill active" data-pair="DOGE-USDT" onclick="toggleLiveExecPill(this)">DOGE</span>
+      <div id="live-exec-pills" style="display:flex;flex-direction:column;gap:8px">
+        <div style="display:flex;align-items:center;gap:10px"><span style="width:48px;font-weight:700;font-size:0.8rem">BTC</span>
+          <span class="pair-pill active" data-pair="BTC-USDT" data-tf="5m" onclick="toggleLiveExecPill(this)">5m</span>
+          <span class="pair-pill active" data-pair="BTC-USDT" data-tf="15m" onclick="toggleLiveExecPill(this)">15m</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px"><span style="width:48px;font-weight:700;font-size:0.8rem">ETH</span>
+          <span class="pair-pill active" data-pair="ETH-USDT" data-tf="5m" onclick="toggleLiveExecPill(this)">5m</span>
+          <span class="pair-pill active" data-pair="ETH-USDT" data-tf="15m" onclick="toggleLiveExecPill(this)">15m</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px"><span style="width:48px;font-weight:700;font-size:0.8rem">SOL</span>
+          <span class="pair-pill active" data-pair="SOL-USDT" data-tf="5m" onclick="toggleLiveExecPill(this)">5m</span>
+          <span class="pair-pill active" data-pair="SOL-USDT" data-tf="15m" onclick="toggleLiveExecPill(this)">15m</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px"><span style="width:48px;font-weight:700;font-size:0.8rem">XRP</span>
+          <span class="pair-pill active" data-pair="XRP-USDT" data-tf="5m" onclick="toggleLiveExecPill(this)">5m</span>
+          <span class="pair-pill active" data-pair="XRP-USDT" data-tf="15m" onclick="toggleLiveExecPill(this)">15m</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px"><span style="width:48px;font-weight:700;font-size:0.8rem">BNB</span>
+          <span class="pair-pill active" data-pair="BNB-USDT" data-tf="5m" onclick="toggleLiveExecPill(this)">5m</span>
+          <span class="pair-pill active" data-pair="BNB-USDT" data-tf="15m" onclick="toggleLiveExecPill(this)">15m</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px"><span style="width:48px;font-weight:700;font-size:0.8rem">DOGE</span>
+          <span class="pair-pill active" data-pair="DOGE-USDT" data-tf="5m" onclick="toggleLiveExecPill(this)">5m</span>
+          <span class="pair-pill active" data-pair="DOGE-USDT" data-tf="15m" onclick="toggleLiveExecPill(this)">15m</span>
+        </div>
       </div>
     </div>
 
@@ -1020,7 +1038,7 @@ input[type=number]:focus{border-color:var(--accent)}
           <option value="GTC">Limit (GTC) — rests on the book until filled or cancelled</option>
           <option value="FOK">Market (FOK) — fills immediately in full, or not at all</option>
         </select>
-        <div class="form-hint">Max Contract Price above still applies either way — for Market orders it's the worst price you'll accept, not a target.</div>
+        <div class="form-hint">Market orders ignore this cap entirely — they spend the full position size at whatever price is available, prioritizing execution over price. This cap only applies to Limit (GTC) orders.</div>
       </div>
 
     </div>
@@ -1599,9 +1617,11 @@ function setAllPairPills(active) {
 // toggle on this page now.
 function toggleLiveExecPill(el) { el.classList.toggle('active'); saveSettings(); }
 function getDisabledPairs() {
+  // Keys are "SYMBOL:timeframe" (e.g. "BTC-USDT:5m") now that live
+  // execution can be toggled independently per timeframe, not just per pair.
   return Array.from(document.querySelectorAll('#live-exec-pills .pair-pill'))
     .filter(el => !el.classList.contains('active'))
-    .map(el => el.dataset.pair);
+    .map(el => `${el.dataset.pair}:${el.dataset.tf}`);
 }
 
 // ── Date range: presets fill From/To; editing From/To directly = custom ────
@@ -1906,12 +1926,12 @@ function applySettingsUI() {
   // PairLadder instead), so reading them here would show frozen, stale
   // numbers rather than the real current state.
 
-  // Live Execution per Pair — a pill is "active" (live-enabled) unless its
-  // pair is in no_execute_pairs.
+  // Live Execution per Pair+Timeframe — a pill is "active" (live-enabled)
+  // unless its "SYMBOL:timeframe" key is in no_execute_pairs.
   let _disabledPairs = [];
   try { _disabledPairs = JSON.parse(s.no_execute_pairs || '[]'); } catch(e) {}
   document.querySelectorAll('#live-exec-pills .pair-pill').forEach(el => {
-    el.classList.toggle('active', !_disabledPairs.includes(el.dataset.pair));
+    el.classList.toggle('active', !_disabledPairs.includes(`${el.dataset.pair}:${el.dataset.tf}`));
   });
 
   const ps = s.position_size||10;
@@ -2117,14 +2137,14 @@ function updateOrderTypeHints() {
   const ltlHint = ltlSel ? ltlSel.closest('.form-group').querySelector('.form-hint:last-child') : null;
   if (ltlSel && ltlHint) {
     ltlHint.textContent = ltlSel.value === 'FOK'
-      ? 'Market order: fills immediately in full at up to this price, or is cancelled entirely — no resting, no partial fills.'
+      ? 'Market order: spends the full position size at whatever price is available, ignoring the price cap above — prioritizes execution over price.'
       : 'Limit order: rests on the book at this price until filled or cancelled — may not fill at all if the market never reaches it.';
   }
   const polySel = document.getElementById('inp-poly-order-type');
   const polyHint = document.getElementById('poly-price-hint');
   if (polySel && polyHint) {
     polyHint.textContent = polySel.value === 'FOK'
-      ? 'Market order: fills immediately in full at up to this price, or is cancelled entirely — no resting, no partial fills.'
+      ? 'Market order: spends the full position size at whatever price is available, ignoring the price cap above — prioritizes execution over price.'
       : 'GTC limit price cap (0.50 = never buy above 50¢) — may not fill at all if the market never reaches it.';
   }
 }

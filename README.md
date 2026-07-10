@@ -1,122 +1,180 @@
-# ⚡ Candle Oracle — 15m Prediction Market Bot
+# ⚡ Candle Oracle — Deterministic V2 Prediction Market Bot
 
-ML-powered 15-minute candlestick direction bot for BTC, ETH, SOL, XRP, BNB, DOGE.
-Signals delivered via Telegram. Executes on **Limitless Exchange** (primary) and
-optionally **Polymarket** (secondary, independent balance) simultaneously, with a
-martingale staking ladder gated on confirmed, real fills rather than assumed ones.
+Rule-based, walk-forward-validated 5-minute and 15-minute candlestick direction
+bot for BTC, ETH, SOL, XRP, BNB, DOGE. Signals delivered via Telegram. Executes
+on **Limitless Exchange** and optionally **Polymarket** (independent balance),
+**in parallel** — every pair that qualifies on either timeframe fires its own
+independent order, not a single "best signal" pick.
 
 ---
 
 ## 📊 How It Works
 
-### Signal Engine
-- Fetches 15m OHLCV candles from **OKX Spot** for 6 pairs
-- Computes 40 technical indicators (RSI, MACD, Stochastic, BB, ADX, Williams %R, CCI, etc.)
-- Runs a **Random Forest + Gradient Boosting ensemble**
-- **Anti-spam**: only fires the single best signal per 15-minute candle (highest confidence across all 6 pairs)
-- Per-pair confidence thresholds and tiering live in `PAIR_CONFIG` (`signal_engine.py`)
+### Signal Engine — no ML, fully deterministic (`signal_engine.py`)
+The ML ensemble (Random Forest + Gradient Boosting, 40 technical indicators,
+4-hourly retraining) has been **removed entirely** and replaced with a much
+simpler, rule-based engine — every part of it was chosen because it was the
+specific thing that survived extensive backtesting and walk-forward
+validation (tuned on historical data, tested blind on unseen months), not
+because it seemed reasonable in the abstract.
+
+**Method — peek, don't forecast:** decide using the first few minutes of
+*realized* price action inside the candle that just opened, resolve against
+that same candle's own open/close.
+- **5-minute candles:** peek = first 1-minute bar (decide ~1 min in)
+- **15-minute candles:** peek = first 3-minute bar (decide ~3 min in)
+
+**Qualification — magnitude only:** a candidate fires if `|early move| >=`
+a per-pair, per-timeframe threshold (see `MAG_THRESHOLD` in
+`signal_engine.py`). Multi-pair agreement and early-candle volume were both
+tested extensively and dropped — neither added measurable win-rate value,
+they only cut real signal volume.
+
+**Backtested performance** (walk-forward: tuned on part of the historical
+sample, validated blind on a held-out later period):
+- 5-min combined (6 pairs): ~30 signals/day, ~87-88% win rate
+- 15-min combined (6 pairs): ~47 signals/day, ~83-85% win rate
+
+### Parallel, Not Single-Pick
+Every pair that qualifies, on **both** timeframes, fires its own independent
+order attempt every tick — this is not a "pick the single best signal
+system-wide" design. Multiple pairs (and both timeframes) can hold open
+positions at the same time. Each `(symbol, timeframe, venue)` stream is
+gated by its own breaker, independently — there is deliberately no shared
+global streak counter: pooling many independent streams into one shared
+sequential ladder was measured to produce a realistic worst-case loss streak
+around **14**, versus **~3-4** for each stream kept independent. See
+`models.py` → `PairLadder`.
+
+### The Breaker (per `symbol` + `timeframe` + `venue`)
+State lives in the `PairLadder` table — one row per stream, tracking
+`consecutive_losses` and `cooldown_until`.
+- A **win** resets the counter to 0 and clears any cooldown.
+- After **3 consecutive real losses**, the stream pauses. New signals for
+  that exact stream are skipped until:
+  1. `cooldown_until` has passed (`COOLDOWN_BARS` = 8 native bars of that
+     timeframe — 40 min for 5m, 2h for 15m), **and**
+  2. the next candidate's magnitude clears `base_threshold × REARM_MULT`
+     (1.5×) — a stricter re-entry bar using magnitude, the one feature
+     that's actually predictive.
+- This does **not** mathematically guarantee a hard cap of 3 in live trading
+  — nothing can, without seeing the future. Walk-forward validation showed
+  the worst realized streak on any single stream was 4, occurring rarely.
+
+`consecutive_losses` also drives **martingale position sizing** for that
+exact stream — the same counter serves both purposes, looked up against
+`Settings.martingale_sequence` / `poly_martingale_sequence`.
 
 ### Signal Timing
-- **:00, :15, :30, :45 UTC** — signal evaluated at candle open, orders placed
-- **:00, :15, :30, :45 UTC (+0s)** — `job_resolve_outcomes` fires at the exact candle boundary
-- **+20s, repeating** — `job_reconcile_resolutions` re-checks anything that had to fall back to OKX and corrects it once the venue's own resolution is actually in (see **Outcome Resolution** below)
-- Win/Loss is only counted once a candle has fully closed
+- **GENERATE** fires every minute, checking **both** timeframes every time.
+  `signal_engine.get_signal_for_symbol_tf`'s peek-bar boundary-alignment
+  check is what actually makes each timeframe "fire" only once per its own
+  candle — a single every-minute schedule serves 5m (peek=1min) and 15m
+  (peek=3min) at once without needing two separately-offset cron triggers.
+- **RESOLVE** fires every 5 minutes at `:00/:05/:10.../:55` — 15-min candle
+  closes are a subset of every-5-min boundaries, so one schedule catches
+  both timeframes.
+- **RECONCILE** fires every 20s, independent of both — re-checks any signal
+  that had to fall back to OKX and corrects the record once the venue's own
+  (Chainlink-backed) resolution actually lands.
+- Generate and resolve are **fully decoupled** (no shared tick, no ordering
+  dependency) — a big change from the old single-timeframe design where
+  they raced each other on the same `:00/:15/:30/:45` boundary.
 
-### Order Execution — two independent venues
+### Duplicate-Signal Protection
+Two independent checks, not one:
+1. Never create a second signal row for the exact same
+   `(symbol, timeframe, candle_open_time)`.
+2. **Never fire a new signal for a stream while a previous one for that
+   exact `(symbol, timeframe)` is still PENDING**, regardless of
+   `candle_open_time`. Under normal timing this can't happen — resolve
+   always runs before the next candle's peek bar becomes actionable — but
+   if resolution is ever delayed (an OKX hiccup, a slow platform response),
+   this is what stops a second real order from being placed on top of a
+   still-open first one.
+
+### Order Execution — two independent venues, two order types each
 | | Limitless | Polymarket |
 |---|---|---|
 | Role | Primary | Secondary, opt-in |
-| Order type | GTC limit | GTC limit |
-| Contract price cap | ≤ $0.50 | configurable, default ≤ $0.50 |
-| Position sizing | Martingale ladder | Flat (independent balance) — optional toggle to scale with the same ladder shape |
+| Order types | **GTC** (limit) or **FOK** (market) — your choice, independent per venue | Same |
+| Contract price cap | ≤ $0.50, **GTC only** | Configurable, default ≤ $0.50, **GTC only** |
+| Position sizing | Independent martingale ladder per `(symbol, timeframe)` | Same, fully independent from Limitless's |
 | Collateral | On-chain wallet | pUSD (CLOB V2) |
 
-Both venues can run at once from the same signal, each with its own credentials,
-balance, and fill/outcome tracking (see the **Limitless** and **Polymarket**
-dashboard pages).
+**Order type choice (Settings → Execution Method, per venue):**
+- **GTC (limit)** — rests on the book at your price cap until filled or
+  cancelled. May not fill at all if the market never reaches your price.
+- **FOK (market)** — fills immediately in full at whatever price is
+  available, or the whole order is cancelled (no partial fills, never
+  rests). **Ignores the price cap entirely** — spends exactly your
+  configured position size, prioritizing execution certainty over price.
+  The on-chain order struct still requires a `takerAmount` field even for
+  FOK (it's not optional at the wire level); this is set to the smallest
+  representable unit so it's trivially satisfied at any real execution
+  price — that's what "no price floor" means mechanically.
+  ⚠️ Limitless's FOK path has not been live-tested against their API from
+  this codebase — the request/response for the first few live FOK orders
+  is logged in full so the actual fill can be checked by hand against
+  Limitless's own order history before trusting it at size. Polymarket's
+  FOK behavior is confirmed directly against their own documentation
+  (makerAmount/takerAmount apply uniformly across GTC/FOK/GTD).
 
-### Martingale — two fully independent ladders, each gated on confirmed fills
-Limitless and Polymarket each run their **own** martingale ladder — own
-sequence, own loss cap, own streak (`martingale_streak` / `poly_martingale_streak`).
-They are deliberately not coupled: different accounts, different balances,
-different liquidity. GTC limit orders can go completely unfilled or only
-partially fill if the limit price is tight relative to available liquidity,
-so each ladder only advances (on a loss) or resets (on a win) when *that
-venue's own trade* is confirmed **filled** above its **Fill Threshold**
-(Settings, default 95%) — below that, including a partial fill, the streak
-freezes and the same stake fires again next candle rather than silently
-mis-tracking the ladder. Every trade's exact fill ratio and dollar amount are
-recorded per venue (`fill_ratio`/`poly_fill_ratio`, `filled_usd`/`poly_filled_usd`),
-not just a filled/unfilled boolean. Either streak can be manually reset to 0
-from its own settings page at any time.
+Both venues can run at once from the same signal, each with its own
+credentials, balance, and fill/outcome tracking.
 
-### Outcome Resolution — venue-native, not OKX-only
-Each venue resolves its own markets against its own oracle price feed
-(both Limitless and Polymarket now settle their short-duration crypto markets
-against **Chainlink Data Streams** — Limitless migrated from Pyth to
-Chainlink; Polymarket's 15-min crypto markets have used Chainlink from the
-start). That can
-occasionally differ from OKX's own candle open/close, since they're reading
-different feeds on different timing. Outcomes are resolved from **the venue's
-own result** (`winningOutcomeIndex` for Limitless) whenever available, with
-OKX used only as a fallback and always shown side-by-side (`okx_outcome`) for
-comparison. A "Resolve via Limitless" toggle exists to force OKX-only behavior
-if you ever want it.
+### Order Placement Safety
+Retries only happen on a **clean rejection** (the exchange received the
+request and explicitly said no — safe to retry, nothing was placed). A
+**network timeout or connection error** is treated as genuinely ambiguous —
+we don't know whether the server processed the signed order before the
+connection dropped, and blindly retrying could place a second real order for
+the same intended position. Ambiguous failures stop immediately and log
+critically for manual review instead of auto-retrying.
 
-In practice, a venue's resolution can take longer to actually publish than the
-few seconds `job_resolve_outcomes` can afford to wait without delaying the next
-candle's signal — `job_reconcile_resolutions` runs independently every 20s and
-corrects any signal that had to fall back to OKX once the real answer lands,
-without touching a martingale decision that's already been made. The dashboard
-distinguishes **⏳ fallback** (routine — venue hadn't answered yet, self-corrects
-shortly) from a genuine **🔀 confirmed disagreement** (rare — the venue's real
-result and OKX's candle actually differ) — these used to show as the same icon,
-which is why the fallback case could look alarming even when nothing was wrong.
+### Outcome Resolution — venue-native first, OKX as fallback only
+Each venue resolves its own markets against its own oracle price feed (both
+Limitless and Polymarket settle their short-duration crypto markets against
+**Chainlink** internally — Limitless via Chainlink Data Streams since
+migrating from Pyth). Outcomes are resolved from **the venue's own result**
+whenever available; OKX (USDT-quoted, the same reliable feed signal
+generation reads) is used only as a fallback for BNB/DOGE specifically (not
+on the free Chainlink relay this bot uses) or when a venue hasn't published
+its result within the poll window.
 
-### Per-Pair Live Execution
+Direct, authenticated access to Chainlink Data Streams' own REST/WebSocket
+API is a **paid, credentialed product** (API key + secret issued by
+Chainlink directly, HMAC-signed requests) — there is no free public way to
+query it. `chainlink_feed.py` instead piggybacks on Polymarket's own public
+real-time data relay (no auth needed), which covers BTC/ETH/SOL/XRP but not
+BNB/DOGE. If real Chainlink Data Streams credentials are ever obtained, this
+can be replaced with a direct, authenticated integration covering all six
+pairs.
+
+The native-resolution poll budget was widened substantially (from ~4-6
+seconds to ~18 seconds per platform) since resolve no longer needs to stay
+fast to avoid blocking generate — the old tight budget was the main reason
+`resolution_source` showed `OKX_FALLBACK` far more often than necessary.
+`job_reconcile_resolutions` remains as a safety net for genuinely slow
+outliers, re-checking every 20s and correcting the record (never
+retroactively touching a martingale decision already made).
+
+### Live Execution per Pair — per timeframe now, not just per pair
 Settings → **Live Execution per Pair** lets you enable/disable live order
-placement per pair without touching code. A disabled pair still generates
-signals and feeds its per-pair stats/ML tuning — it just skips placing a real
-order on either venue. Useful for keeping a pair's signal quality under
-observation before trusting it with real stake.
+placement independently for **each pair's 5m and 15m stream separately**
+(e.g. BTC 5m live while BTC 15m stays signal-only) — 12 toggles, not 6. A
+disabled stream still generates signals and feeds its per-pair stats; it
+just skips placing a real order. Every toggle across the whole Settings page
+now **saves immediately** on click — no separate Save step required.
 
-### Platform-Native Entry/Close Prices
-The Signal Log's `open_price`/`close_price` stay OKX-sourced — that's the
-ML signal's own basis. Separately, each venue's own dashboard page shows
-**that venue's own** entry and close price, sourced from Chainlink Data
-Streams (the oracle both venues actually settle against) rather than OKX —
-`limitless_open_price`/`limitless_close_price` and
-`poly_open_price`/`poly_close_price`. Limitless's open price comes directly
-from the market's own `metadata.openPrice`; close prices for both venues, and
-Polymarket's open price, come from a shared Chainlink fetch (`chainlink_feed.py`)
-covering BTC/ETH/SOL/XRP — Polymarket doesn't currently offer these 15-min
-markets for BNB/DOGE, so those two pairs don't have a Chainlink figure to show here.
-
-### Best-Dip Tracking (both venues)
-`best_entry_pct` (Limitless) and `poly_best_entry_pct` (Polymarket) record the
-best (lowest) GTC limit price seen on that venue's own orderbook during the
-candle, tracked continuously in the background — useful for calibrating how
-tight a limit price a pair's liquidity can actually support.
-
-### Continuous Fill Monitoring + Pending Trade Log
-Both the Limitless and Polymarket dashboard pages show a live **Pending
-Trade** card for whatever signal is currently in flight — its entry/close
-price and current fill status on that specific venue. Fill status isn't only
-checked once at resolve time: a background job re-checks every ~15s for as
-long as a signal is pending, so "is my order filled yet" is visible in real
-time rather than only after the candle closes.
-
-### Duplicate-Position Guard (Polymarket)
-Before placing a Polymarket order, the bot checks whether a position already
-exists for that exact 15-min market (by slug) and refuses to open a second
-one if so — a safety net against a scheduler overlap or manual retrigger
-resulting in two open positions on the same signal.
-
-### Signal Tiers
-| Tier | Condition | Notes |
-|------|-----------|-------|
-| T1 (High) | ML confidence ≥ threshold + volume spike >1.5× | Rarer, historically higher win rate |
-| T2 (Standard) | ML confidence ≥ threshold | Most signals |
+### What Got Removed
+Family rotation and directional saturation (features of the old
+single-pick-per-candle scheduler design) don't apply to the parallel
+architecture — there's no single "last signal" to rotate away from when
+every qualifying pair fires independently. The old global 2-loss cooldown
+and the old single shared martingale streak are superseded entirely by
+`PairLadder`'s independent per-stream accounting. ML retraining is gone —
+there's no model to retrain.
 
 ---
 
@@ -133,7 +191,10 @@ resulting in two open positions on the same signal.
 3. Add each env var below under the service's **Environment** tab
 4. Deploy — first build takes ~3–5 minutes
 
-Either way, the dashboard is served from the deployed app's root URL.
+Either way, the dashboard is served from the deployed app's root URL. The
+new `PairLadder` table and the `Signal.timeframe` / `Settings.*_order_type`
+columns are created/migrated automatically on next boot — no manual DB
+migration step needed.
 
 ---
 
@@ -181,36 +242,37 @@ Either way, the dashboard is served from the deployed app's root URL.
 |---|---|
 | Mode | Live / Shadow |
 | Position Size | Limitless stake, $1–$1,000 |
-| Martingale | On/Off — stake ladder on confirmed losses |
+| Martingale | On/Off — stake ladder on confirmed losses, per `(symbol, timeframe)` stream |
 | Martingale Sequence | Comma-separated stakes per loss step |
 | Loss Cap | Consecutive losses before a hard reset to the base stake |
-| Max Contract Price | ≤ $0.50 |
-| Family Rotation | Excludes the last signal's pair family from the next candle |
-| Live Execution per Pair | Per-pair on/off for real order placement (signals still generate either way) |
+| Max Contract Price | ≤ $0.50 — **applies to GTC orders only**, ignored entirely by FOK |
+| Execution Method | **GTC** (limit) or **FOK** (market), independent choice per venue |
+| Live Execution per Pair | On/off for real order placement, **independently per pair AND per timeframe** (12 toggles) |
 | Stop Loss | Halts new trades once balance reaches a set floor |
+| All toggles save immediately on click | No separate "Save" step |
 
 ### Limitless page
 | Setting | Description |
 |---|---|
-| Resolve via Limitless | Use Limitless's own result as source of truth (default on); off = OKX-only |
 | Fill Threshold | Minimum % filled to count as a complete trade for the martingale ladder |
-| Reset Streak | Manually zero the Limitless streak without waiting for a win or the cap |
-| Pending Trade | Live entry/close price + fill status for whatever signal is currently in flight on Limitless |
+| Reset Streak | Manually zero a stream's ladder without waiting for a win or the cap |
+| Pending Trade | Live entry/close price + fill status for in-flight signals |
 | Connection status | Signer/maker address, auth readiness |
-| Recent Fill Quality | Today's FILLED / PARTIAL / UNFILLED counts |
 
 ### Polymarket page
 | Setting | Description |
 |---|---|
 | Trade on Polymarket | Master on/off for this venue |
 | Position Size / Max Contract Price | Independent of Limitless |
-| Polymarket Martingale | Its own independent ladder — own sequence, cap, and streak, gated on Polymarket's own confirmed fills/outcomes. Not coupled to Limitless's. |
+| Polymarket Martingale | Its own independent ladder per `(symbol, timeframe)` stream |
 | Fill Threshold | Same concept as Limitless, tracked independently |
-| Reset Streak | Manually zero the Polymarket streak without waiting for a win or the cap |
-| Pending Trade | Live entry/close price + fill status for whatever signal is currently in flight on Polymarket |
 | Wallet & Signature Type | Signer/funder addresses, signature type, L2 key status, heartbeat status |
-| Server Region Check | Confirms this server's own outbound IP isn't geo-blocked by Polymarket — a blocked region and a bad credential can both surface as the same 401 |
 | Balance | pUSD + POL (gas), on-chain, with automatic RPC fallback |
+
+### Dashboard — Active Streaks & Cooldowns panel
+Live, per-`(symbol, timeframe, venue)` breakdown of current streak and any
+active cooldown — this is the real, current state (`PairLadder`), not the
+old frozen global counters.
 
 ---
 
@@ -219,16 +281,16 @@ Either way, the dashboard is served from the deployed app's root URL.
 ```
 candle-oracle/
 ├── app.py                  # Flask app + all API routes
-├── wsgi.py                 # Gunicorn entrypoint
-├── main.py                  # Fallback entrypoint (identical to wsgi.py)
+├── wsgi.py                 # Gunicorn entrypoint (production)
+├── main.py                 # Fallback entrypoint (identical to wsgi.py)
 ├── extensions.py           # db + socketio instances
-├── models.py                # SQLAlchemy DB models
-├── signal_engine.py         # OKX data fetch + ML signal generation
-├── limitless_executor.py    # Limitless order placement, fill checks, resolution (live + shadow)
-├── polymarket_executor.py   # Polymarket CLOB V2 order placement, fill checks, resolution (live + shadow)
-├── chainlink_feed.py         # Shared Chainlink price fetch (both platforms settle against it) — entry/close prices
+├── models.py                # SQLAlchemy DB models (Signal, PairLadder, Settings, ...)
+├── signal_engine.py         # Deterministic V2 signal engine — no ML, see "How It Works"
+├── limitless_executor.py    # Limitless order placement (GTC/FOK), fill checks, resolution (live + shadow)
+├── polymarket_executor.py   # Polymarket CLOB V2 order placement (GTC/FOK), fill checks, resolution (live + shadow)
+├── chainlink_feed.py         # Chainlink close-price fetch via Polymarket's public relay (BTC/ETH/SOL/XRP only)
 ├── telegram_bot.py          # Telegram notifications
-├── scheduler.py              # APScheduler jobs: generate, resolve, reconcile, daily summary, retrain
+├── scheduler.py              # APScheduler jobs: generate (1min), resolve (5min), reconcile (20s), daily summary
 ├── templates/
 │   └── index.html           # Dashboard UI (Dashboard/Signals/History/Shadow/Limitless/Polymarket/Settings)
 ├── requirements.txt
@@ -242,70 +304,124 @@ candle-oracle/
 
 ## ⚠️ Important Notes
 
-- **Start in Shadow mode** and run for a while before switching live — shadow mode now mirrors real venue resolution (both Limitless and Polymarket), not just a simulated coin-flip, so it's a genuine preview of live performance.
-- ML models retrain automatically every 4 hours (02:05, 06:05, 10:05, 14:05, 18:05, 22:05 UTC).
-- SQLite works for light usage; for anything serious, set `DATABASE_URL` to a Postgres connection string.
-- Polymarket's CLOB V2 requires a background heartbeat to keep resting orders alive — this starts automatically at boot once `POLYMARKET_PRIVATE_KEY` is set; no action needed, but if you ever see orders vanishing shortly after being placed, check the Polymarket page's heartbeat status first.
-- `/api/debug-resolution?signal_id=<id>` — inspect the raw Limitless/order-status response for a specific signal, useful if a fill or outcome ever looks wrong.
+- **Start in Shadow mode** and run for a while before switching live —
+  shadow mode discovers real market slugs and mirrors real venue resolution
+  (both Limitless and Polymarket), so it's a genuine preview of live
+  performance, not a simulated coin-flip.
+- No ML retraining — the deterministic engine has fixed, walk-forward-
+  validated thresholds (`signal_engine.MAG_THRESHOLD`). Changing them is a
+  code change, not a scheduled background task.
+- SQLite works for light usage; for anything serious, set `DATABASE_URL` to
+  a Postgres connection string.
+- Polymarket's CLOB V2 requires a background heartbeat to keep resting GTC
+  orders alive — starts automatically at boot once `POLYMARKET_PRIVATE_KEY`
+  is set. FOK orders resolve synchronously and don't depend on it the same
+  way, but starting it is harmless either way.
+- `/api/debug-resolution?signal_id=<id>` — inspect the raw Limitless/order-
+  status response for a specific signal, useful if a fill or outcome ever
+  looks wrong.
+- `/api/stats/ladders` — live `PairLadder` state for all streams (what the
+  dashboard's Active Streaks & Cooldowns panel reads).
 
 ---
 
 ## 📝 Changelog
 
-### v8 — Platform-native pricing, independent Polymarket martingale, best-dip & fill monitoring for both venues
-- **Found and fixed a severe price-parsing bug**: Limitless recently migrated its crypto markets from Pyth to Chainlink. Chainlink-resolved markets return `metadata.openPrice` as an 18-decimal-padded integer string (like a wei value) rather than the plain decimal Pyth markets used — parsing it as a plain float (the old code's behavior) would have been wrong by a factor of ~10^18. Now detected by magnitude and parsed correctly regardless of which oracle a given market used.
-- Added a shared Chainlink price-fetch utility (`chainlink_feed.py`, via Polymarket's public real-time data socket, no auth needed) — both venues now show their **own** entry/close price (BTC/ETH/SOL/XRP; BNB/DOGE aren't on this feed) instead of Limitless's dashboard defaulting to OKX everywhere.
-- **Polymarket now has its own fully independent martingale ladder** — own sequence, own loss cap, own streak, gated on Polymarket's own confirmed fill and Polymarket's own resolved outcome, replacing the old "scale stake with Limitless's ladder" toggle.
-- Added a manual **Reset Streak** action for both venues (Settings / each venue's page) — zero the streak on demand without waiting for a win or the loss cap.
-- Added Polymarket best-dip tracking (`poly_best_entry_pct`), mirroring Limitless's, using Polymarket's own CLOB orderbook for the specific token held (with a guard against the CLOB's known stale "ghost market" snapshot quirk).
-- Added a duplicate-position guard for Polymarket — refuses to open a second position against a market that already has one for the current signal.
-- Added continuous fill monitoring (not just a single check at resolve time) and a live **Pending Trade** card on both venue pages, showing that venue's own entry/close price and current fill status for whatever signal is in flight.
-- Fixed the Polygon balance check silently failing — a single public RPC (`polygon-rpc.com`) is frequently rate-limited for bot traffic; now tries a short fallback list, and `POLYGON_RPC_URL` is documented as recommended (not just optional) for production.
-- Updated pair confidence thresholds: ETH 0.65, SOL 0.67, XRP 0.70, DOGE 0.67 (BTC/BNB unchanged).
-- Confirmed both venues resolve these markets against Chainlink Data Streams (not Pyth) — comments and docs updated accordingly.
+### v10 — Post-deployment fixes: resolution reliability, order safety, market orders
+- **Fixed a migration gap**: `Signal.timeframe` was added to the model but
+  missed the app's explicit column-migration list — `db.create_all()` only
+  creates missing *tables*, never new columns on an existing one, so every
+  query against `signals` was failing outright in production
+  (`UndefinedColumn`). Added to the migration list alongside every other
+  column.
+- **Found and fixed the actual root cause of best-dip tracking and
+  resolution always falling back to OKX**: Limitless's `place_shadow_order`
+  never discovered a market slug (Polymarket's did) — with no slug,
+  `job_track_best_dip` had nothing to query and `job_resolve_outcomes`
+  skipped straight past checking Limitless's own resolution. Fixed to
+  discover the slug synchronously, matching the Polymarket path.
+- Fixed a slug-resolution fallback hardcoded to only ever match 15-minute
+  markets, silently unable to resolve a slug for any 5-minute signal that
+  reached it.
+- **Widened the native-resolution poll budget** (~4-6s → ~18s per platform)
+  — the old short budget existed only because resolve used to share a tick
+  with generate; they're fully decoupled now, so there's no reason to give
+  up on Limitless/Polymarket's own Chainlink-backed resolution quickly and
+  fall to OKX as often as it was.
+- **Fixed a real double-execution risk**: retries previously treated a
+  network timeout/connection error the same as a clean rejection, resubmitting
+  a brand-new signed order without knowing if the first one actually went
+  through. Ambiguous failures now stop immediately and log critically
+  instead of auto-retrying.
+- **Fixed a real duplicate-order gap**: a new signal for a `(symbol,
+  timeframe)` stream could previously fire while a previous one on that
+  exact stream was still PENDING, if resolution was ever delayed. Now
+  explicitly blocked.
+- **Added Market (FOK) order support**, independent choice per venue
+  alongside the existing Limit (GTC): verified against each platform's own
+  documentation (Polymarket: confirmed; Limitless: structurally sound at the
+  wire level, flagged as not yet live-tested). FOK spends exactly the
+  configured position size with no price floor, as a true market order.
+  Fixed the price cap incorrectly still being applied to FOK on first
+  implementation.
+- Fixed the Settings toggle for every on/off control (martingale, per-venue
+  enable, order type, live-execution-per-pair) not persisting — most
+  required a separate manual Save click; two (`use_limitless`/
+  `use_polymarket`) didn't persist at all. All toggles now save immediately.
+  Root cause of a related "selection keeps snapping back" symptom:
+  `Settings.to_dict()` was missing the two new order-type fields entirely,
+  so every save's response silently overwrote the just-made selection back
+  to the default.
+- **Live Execution per Pair is now per-timeframe** (12 toggles instead of
+  6) — a pair's 5m and 15m streams can be enabled/disabled independently.
+- Fixed a `NameError` (stale variable name after a grouping-logic rename)
+  that silently broke the resolve job's websocket push on every run.
+- Fixed a global (not per-signal) fill-monitoring throttle that would only
+  let one of several simultaneously-pending signals actually get checked
+  per cycle — a direct consequence of moving to the parallel architecture
+  that a single shared timestamp didn't account for.
 
-### v7 — Geo-restriction and stale-credential diagnostics
-- Diagnosed persistent Polymarket 401 "Unauthorized/Invalid api key" errors as **Germany being fully blocked by Polymarket** (frontend and API both), confirmed via Polymarket's own help center — not a code/credential bug. Render's available regions (Oregon/Ohio/Virginia/Frankfurt/Singapore) have no viable option for Polymarket's international exchange; Fly.io's Stockholm region does not appear on any restriction list.
-- Added a **Server Region Check** (Polymarket page + `/api/polymarket/geo-check`) that asks Polymarket directly whether the server's own outbound IP is currently blocked, rather than relying on secondhand country lists.
-- Added `l2_source` visibility (env-var-pinned vs. auto-derived this run) to the Polymarket credential status — a credential pinned via `POLYMARKET_API_KEY`/`_SECRET`/`_PASSPHRASE` that was derived while on a blocked host stays stale after moving hosts, since pinned env vars always take priority over re-deriving a fresh one.
-
-### v6 — Resolution reconciliation, SOL live, per-pair execution toggle
-- **Fixed a false-positive "OKX/Limitless disagree" indicator** that was showing on effectively every signal. Root cause: `job_resolve_outcomes` only waits a few seconds for a venue's own resolution before falling back to OKX (it has to stay quick, or it risks delaying the next candle's signal generation) — in production, Limitless routinely took longer than that window, so it was falling back to OKX almost every time, not because the two sources actually disagreed.
-- Added `job_reconcile_resolutions` — a new job running every 20s, independent of the candle boundary, that re-checks recently-fallen-back signals on a much more relaxed budget and corrects the record (for both Limitless and Polymarket) once the venue's real answer is in. Deliberately does not retroactively touch the martingale streak.
-- Widened a thread-join timeout that was actually tighter than the polling work it was waiting on, which could cut off a check that was about to succeed.
-- Dashboard and Telegram now show **⏳ fallback** (routine, self-corrects) separately from a genuine **🔀 confirmed disagreement** (rare) instead of one icon for both.
-- Re-enabled SOL-USDT for live execution (previously signal-only by default).
-- Added a **Live Execution per Pair** toggle to Settings — enable/disable any pair's real order placement without a code change or redeploy.
-
-### v5 — Polymarket CLOB V2 migration, dashboard restructuring, Signal Log filters
-- Full migration to Polymarket's CLOB V2 (breaking, no V1 compatibility): new order struct (dropped `nonce`/`feeRateBps`/`taker`, added `timestamp`/`metadata`/`builder`), new EIP-712 domain, new CTF Exchange V2 / Neg Risk CTF Exchange V2 contract addresses, new pUSD collateral token.
-- Fixed L1 auth to use the correct EIP-712 `ClobAuth` typed-data signature (was signing a plain timestamp string).
-- Fixed auth header names (`POLY_ADDRESS` etc. — underscores, not hyphens).
-- Added universal signature-type support: `0` EOA, `1` POLY_PROXY (Magic Link email/Google login), `2` GNOSIS_SAFE, `3` POLY_1271, each with an independent funder address from the signer.
-- Fixed market discovery — was querying a static, non-existent slug on the wrong API host; now uses the Gamma API with the correct dynamic per-window slug.
-- Added the mandatory heartbeat keepalive V2 requires (resting orders were being silently auto-cancelled without one).
-- Fixed the order-status endpoint (wrong path, wrong status values) and added precise partial-fill detection.
-- Added full Polymarket data parity with Limitless: independent fill-ratio tracking, venue-native outcome resolution, optional martingale-scaling toggle.
-- Fixed the Limitless order-execution retry delay (`discover_slug` was sleeping 30s between attempts instead of the intended 2s — could stall order placement up to 2 minutes right at the moment speed matters most).
-- Restructured the dashboard: dedicated Limitless and Polymarket pages/nav sections instead of one shared settings card.
-- Visual refresh: venue-specific accent colors, tabular-numeral monospace for prices/countdowns, deeper background palette.
-- Signal Log: calendar From/To date-range filtering (capped at today), and pair-combination selection (tap any combination of pairs to see combined win/loss/win-rate for exactly that set, computed server-side across all matching signals).
-
-### v4 — Martingale fill-tracking and outcome-resolution overhaul
-- Replaced fuzzy trade-history matching with the exact order-ID lookup for fill checking, enabling real partial-fill detection (`fill_ratio`, `filled_usd`) instead of a bare filled/unfilled boolean.
-- Added FILLED / PARTIAL / UNFILLED classification with a configurable fill threshold; only a complete fill (above threshold) advances or resets the martingale streak — a partial or zero fill freezes it.
-- Fixed a shadow-mode bug where every simulated trade was treated as "unfilled," permanently freezing the martingale streak in shadow mode.
-- Fixed `limitless_fill` never updating at all when martingale was switched off.
-- Outcome resolution now uses Limitless's own `winningOutcomeIndex` (Chainlink-fed) as the source of truth instead of OKX candles alone, with OKX kept as a fallback and for comparison.
-- Fixed SOL-USDT's outcome being scored against the wrong side — the pair's invert flag (bot buys the opposite of the raw signal) wasn't being accounted for in resolution, only in order placement.
-- Set SOL-USDT's invert flag to `False` (trades the same direction as its signal, like every other pair).
+### v9 — Deterministic V2 rewrite: no ML, parallel execution, dual timeframe
+- **Replaced the entire ML ensemble** (Random Forest + Gradient Boosting, 40
+  indicators, 4-hourly retraining, 1H trend filter, quality-vote filter)
+  with a deterministic, walk-forward-validated magnitude-threshold engine.
+  See "How It Works" above for the full method.
+- **Added 5-minute timeframe support end-to-end** — previously 15-minute
+  only. Both timeframes run from the same signal engine and scheduler,
+  fully independently gated.
+- **Rearchitected from single-pick-per-candle to parallel**: every
+  qualifying pair on both timeframes fires its own order, not one "best
+  signal" system-wide pick. Removed family rotation and directional
+  saturation (both specific to the old single-pick design and meaningless
+  once every pair fires independently).
+- **New `PairLadder` model** — independent martingale streak + breaker
+  cooldown per `(symbol, timeframe, venue)`, replacing the old single
+  global martingale streak and global 2-loss cooldown. A shared/combined
+  streak across all 12 independent streams was measured at a realistic
+  worst case of 14 consecutive losses; kept independent, each stream's
+  worst case was 3-4.
+- Extended both executors' market discovery to accept a `timeframe`
+  parameter (previously hardcoded to 15-minute markets only).
+- Added `timeframe` filtering to the Signal Log (API + dashboard dropdown +
+  a badge on each row).
+- Removed the ML retraining job entirely — nothing to retrain.
 
 ---
 
 ## 🔭 Roadmap / Possible Future Updates
 
-- **Polymarket resolution timing** — the fast-cycling crypto markets appear to resolve automatically and reasonably quickly, but this hasn't been independently confirmed the way Limitless's Chainlink-based resolution was (Polymarket's general-purpose UMA resolution path can take on the order of hours for other market types). The reconciliation job makes this self-correcting either way, but tightening the confidence here would let the fast path rely on it less.
-- **WebSocket-based resolution/fill push** instead of polling, for both venues, if latency ever needs to drop further than polling can reasonably deliver.
-- **Cross-venue martingale unification** — the two ladders are now fully independent by design (see v8). A combined model (e.g. balance-aware sizing across both venues at once) would be a bigger, separate design decision if ever wanted.
-- **Retroactive stats correction** — `job_reconcile_resolutions` corrects a signal's own stored outcome on a genuine disagreement, but doesn't currently re-derive daily aggregate stats or shadow balance for that historical day. Rare enough in practice that it hasn't been a priority, but worth revisiting if it turns out to matter.
-- Postgres-first setup docs (currently SQLite-by-default with Postgres as a documented option via `DATABASE_URL`).
+- **Direct Chainlink Data Streams integration** — would require obtaining
+  real API credentials from Chainlink (paid, contact-to-access) to replace
+  the current free Polymarket-relay workaround, extending Chainlink-sourced
+  close prices to BNB/DOGE (currently OKX-only for those two).
+- **Live-test Limitless FOK orders** at small size and confirm the actual
+  fill behavior matches the wire-level structure this implementation sends.
+- **Historical cooldown/streak event log** — the dashboard's Active Streaks
+  & Cooldowns panel shows live current state; a proper timestamped history
+  of past cooldown trips would need a new events table.
+- **Cross-venue martingale unification** — the two ladders (and now 12
+  independent per-stream ladders per venue) are fully independent by
+  design. A combined, balance-aware sizing model across everything at once
+  would be a bigger, separate design decision if ever wanted.
+- Postgres-first setup docs (currently SQLite-by-default with Postgres as a
+  documented option via `DATABASE_URL`).
