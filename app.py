@@ -1268,6 +1268,172 @@ def create_app():
             return jsonify(result)
         except Exception as e:
             logger.error("[APP] polymarket_derive_key error: %s", e, exc_info=True)
+            return jsonify({"success": False, "error": str(e)})
+
+    @app.route("/api/polymarket/debug", methods=["GET"])
+    def polymarket_debug():
+        """
+        Walks every layer of the Polymarket connection independently and
+        reports the RAW result of each — completely safe, places no real
+        order. Each step runs even if an earlier one fails, so a single
+        broken layer doesn't hide information about the others.
+
+        Steps: env/address setup -> geo-check -> FRESH auth derivation
+        (bypasses any cached credentials, forcing a real round-trip) ->
+        one real heartbeat attempt -> unauthenticated Gamma market lookup
+        (isolates "can we reach Polymarket's network at all" from "is our
+        auth valid", since Gamma needs no credentials).
+        """
+        import time as _t
+        out = {"steps": {}, "diagnosis": None}
+
+        try:
+            from polymarket_executor import (
+                get_signer_address, get_funder_address, get_signature_type,
+                check_geoblock, derive_api_key, send_heartbeat,
+                discover_market, _proxy_status_for_log,
+            )
+
+            # Step 1 — configuration
+            pk_set = bool(os.environ.get("POLYMARKET_PRIVATE_KEY", "").strip())
+            signer = get_signer_address() if pk_set else None
+            sig_type = get_signature_type()
+            funder = get_funder_address()
+            out["steps"]["1_config"] = {
+                "private_key_set": pk_set,
+                "signer_address": signer,
+                "signature_type": sig_type,
+                "signature_type_name": {0: "EOA", 1: "POLY_PROXY", 2: "GNOSIS_SAFE", 3: "POLY_1271"}.get(sig_type, "unknown"),
+                "funder_address": funder,
+                "funder_configured": bool(funder),
+                "proxy_configured": _proxy_status_for_log(),
+            }
+            if not pk_set:
+                out["diagnosis"] = "POLYMARKET_PRIVATE_KEY is not set — nothing else can work until this is."
+                return jsonify(out)
+            if sig_type != 0 and not funder:
+                out["diagnosis"] = (
+                    f"signature_type={sig_type} requires POLYMARKET_FUNDER_ADDRESS, but it's not set. "
+                    "This alone would cause every authenticated call to fail. Set it from "
+                    "polymarket.com/settings and redeploy."
+                )
+                return jsonify(out)
+
+            # Step 2 — geo-check (through proxy if configured)
+            t0 = _t.time()
+            geo = check_geoblock()
+            geo["elapsed_s"] = round(_t.time() - t0, 2)
+            out["steps"]["2_geoblock"] = geo
+            if geo.get("blocked") is True:
+                out["diagnosis"] = (
+                    f"Polymarket reports this IP ({geo.get('ip')}, {geo.get('country')}) as BLOCKED. "
+                    "This is a regional block, not a credential problem — POLYMARKET_PROXY needs to "
+                    "be pointed at an unblocked IP, or the current proxy isn't actually being used "
+                    "(check proxy_configured above)."
+                )
+                return jsonify(out)
+
+            # Step 3 — FRESH auth derivation (bypasses cache entirely)
+            t0 = _t.time()
+            auth = derive_api_key()
+            out["steps"]["3_auth_derivation"] = {**auth, "elapsed_s": round(_t.time() - t0, 2)}
+            if not auth.get("success"):
+                out["diagnosis"] = (
+                    f"Deriving L2 API credentials itself failed: {auth.get('error')}. "
+                    "This happens before any trading-specific call, so nothing downstream can work "
+                    "until this succeeds. If geo-check (step 2) came back clean, this points at the "
+                    "signer/signature_type/funder relationship not being set up correctly on "
+                    "Polymarket's side for this wallet."
+                )
+                return jsonify(out)
+
+            # Step 4 — one real heartbeat attempt with the credentials just derived
+            t0 = _t.time()
+            hb = send_heartbeat()
+            out["steps"]["4_heartbeat"] = {**hb, "elapsed_s": round(_t.time() - t0, 2)}
+
+            # Step 5 — unauthenticated Gamma lookup (isolates network/proxy
+            # reachability from auth validity — needs no credentials at all)
+            t0 = _t.time()
+            mkt = discover_market("BTC-USDT", timeframe="15m")
+            out["steps"]["5_gamma_market_lookup"] = {
+                "found": bool(mkt),
+                "slug": mkt.get("slug") if mkt else None,
+                "elapsed_s": round(_t.time() - t0, 2),
+            }
+
+            # Diagnosis
+            if hb.get("success"):
+                out["diagnosis"] = "Everything succeeded — auth derivation and a real heartbeat both worked. If the scheduler's own heartbeat is still failing, it may be using stale cached credentials from before this fix; a fresh redeploy (not just a secrets update) should pick up a clean cache."
+            elif not out["steps"]["5_gamma_market_lookup"]["found"]:
+                out["diagnosis"] = "Even the unauthenticated Gamma lookup failed — this points at basic network/proxy reachability to Polymarket's infrastructure, not credentials specifically."
+            else:
+                out["diagnosis"] = (
+                    f"Auth derivation (step 3) succeeded, but the heartbeat (step 4) still failed: "
+                    f"{hb.get('error')}. Gamma (unauthenticated) worked, so basic connectivity is fine — "
+                    "this specifically means the derived L2 key isn't accepted for authenticated actions. "
+                    "Check step 3's raw response for what Polymarket actually said about the key it created."
+                )
+            return jsonify(out)
+
+        except Exception as e:
+            logger.error("[APP] polymarket_debug error: %s", e, exc_info=True)
+            out["error"] = str(e)
+            return jsonify(out)
+
+    @app.route("/api/polymarket/test-trade", methods=["POST"])
+    def polymarket_test_trade():
+        """
+        Places ONE real, minimal-size order to verify the full signing +
+        submission pipeline end-to-end — the thing /api/polymarket/debug
+        deliberately does NOT do, since that endpoint is safe-by-design.
+
+        Requires an explicit {"confirm": true} in the POST body — this
+        places a REAL order for REAL money if the account is in live mode.
+        Uses a small fixed $1 test size regardless of configured position
+        size, and defaults to a GTC limit far from the current price
+        (0.02) so it's extremely unlikely to actually fill — the point is
+        verifying the order is ACCEPTED (a real order_id comes back), not
+        completing a trade. Pass {"confirm": true, "order_type": "FOK"} to
+        test a market order instead, which WILL fill if accepted (FOK
+        either fills immediately or is cancelled — there's no resting-far-
+        from-price option for a market order).
+        """
+        data = request.get_json(silent=True) or {}
+        if data.get("confirm") is not True:
+            return jsonify({
+                "success": False,
+                "error": "Refusing to place a real order without explicit confirmation.",
+                "how_to_confirm": 'POST {"confirm": true} to actually run this test. '
+                                  'Optionally add {"symbol": "BTC-USDT", "order_type": "GTC"|"FOK"}.',
+            }), 400
+
+        symbol = data.get("symbol", "BTC-USDT")
+        order_type = data.get("order_type", "GTC")
+        if order_type not in ("GTC", "FOK"):
+            order_type = "GTC"
+
+        try:
+            settings = Settings.query.first()
+            mode = settings.mode if settings else "shadow"
+
+            from polymarket_executor import execute_order
+            test_price = 0.02 if order_type == "GTC" else 0.99  # GTC: far from market, won't fill. FOK: irrelevant, ignored for FOK anyway.
+            logger.warning(
+                "[APP] TEST TRADE requested — symbol=%s order_type=%s mode=%s $1.00",
+                symbol, order_type, mode
+            )
+            result = execute_order(symbol, "UP", mode, 1.00, test_price, timeframe="15m", order_type=order_type)
+            logger.warning("[APP] TEST TRADE result: %s", result)
+            return jsonify({
+                "test_config": {"symbol": symbol, "order_type": order_type, "mode": mode, "size_usd": 1.00},
+                "result": result,
+                "note": ("GTC order placed far from market price (won't fill) — cancel it manually in "
+                         "Polymarket's own UI if you don't want it resting." if order_type == "GTC" and result.get("success")
+                         else "FOK either filled or was cancelled immediately — check Polymarket's order history for the real outcome."),
+            })
+        except Exception as e:
+            logger.error("[APP] polymarket_test_trade error: %s", e, exc_info=True)
             return jsonify({"success": False, "error": str(e)}), 500
 
     @app.route("/api/signals/<int:signal_id>/best_entry", methods=["POST"])

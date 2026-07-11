@@ -323,6 +323,19 @@ candle-oracle/
   looks wrong.
 - `/api/stats/ladders` — live `PairLadder` state for all streams (what the
   dashboard's Active Streaks & Cooldowns panel reads).
+- `/api/polymarket/debug` (GET) — walks every layer of the Polymarket
+  connection independently (config → geo-check → fresh auth derivation →
+  one real heartbeat → unauthenticated Gamma lookup) and reports the raw
+  result of each, with a plain-language diagnosis of which layer actually
+  failed. Completely safe — places no real order.
+- `/api/polymarket/test-trade` (POST, requires `{"confirm": true}` in the
+  body) — places one real $1 order to verify the full signing+submission
+  pipeline end-to-end, the one thing `/debug` deliberately doesn't do.
+  Defaults to a GTC limit priced far from market (won't fill); pass
+  `{"confirm": true, "order_type": "FOK"}` to test a market order instead
+  (will actually execute). **This uses real funds if the account is in
+  live mode — the confirm flag exists specifically so it can't fire by
+  accident.**
 
 ---
 

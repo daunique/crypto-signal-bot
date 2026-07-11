@@ -190,6 +190,14 @@ body{background:
 }
 .pair-pill.active{background:rgba(232,179,57,0.14);border-color:var(--accent);color:var(--accent)}
 .pair-pill:hover{border-color:var(--text3)}
+.poly-diag-btn{
+  width:100%;text-align:left;padding:9px 12px;border-radius:7px;
+  font-size:0.75rem;font-weight:600;cursor:pointer;
+  background:var(--surface2);border:1px solid var(--border);color:var(--text);
+  transition:all 0.15s;
+}
+.poly-diag-btn:hover{background:var(--surface3,rgba(255,255,255,0.04));border-color:var(--poly)}
+.poly-diag-btn:disabled{opacity:0.5;cursor:not-allowed}
 .date-input{background:var(--surface2);border:1px solid var(--border);color:var(--text);
   border-radius:7px;padding:5px 8px;font-size:0.75rem;font-family:var(--mono);color-scheme:dark}
 .combo-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
@@ -921,6 +929,29 @@ input[type=number]:focus{border-color:var(--accent)}
         <div id="poly-derive-result" style="margin-top:6px;font-size:0.68rem;display:none"></div>
       </div>
     </div>
+
+    <div class="card" style="border:1px solid var(--poly-border)">
+      <div class="card-hdr"><span class="card-title" style="color:var(--poly)">🔧 API Diagnostics</span></div>
+      <div class="form-hint" style="margin-bottom:10px">
+        Query any endpoint directly and see the raw response below — useful for debugging without digging through Fly.io logs. Use Copy to grab the full response to share.
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <button class="poly-diag-btn" onclick="callPolyDiag('/api/polymarket/status','GET','Connection Status')">📊 Connection Status</button>
+        <button class="poly-diag-btn" onclick="callPolyDiag('/api/polymarket/geo-check','GET','Geo-Block Check')">🌍 Geo-Block Check</button>
+        <button class="poly-diag-btn" onclick="callPolyDiag('/api/polymarket/balance','GET','Balance')">💰 Balance</button>
+        <button class="poly-diag-btn" onclick="callPolyDiag('/api/polymarket/debug','GET','Full Debug (all layers)')" style="border-color:var(--poly);font-weight:700">🔬 Full Debug — checks every layer</button>
+        <button class="poly-diag-btn" onclick="callPolyDiag('/api/polymarket/derive-key','POST','Derive L2 Key')">🔑 Derive L2 Key</button>
+        <button class="poly-diag-btn" onclick="callPolyTestTrade('GTC')" style="border-color:var(--warn);color:var(--warn)">🧪 Test Trade — GTC ($1, far from market, won't fill)</button>
+        <button class="poly-diag-btn" onclick="callPolyTestTrade('FOK')" style="border-color:var(--loss);color:var(--loss)">⚠️ Test Trade — FOK ($1, WILL execute for real)</button>
+      </div>
+      <div id="poly-diag-result-box" style="display:none;margin-top:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span id="poly-diag-result-label" style="font-size:0.75rem;font-weight:700;color:var(--text2)"></span>
+          <button onclick="copyPolyDiagResult()" style="background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:3px 10px;font-size:0.7rem;color:var(--text);cursor:pointer">📋 Copy</button>
+        </div>
+        <pre id="poly-diag-result-text" style="white-space:pre-wrap;word-break:break-all;max-height:420px;overflow-y:auto;background:var(--surface2);padding:10px;border-radius:6px;font-size:0.68rem;font-family:monospace;margin:0"></pre>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1469,6 +1500,105 @@ async function derivePolyKey() {
     btn.disabled    = false;
     btn.textContent = '🔑 Generate L2 API Key';
   }
+}
+
+// ── API Diagnostics panel ────────────────────────────────────────────────────
+let _polyLastDiagResult = '';
+
+async function callPolyDiag(endpoint, method, label) {
+  const box    = document.getElementById('poly-diag-result-box');
+  const lblEl  = document.getElementById('poly-diag-result-label');
+  const textEl = document.getElementById('poly-diag-result-text');
+  const btns   = document.querySelectorAll('.poly-diag-btn');
+  if (!box || !lblEl || !textEl) return;
+
+  box.style.display = '';
+  lblEl.textContent  = `${label} — loading…`;
+  textEl.textContent = `Calling ${method} ${endpoint} …`;
+  btns.forEach(b => b.disabled = true);
+
+  try {
+    const opts = {method};
+    if (method === 'POST') {
+      opts.headers = {'Content-Type': 'application/json'};
+      opts.body    = '{}';
+    }
+    const r = await fetch(endpoint, opts);
+    const d = await r.json();
+    const pretty = JSON.stringify(d, null, 2);
+    _polyLastDiagResult = pretty;
+    lblEl.textContent  = `${label} — HTTP ${r.status}${r.ok ? ' ✓' : ' ✗'}`;
+    lblEl.style.color  = r.ok ? 'var(--win)' : 'var(--down)';
+    textEl.textContent = pretty;
+  } catch(e) {
+    _polyLastDiagResult = String(e);
+    lblEl.textContent  = `${label} — request failed`;
+    lblEl.style.color  = 'var(--down)';
+    textEl.textContent = String(e);
+  } finally {
+    btns.forEach(b => b.disabled = false);
+    box.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  }
+}
+
+async function callPolyTestTrade(orderType) {
+  const isFok = orderType === 'FOK';
+  const warning = isFok
+    ? '⚠️ This places a REAL $1 market order that WILL execute immediately if your account is in LIVE mode. Real funds will be spent. Continue?'
+    : 'This places a real $1 limit order priced far from the current market (won\'t fill) — just to verify order submission works. Continue?';
+  if (!confirm(warning)) return;
+  if (isFok && !confirm('Confirming again: this is a MARKET order and WILL execute if in live mode. Are you sure?')) return;
+
+  const box    = document.getElementById('poly-diag-result-box');
+  const lblEl  = document.getElementById('poly-diag-result-label');
+  const textEl = document.getElementById('poly-diag-result-text');
+  const btns   = document.querySelectorAll('.poly-diag-btn');
+  box.style.display = '';
+  lblEl.textContent  = `Test Trade (${orderType}) — placing order…`;
+  lblEl.style.color  = 'var(--text2)';
+  textEl.textContent = 'Sending...';
+  btns.forEach(b => b.disabled = true);
+
+  try {
+    const r = await fetch('/api/polymarket/test-trade', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({confirm: true, order_type: orderType}),
+    });
+    const d = await r.json();
+    const pretty = JSON.stringify(d, null, 2);
+    _polyLastDiagResult = pretty;
+    const success = d.result && d.result.success;
+    lblEl.textContent  = `Test Trade (${orderType}) — ${success ? 'order accepted ✓' : 'failed ✗'}`;
+    lblEl.style.color  = success ? 'var(--win)' : 'var(--down)';
+    textEl.textContent = pretty;
+  } catch(e) {
+    _polyLastDiagResult = String(e);
+    lblEl.textContent  = 'Test Trade — request failed';
+    lblEl.style.color  = 'var(--down)';
+    textEl.textContent = String(e);
+  } finally {
+    btns.forEach(b => b.disabled = false);
+    box.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  }
+}
+
+function copyPolyDiagResult() {
+  if (!_polyLastDiagResult) return;
+  navigator.clipboard.writeText(_polyLastDiagResult).then(() => {
+    toast('📋 Copied to clipboard', 'signal');
+  }).catch(() => {
+    // Fallback for browsers/contexts where the Clipboard API is unavailable
+    const ta = document.createElement('textarea');
+    ta.value = _polyLastDiagResult;
+    ta.style.position = 'fixed';
+    ta.style.opacity  = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); toast('📋 Copied to clipboard', 'signal'); }
+    catch(e) { toast('Could not copy — select the text manually', 'loss'); }
+    document.body.removeChild(ta);
+  });
 }
 
 // PAIR COOLDOWN PANEL
