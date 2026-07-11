@@ -21,6 +21,7 @@ per call (typically well under a second) rather than an always-warm feed.
 """
 
 import json
+import os
 import time
 import logging
 
@@ -29,6 +30,37 @@ logger = logging.getLogger(__name__)
 WS_URL = "wss://ws-live-data.polymarket.com"
 
 _CHAINLINK_SYMBOLS = {"BTC", "ETH", "SOL", "XRP"}
+
+# Same proxy env var and format as polymarket_executor.py — this WebSocket
+# endpoint is also Polymarket's own infrastructure, so it's subject to the
+# same potential regional block. See polymarket_executor._get_proxies() for
+# the full reasoning; duplicated here in miniature rather than imported, to
+# keep this module's only dependency (websocket-client) independent of
+# polymarket_executor's much larger surface (web3, eth_account, etc.).
+_PROXY_ENV_VAR = "POLYMARKET_PROXY"
+
+
+def _get_ws_proxy_kwargs() -> dict:
+    """HOST:PORT:USER:PASS -> websocket-client's create_connection kwargs. Empty dict if unset."""
+    raw = os.environ.get(_PROXY_ENV_VAR, "").strip()
+    if not raw:
+        return {}
+    parts = raw.split(":", 3)
+    if len(parts) != 4:
+        logger.error("[CHAINLINK] %s set but not HOST:PORT:USER:PASS — connecting directly.", _PROXY_ENV_VAR)
+        return {}
+    host, port, user, password = parts
+    try:
+        port = int(port)
+    except ValueError:
+        logger.error("[CHAINLINK] %s has a non-numeric port — connecting directly.", _PROXY_ENV_VAR)
+        return {}
+    return {
+        "http_proxy_host": host,
+        "http_proxy_port": port,
+        "http_proxy_auth": (user, password),
+        "proxy_type": "http",
+    }
 
 
 def _ticker_to_chainlink_symbol(symbol: str) -> str | None:
@@ -60,7 +92,7 @@ def get_chainlink_price(symbol: str, timeout: float = 5.0) -> dict:
 
     ws = None
     try:
-        ws = websocket.create_connection(WS_URL, timeout=timeout)
+        ws = websocket.create_connection(WS_URL, timeout=timeout, **_get_ws_proxy_kwargs())
         sub_msg = json.dumps({
             "action": "subscribe",
             "subscriptions": [{

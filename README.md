@@ -224,6 +224,7 @@ migration step needed.
 | `POLYMARKET_SIGNATURE_TYPE` | `0` EOA · `1` POLY_PROXY (Magic Link **email/Google login — the default, and what most accounts use**) · `2` GNOSIS_SAFE (connected browser wallet) · `3` POLY_1271 (new deposit-wallet accounts) |
 | `POLYMARKET_API_KEY` / `POLYMARKET_API_SECRET` / `POLYMARKET_API_PASSPHRASE` | Optional — L2 trading credentials auto-derive on first use and are cached for the process lifetime; set these only to pin a fixed key across restarts |
 | `POLYGON_RPC_URL` | Optional but recommended — a dedicated RPC (Alchemy/Infura/QuickNode free tier). Falls back through a short list of public RPCs if unset, but those are frequently rate-limited for automated/bot traffic. |
+| `POLYMARKET_PROXY` | Optional — routes every Polymarket API call (and the Chainlink relay WebSocket) through a proxy instead of connecting directly. Format: `HOST:PORT:USER:PASS`, the standard format most datacenter/residential proxy providers (IPRoyal, etc.) hand you directly — paste it in as one string, no need to split it up. Use this if `/api/polymarket/geo-check` shows `blocked: true` for your hosting region, or if a persistent 401 on every authenticated call (including the heartbeat) turns out to be a regional block rather than a credential issue — see `/api/polymarket/status` to check. |
 
 > Signed into Polymarket with email or Google? That's signature type 1 — the
 > default. Your **signer** (this private key) and your **funder** (where your
@@ -326,6 +327,24 @@ candle-oracle/
 ---
 
 ## 📝 Changelog
+
+### v11 — Proxy support for geo-blocked Polymarket regions
+- Diagnosed a persistent `401 Unauthorized/Invalid api key` on every
+  Polymarket heartbeat (and, by the same mechanism, every authenticated
+  call) tracing to Polymarket geo-blocking the hosting region's outbound
+  IP — a block that can produce the exact same generic 401 as a genuine
+  credential problem, since it can be enforced before the signature is
+  even checked. Confirmed via the existing `/api/polymarket/geo-check`
+  diagnostic rather than guessed.
+- **Added `POLYMARKET_PROXY` support** — routes every Polymarket API call
+  (auth, heartbeat, orders, market discovery, resolution polling) and the
+  Chainlink relay WebSocket through a proxy instead of connecting
+  directly. Accepts the standard `HOST:PORT:USER:PASS` format most
+  datacenter/residential proxy providers hand you directly. Fully
+  opt-in — unset, everything connects exactly as before.
+- `/api/polymarket/geo-check` and `/api/polymarket/status` now report
+  `proxy_configured` so it's immediately checkable whether a proxy is
+  active, without needing to inspect environment variables directly.
 
 ### v10 — Post-deployment fixes: resolution reliability, order safety, market orders
 - **Fixed a migration gap**: `Signal.timeframe` was added to the model but

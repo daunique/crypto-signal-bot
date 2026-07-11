@@ -112,6 +112,55 @@ GAMMA_BASE   = "https://gamma-api.polymarket.com"
 WWW_BASE     = "https://polymarket.com"
 CHAIN_ID     = 137
 
+# ── Proxy support ─────────────────────────────────────────────────────────────
+# Polymarket geo-blocks some regions/hosting providers at the API level —
+# this can produce the exact same 401 "Unauthorized/Invalid api key" response
+# as a genuine credential problem, since the block can happen before the
+# signature is even checked. If POLYMARKET_PROXY is set, every request to
+# Polymarket's own infrastructure (CLOB_BASE / GAMMA_BASE / WWW_BASE) routes
+# through it instead of connecting directly — including check_geoblock()
+# itself, so the diagnostic reflects the same IP that's actually used for
+# trading, not a different (unproxied) one.
+#
+# Format: "HOST:PORT:USER:PASS" (the standard format most datacenter/
+# residential proxy providers, e.g. IPRoyal, hand you directly — set the
+# whole string as one env var, no need to split it up yourself).
+# Uses split(":", 3) rather than split(":") so a password containing a colon
+# doesn't get truncated.
+#
+# If unset, every request connects directly exactly as before — this is
+# fully opt-in and changes nothing for anyone not using a proxy.
+_PROXY_ENV_VAR = "POLYMARKET_PROXY"
+
+
+def _get_proxies() -> dict | None:
+    raw = os.environ.get(_PROXY_ENV_VAR, "").strip()
+    if not raw:
+        return None
+    parts = raw.split(":", 3)
+    if len(parts) != 4:
+        logger.error(
+            "[POLY:PROXY] %s is set but not in HOST:PORT:USER:PASS format "
+            "(got %d parts, need 4) — connecting directly, unproxied.",
+            _PROXY_ENV_VAR, len(parts)
+        )
+        return None
+    host, port, user, password = parts
+    proxy_url = f"http://{user}:{password}@{host}:{port}"
+    return {"http": proxy_url, "https": proxy_url}
+
+
+def _proxy_status_for_log() -> str:
+    """Safe-to-log summary — never includes the password."""
+    raw = os.environ.get(_PROXY_ENV_VAR, "").strip()
+    if not raw:
+        return "none (direct connection)"
+    parts = raw.split(":", 3)
+    if len(parts) != 4:
+        return "MISCONFIGURED (wrong format)"
+    return f"{parts[0]}:{parts[1]} (user={parts[2]})"
+
+
 CTF_EXCHANGE_V2          = "0xE111180000d2663C0091e4f400237545B87B996B"
 NEG_RISK_CTF_EXCHANGE_V2 = "0xe2222d279d744050d28e00520010520000310F59"
 PUSD_ADDRESS              = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"  # collateral, 6 decimals
@@ -298,10 +347,10 @@ def check_geoblock() -> dict:
     ip(str|None), country(str|None), region(str|None), error(str|None).
     """
     try:
-        resp = requests.get(f"{WWW_BASE}/api/geoblock", timeout=8)
+        resp = requests.get(f"{WWW_BASE}/api/geoblock", timeout=8, proxies=_get_proxies())
         if not resp.ok:
             return {"blocked": None, "ip": None, "country": None, "region": None,
-                    "error": f"HTTP {resp.status_code}"}
+                    "error": f"HTTP {resp.status_code}", "proxy_configured": _proxy_status_for_log()}
         data = resp.json()
         return {
             "blocked": data.get("blocked"),
@@ -309,9 +358,11 @@ def check_geoblock() -> dict:
             "country": data.get("country"),
             "region":  data.get("region"),
             "error":   None,
+            "proxy_configured": _proxy_status_for_log(),
         }
     except Exception as e:
-        return {"blocked": None, "ip": None, "country": None, "region": None, "error": str(e)}
+        return {"blocked": None, "ip": None, "country": None, "region": None, "error": str(e),
+                "proxy_configured": _proxy_status_for_log()}
 
 
 def validate_credentials() -> dict:
@@ -341,6 +392,7 @@ def validate_credentials() -> dict:
         "l2_ready":                  bool(l2),
         "l2_source":                 l2_source,  # 'env' (pinned) | 'cache' (auto-derived this process) | 'none'
         "heartbeat_active":          bool(_heartbeat_thread and _heartbeat_thread.is_alive()),
+        "proxy_configured":          _proxy_status_for_log(),
     }
 
 
@@ -536,7 +588,7 @@ def derive_api_key(nonce: int = 0) -> dict:
     # 1. Try deriving existing credentials first (read-only, no side effects)
     try:
         headers = _build_l1_headers(nonce)
-        resp = requests.get(f"{CLOB_BASE}/auth/derive-api-key", headers=headers, timeout=15)
+        resp = requests.get(f"{CLOB_BASE}/auth/derive-api-key", headers=headers, timeout=15, proxies=_get_proxies())
         logger.info("[POLY:AUTH] GET /auth/derive-api-key → %d", resp.status_code)
         if resp.ok:
             found = _extract(resp.json())
@@ -550,7 +602,7 @@ def derive_api_key(nonce: int = 0) -> dict:
     try:
         body_str = json.dumps({"nonce": nonce}, separators=(",", ":"))
         headers  = _build_l1_headers(nonce)
-        resp = requests.post(f"{CLOB_BASE}/auth/api-key", headers=headers, data=body_str, timeout=15)
+        resp = requests.post(f"{CLOB_BASE}/auth/api-key", headers=headers, data=body_str, timeout=15, proxies=_get_proxies())
         logger.info("[POLY:AUTH] POST /auth/api-key → %d", resp.status_code)
         if not resp.ok:
             return {"success": False, "error": f"HTTP {resp.status_code}: {resp.text[:400]}"}
@@ -620,7 +672,7 @@ def _build_headers(method: str, path: str, body: str = "") -> dict:
 def send_heartbeat() -> dict:
     try:
         headers = _build_headers("POST", "/heartbeats", "")
-        resp = requests.post(f"{CLOB_BASE}/heartbeats", headers=headers, data="", timeout=8)
+        resp = requests.post(f"{CLOB_BASE}/heartbeats", headers=headers, data="", timeout=8, proxies=_get_proxies())
         if resp.ok:
             return {"success": True, "status": resp.json().get("status")}
         return {"success": False, "error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
@@ -658,7 +710,8 @@ def start_heartbeat_thread(interval_s: float = 5.0) -> bool:
 
         _heartbeat_thread = threading.Thread(target=_loop, daemon=True, name="poly-heartbeat")
         _heartbeat_thread.start()
-        logger.info("[POLY:HEARTBEAT] started — beating every %.1fs so GTC orders survive", interval_s)
+        logger.info("[POLY:HEARTBEAT] started — beating every %.1fs so GTC orders survive | proxy=%s",
+                   interval_s, _proxy_status_for_log())
         return True
 
 
@@ -722,7 +775,7 @@ def discover_market(symbol: str, timeframe: str = "15m") -> dict | None:
 def _fetch_gamma_market_by_slug(slug: str) -> dict | None:
     """Tries /events?slug= first (typical wrapping for these markets), then /markets?slug= directly."""
     try:
-        resp = requests.get(f"{GAMMA_BASE}/events", params={"slug": slug}, timeout=10)
+        resp = requests.get(f"{GAMMA_BASE}/events", params={"slug": slug}, timeout=10, proxies=_get_proxies())
         if resp.ok:
             data   = resp.json()
             events = data if isinstance(data, list) else data.get("data", []) or []
@@ -734,7 +787,7 @@ def _fetch_gamma_market_by_slug(slug: str) -> dict | None:
         logger.info("[POLY] gamma /events?slug=%s error: %s", slug, e)
 
     try:
-        resp = requests.get(f"{GAMMA_BASE}/markets", params={"slug": slug}, timeout=10)
+        resp = requests.get(f"{GAMMA_BASE}/markets", params={"slug": slug}, timeout=10, proxies=_get_proxies())
         if resp.ok:
             data    = resp.json()
             markets = data if isinstance(data, list) else data.get("data", []) or []
@@ -1022,7 +1075,7 @@ def place_live_order(
         return {"success": False, "error": str(e)}
 
     try:
-        resp = requests.post(f"{CLOB_BASE}/order", headers=headers, data=body_str, timeout=15)
+        resp = requests.post(f"{CLOB_BASE}/order", headers=headers, data=body_str, timeout=15, proxies=_get_proxies())
         logger.info("[POLY:%s] POST /order → %d: %s", symbol, resp.status_code, resp.text[:500])
 
         if not resp.ok:
@@ -1143,7 +1196,7 @@ def get_order_status(order_id: str) -> dict:
         return {"found": False, "status": "SHADOW", "error": "shadow order"}
     try:
         headers = _build_headers("GET", f"/data/order/{order_id}")
-        resp    = requests.get(f"{CLOB_BASE}/data/order/{order_id}", headers=headers, timeout=10)
+        resp    = requests.get(f"{CLOB_BASE}/data/order/{order_id}", headers=headers, timeout=10, proxies=_get_proxies())
         logger.info("[POLY:ORDER-STATUS] GET /data/order/%s → %d", order_id, resp.status_code)
         if resp.status_code == 404:
             return {"found": False, "status": "NOT_FOUND", "error": "order not found"}
@@ -1251,7 +1304,7 @@ def get_market_resolution(condition_id: str = None, slug: str = None) -> dict:
         if slug:
             market = _fetch_gamma_market_by_slug(slug)
         elif condition_id:
-            resp = requests.get(f"{GAMMA_BASE}/markets", params={"condition_ids": condition_id}, timeout=8)
+            resp = requests.get(f"{GAMMA_BASE}/markets", params={"condition_ids": condition_id}, timeout=8, proxies=_get_proxies())
             data = resp.json() if resp.ok else []
             markets = data if isinstance(data, list) else data.get("data", []) or []
             market = markets[0] if markets else None
