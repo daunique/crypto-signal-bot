@@ -1,0 +1,8 @@
+# Never let a real .env file end up baked into the image — secrets go through
+# `fly secrets set`, not the image itself.
+.env
+__pycache__/
+*.pyc
+.git/
+.gitignore
+*.md
