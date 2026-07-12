@@ -4,20 +4,21 @@ serves the /data directory over HTTP so it can be pulled down
 manually from a phone via curl/wget.
 
 Built for a LEGACY FREE-ALLOWANCE Fly.io org: 1 shared-cpu-1x VM,
-a 3GB persistent volume. Since captures accumulate continuously,
-this includes automatic cleanup to stay under that 3GB cap —
-without it, the disk would eventually fill and silently break
-writes. Oldest files are deleted first once the free allowance
-threshold is approached.
+a 3GB persistent volume. Includes automatic disk-budget cleanup so
+the volume never silently fills — IMPORTANT: cleanup deletes the
+OLDEST files first once the budget is exceeded, regardless of
+whether they've been downloaded yet. Pull data down regularly.
 """
 import http.server
+import io
+import json
 import os
-import shutil
 import socketserver
 import subprocess
 import sys
 import threading
 import time
+import zipfile
 from urllib.parse import urlparse, parse_qs
 
 DATA_DIR = os.environ.get("CAPTURE_OUTPUT_DIR", "/data")
@@ -25,8 +26,7 @@ PORT = int(os.environ.get("PORT", "8080"))
 ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN", "")
 RESTART_AFTER_HOURS = float(os.environ.get("RESTART_AFTER_HOURS", "6"))
 
-# Legacy free allowance = 3GB volume. Leave real headroom below that
-# so a burst of activity never fills the disk before cleanup runs.
+# Legacy free allowance = 3GB volume. Leave real headroom below that.
 MAX_DATA_BYTES = int(os.environ.get("MAX_DATA_BYTES", str(2 * 1024**3)))  # 2GB
 CLEANUP_CHECK_INTERVAL = 300  # seconds
 
@@ -44,15 +44,16 @@ def dir_size_bytes(path):
 
 def enforce_disk_budget():
     """Delete the OLDEST capture files first once total size exceeds
-    MAX_DATA_BYTES. Runs periodically in the background so a
-    multi-day deployment never silently fills the free 3GB volume."""
+    MAX_DATA_BYTES. WARNING: this does not check whether a file has
+    been downloaded — pull data down regularly to avoid losing
+    anything to automatic cleanup."""
     while True:
         try:
             size = dir_size_bytes(DATA_DIR)
             if size > MAX_DATA_BYTES:
                 files = [os.path.join(DATA_DIR, f) for f in os.listdir(DATA_DIR)
                          if os.path.isfile(os.path.join(DATA_DIR, f))]
-                files.sort(key=os.path.getmtime)  # oldest first
+                files.sort(key=os.path.getmtime)
                 while size > MAX_DATA_BYTES and files:
                     victim = files.pop(0)
                     freed = os.path.getsize(victim)
@@ -83,13 +84,68 @@ class AuthedHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"Unauthorized\n")
             return
+
+        parsed = urlparse(self.path)
+
+        if parsed.path == "/status":
+            self._handle_status()
+            return
+
+        if parsed.path.startswith("/zip/"):
+            self._handle_zip(parsed.path[len("/zip/"):])
+            return
+
         super().do_GET()
 
+    def _handle_status(self):
+        # Lets you check disk usage / how close to the cleanup
+        # threshold you are, WITHOUT downloading anything — so you
+        # know whether it's urgent to pull data down right now.
+        files = []
+        for f in sorted(os.listdir(DATA_DIR)):
+            fp = os.path.join(DATA_DIR, f)
+            if os.path.isfile(fp):
+                files.append({
+                    "name": f,
+                    "size_mb": round(os.path.getsize(fp) / 1e6, 2),
+                    "modified": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(os.path.getmtime(fp))),
+                })
+        total = dir_size_bytes(DATA_DIR)
+        body = json.dumps({
+            "total_size_mb": round(total / 1e6, 2),
+            "cleanup_budget_mb": round(MAX_DATA_BYTES / 1e6, 2),
+            "pct_of_budget_used": round(100 * total / MAX_DATA_BYTES, 1),
+            "files": files,
+        }, indent=2).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_zip(self, fname):
+        # Compresses a single file on-the-fly and streams it back as
+        # a .zip — JSONL compresses very well (~90% smaller in past
+        # sessions), so this meaningfully reduces mobile data usage.
+        target = os.path.join(DATA_DIR, fname)
+        if not os.path.isfile(target):
+            self.send_response(404)
+            self.end_headers()
+            return
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(target, arcname=fname)
+        data = buf.getvalue()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition",
+                          f'attachment; filename="{fname}.zip"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_DELETE(self):
-        # Lets you clear a file from your phone right after pulling
-        # it down (curl -X DELETE), so you don't have to wait for
-        # the automatic cleanup and can keep the volume nearly empty
-        # between sessions if you want to.
         if not self._authorized():
             self.send_response(401)
             self.end_headers()
@@ -136,3 +192,4 @@ if __name__ == "__main__":
     threading.Thread(target=run_file_server, daemon=True).start()
     threading.Thread(target=enforce_disk_budget, daemon=True).start()
     run_capture_forever()
+    
