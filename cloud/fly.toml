@@ -1,0 +1,32 @@
+app = "polymarket-lifecycle-capture"
+primary_region = "iad"
+
+[build]
+  dockerfile = "cloud/Dockerfile"
+
+[mounts]
+  source = "capture_data"
+  destination = "/data"
+
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  # No autostop/autostart — this is a background worker, not a
+  # request-driven web app, so it must keep running even with zero
+  # HTTP traffic.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
