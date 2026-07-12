@@ -8,6 +8,15 @@ primary_region = "iad"          # pick the region closest to you: `fly platform 
 kill_signal = "SIGINT"          # matches the bot's asyncio KeyboardInterrupt shutdown path
 kill_timeout = 15               # give the websocket loop time to close cleanly
 
+# Without this, Fly's default policy (on-failure) only restarts a Machine that
+# exits with a non-zero code. This bot exits 0 on a graceful SIGINT shutdown —
+# which Fly sends routinely (rolling restarts after `secrets set`, etc.) — so
+# on-failure leaves it stopped after every single one of those. "always" is
+# Fly's own documented recommendation for always-on apps with no [[services]]
+# block, which is exactly this app.
+[[restart]]
+  policy = "always"
+
 [build]
   dockerfile = "Dockerfile"
 
