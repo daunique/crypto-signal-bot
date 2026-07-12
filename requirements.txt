@@ -1,4 +1,0 @@
-py-clob-client-v2
-websockets
-requests
-python-dotenv
