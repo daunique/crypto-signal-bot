@@ -15,15 +15,20 @@ PUBLIC_WS = "wss://api.derivws.com/trading/v1/options/ws/public"
 
 
 class DerivAPIError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None, code: str | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
 
 
 class DerivClient:
-    """Deriv client for the current PAT application API.
+    """Current Deriv API client.
 
-    Market data uses the public WebSocket. Account/trading operations use an
-    authenticated WebSocket URL obtained from the PAT + App ID OTP flow.
-    This deliberately does not use the legacy `?app_id=...` authorize flow.
+    PAT authentication is performed only through REST using:
+      Deriv-App-ID + Authorization: Bearer <PAT>
+
+    The REST OTP endpoint then returns a short-lived authenticated WebSocket URL.
+    No legacy `authorize(token)` call is used anywhere.
     """
 
     def __init__(self):
@@ -36,13 +41,18 @@ class DerivClient:
         self._closed = False
 
     def _headers(self) -> dict[str, str]:
-        if not self.settings.deriv_app_id:
+        app_id = self.settings.deriv_app_id.strip()
+        token = self.settings.auth_token
+        if not app_id:
             raise DerivAPIError("DERIV_APP_ID is missing")
-        if not self.settings.auth_token:
-            raise DerivAPIError("No Deriv PAT/API token found. Set DERIV_PAT or DERIV_API_TOKEN.")
+        if not token:
+            raise DerivAPIError(
+                "No PAT token found. Set DERIV_PAT to the full Personal Access Token created for this PAT app."
+            )
         return {
-            "Deriv-App-ID": self.settings.deriv_app_id,
-            "Authorization": f"Bearer {self.settings.auth_token}",
+            "Deriv-App-ID": app_id,
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
             "Accept": "application/json",
         }
 
@@ -54,11 +64,17 @@ class DerivClient:
             except Exception:
                 payload = {"raw": response.text}
             if response.is_error:
-                raise DerivAPIError(f"Deriv REST {response.status_code}: {payload}")
+                errors = payload.get("errors") if isinstance(payload, dict) else None
+                detail = errors[0] if isinstance(errors, list) and errors else payload
+                raise DerivAPIError(
+                    f"Deriv REST {response.status_code}: {detail}",
+                    status_code=response.status_code,
+                    code=(detail.get("code") if isinstance(detail, dict) else None),
+                )
             return payload
 
     async def resolve_account(self) -> str:
-        if self.settings.deriv_account_id:
+        if self.settings.deriv_account_id.strip():
             self.account_id = self.settings.deriv_account_id.strip()
             return self.account_id
 
@@ -67,11 +83,12 @@ class DerivClient:
         if isinstance(data, dict):
             data = [data]
         accounts = [x for x in data if isinstance(x, dict)]
-        matching = [x for x in accounts if x.get("account_type") == self.settings.account_type]
+        matching = [x for x in accounts if str(x.get("account_type", "")).lower() == self.settings.account_type]
         if not matching:
+            available = [x.get("account_type") for x in accounts]
             raise DerivAPIError(
-                f"No {self.settings.account_type} Options account found for this PAT. "
-                "Set DERIV_ACCOUNT_ID explicitly if the account list contains the required account."
+                f"No {self.settings.account_type} Options account found. Available account types: {available}. "
+                "Set DERIV_ACCOUNT_ID to the exact Options account ID if needed."
             )
         self.account_id = str(matching[0].get("account_id"))
         if not self.account_id or self.account_id == "None":
@@ -80,24 +97,32 @@ class DerivClient:
 
     async def _get_authenticated_ws_url(self) -> str:
         account_id = await self.resolve_account()
-        response = await self._rest(
-            "POST", f"/trading/v1/options/accounts/{account_id}/otp"
-        )
-        url = (response.get("data") or {}).get("url")
+        response = await self._rest("POST", f"/trading/v1/options/accounts/{account_id}/otp")
+        data = response.get("data") or {}
+        url = data.get("url")
         if not url:
             raise DerivAPIError(f"OTP response did not contain data.url: {response}")
         return url
 
     async def connect(self):
+        await self.close()
         self._closed = False
+
+        # Public market data needs no authentication.
         self.market_ws = await websockets.connect(
             PUBLIC_WS, ping_interval=20, ping_timeout=20, close_timeout=5
         )
+
+        # PAT -> REST OTP -> authenticated WS. No authorize request is sent.
         trade_url = await self._get_authenticated_ws_url()
         self.trade_ws = await websockets.connect(
             trade_url, ping_interval=20, ping_timeout=20, close_timeout=5
         )
-        log.info("Connected to Deriv current API in %s mode, account=%s", self.settings.bot_mode, self.account_id)
+        log.info(
+            "Deriv authenticated WebSocket connected: mode=%s account=%s",
+            self.settings.bot_mode,
+            self.account_id,
+        )
 
     async def close(self):
         self._closed = True
@@ -121,11 +146,17 @@ class DerivClient:
             await self.trade_ws.send(json.dumps(message))
             while True:
                 raw = await self.trade_ws.recv()
-                response = json.loads(raw)
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8", errors="replace")
+                try:
+                    response = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
                 if response.get("req_id") != request_id:
                     continue
                 if response.get("error"):
-                    raise DerivAPIError(str(response["error"]))
+                    err = response["error"]
+                    raise DerivAPIError(str(err), code=err.get("code") if isinstance(err, dict) else None)
                 return response
 
     async def subscribe_ticks(self, symbol: str) -> AsyncIterator[dict[str, Any]]:
@@ -135,10 +166,15 @@ class DerivClient:
         async for raw in self.market_ws:
             try:
                 response = json.loads(raw)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
                 continue
-            if response.get("msg_type") == "tick" and isinstance(response.get("tick"), dict):
-                yield response
+            # Ignore authorize/error/subscription/other messages safely.
+            if response.get("msg_type") != "tick":
+                continue
+            tick = response.get("tick")
+            if not isinstance(tick, dict) or "epoch" not in tick:
+                continue
+            yield response
 
     async def get_candles(self, symbol: str, count: int, granularity: int) -> list[dict[str, Any]]:
         response = await self.request({
@@ -148,14 +184,16 @@ class DerivClient:
             "style": "candles",
             "granularity": granularity,
         })
-        return response.get("candles", [])
+        candles = response.get("candles", [])
+        return candles if isinstance(candles, list) else []
 
     async def proposal(
         self, symbol: str, direction: str, amount: float, currency: str,
         duration: int, barrier_distance: float
     ) -> dict[str, Any]:
         contract_type = "HIGHER" if direction == "UP" else "LOWER"
-        barrier = f"+{barrier_distance}" if direction == "UP" else f"-{barrier_distance}"
+        # Relative barrier is signed: + for HIGHER, - for LOWER.
+        barrier = f"+{barrier_distance:g}" if direction == "UP" else f"-{barrier_distance:g}"
         return await self.request({
             "proposal": 1,
             "amount": amount,

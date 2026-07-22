@@ -7,7 +7,7 @@ from .db import init_db
 from .api import router
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name)
+app = FastAPI(title=settings.app_name, version=settings.app_version)
 app.include_router(router)
 
 frontend = Path(__file__).resolve().parents[2] / "frontend"
@@ -28,4 +28,4 @@ async def index():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": settings.app_version}
