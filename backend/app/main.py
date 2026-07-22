@@ -7,7 +7,8 @@ from .db import init_db
 from .api import router
 
 settings = get_settings()
-app = FastAPI(title=settings.app_name, version=settings.app_version)
+BUILD_VERSION = "2026-07-22-pat-boundary-fix-1"
+app = FastAPI(title=settings.app_name)
 app.include_router(router)
 
 frontend = Path(__file__).resolve().parents[2] / "frontend"
@@ -19,6 +20,8 @@ if frontend.exists():
 async def startup():
     Path("data").mkdir(exist_ok=True)
     await init_db()
+    import logging
+    logging.getLogger(__name__).info("BUILD_VERSION=%s", BUILD_VERSION)
 
 
 @app.get("/")
@@ -28,4 +31,4 @@ async def index():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": settings.app_version}
+    return {"status": "ok", "build": BUILD_VERSION}

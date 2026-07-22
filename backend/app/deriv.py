@@ -10,171 +10,186 @@ from .config import get_settings
 
 log = logging.getLogger(__name__)
 
-REST_BASE = "https://api.derivws.com"
+API_BASE = "https://api.derivws.com"
 PUBLIC_WS = "wss://api.derivws.com/trading/v1/options/ws/public"
-
-
-class DerivAPIError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int | None = None, code: str | None = None):
-        super().__init__(message)
-        self.status_code = status_code
-        self.code = code
 
 
 class DerivClient:
     """Current Deriv API client.
 
-    PAT authentication is performed only through REST using:
-      Deriv-App-ID + Authorization: Bearer <PAT>
-
-    The REST OTP endpoint then returns a short-lived authenticated WebSocket URL.
-    No legacy `authorize(token)` call is used anywhere.
+    Public market data uses the public WebSocket. Trading uses a separate
+    authenticated WebSocket URL obtained through the PAT + App ID REST OTP flow.
+    This separation prevents concurrent market-data and trading requests from
+    consuming each other's WebSocket responses.
     """
 
     def __init__(self):
         self.settings = get_settings()
-        self.market_ws = None
+        self.public_ws = None
         self.trade_ws = None
-        self.req_id = 0
-        self.request_lock = asyncio.Lock()
+        self._public_reader_task = None
+        self._trade_reader_task = None
+        self._public_req_id = 0
+        self._trade_req_id = 0
+        self._public_waiters: dict[int, asyncio.Future] = {}
+        self._trade_waiters: dict[int, asyncio.Future] = {}
+        self._public_ticks: asyncio.Queue = asyncio.Queue(maxsize=5000)
         self.account_id: str | None = None
-        self._closed = False
 
     def _headers(self) -> dict[str, str]:
-        app_id = self.settings.deriv_app_id.strip()
-        token = self.settings.auth_token
-        if not app_id:
-            raise DerivAPIError("DERIV_APP_ID is missing")
-        if not token:
-            raise DerivAPIError(
-                "No PAT token found. Set DERIV_PAT to the full Personal Access Token created for this PAT app."
-            )
+        if not self.settings.deriv_app_id:
+            raise RuntimeError("DERIV_APP_ID is not configured")
+        if not self.settings.deriv_pat:
+            raise RuntimeError("DERIV_PAT is not configured")
         return {
-            "Deriv-App-ID": app_id,
-            "Authorization": f"Bearer {token}",
+            "Deriv-App-ID": self.settings.deriv_app_id,
+            "Authorization": f"Bearer {self.settings.deriv_pat}",
             "Content-Type": "application/json",
-            "Accept": "application/json",
         }
-
-    async def _rest(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        async with httpx.AsyncClient(base_url=REST_BASE, timeout=20.0) as client:
-            response = await client.request(method, path, headers=self._headers(), **kwargs)
-            try:
-                payload = response.json()
-            except Exception:
-                payload = {"raw": response.text}
-            if response.is_error:
-                errors = payload.get("errors") if isinstance(payload, dict) else None
-                detail = errors[0] if isinstance(errors, list) and errors else payload
-                raise DerivAPIError(
-                    f"Deriv REST {response.status_code}: {detail}",
-                    status_code=response.status_code,
-                    code=(detail.get("code") if isinstance(detail, dict) else None),
-                )
-            return payload
-
-    async def resolve_account(self) -> str:
-        if self.settings.deriv_account_id.strip():
-            self.account_id = self.settings.deriv_account_id.strip()
-            return self.account_id
-
-        response = await self._rest("GET", "/trading/v1/options/accounts")
-        data = response.get("data", [])
-        if isinstance(data, dict):
-            data = [data]
-        accounts = [x for x in data if isinstance(x, dict)]
-        matching = [x for x in accounts if str(x.get("account_type", "")).lower() == self.settings.account_type]
-        if not matching:
-            available = [x.get("account_type") for x in accounts]
-            raise DerivAPIError(
-                f"No {self.settings.account_type} Options account found. Available account types: {available}. "
-                "Set DERIV_ACCOUNT_ID to the exact Options account ID if needed."
-            )
-        self.account_id = str(matching[0].get("account_id"))
-        if not self.account_id or self.account_id == "None":
-            raise DerivAPIError("Deriv account response did not contain account_id")
-        return self.account_id
-
-    async def _get_authenticated_ws_url(self) -> str:
-        account_id = await self.resolve_account()
-        response = await self._rest("POST", f"/trading/v1/options/accounts/{account_id}/otp")
-        data = response.get("data") or {}
-        url = data.get("url")
-        if not url:
-            raise DerivAPIError(f"OTP response did not contain data.url: {response}")
-        return url
 
     async def connect(self):
         await self.close()
-        self._closed = False
+        self.account_id = await self._select_account()
+        otp_url = await self._get_otp_url(self.account_id)
 
-        # Public market data needs no authentication.
-        self.market_ws = await websockets.connect(
-            PUBLIC_WS, ping_interval=20, ping_timeout=20, close_timeout=5
-        )
+        self.public_ws = await websockets.connect(PUBLIC_WS, ping_interval=20, ping_timeout=20)
+        self.trade_ws = await websockets.connect(otp_url, ping_interval=20, ping_timeout=20)
+        self._public_reader_task = asyncio.create_task(self._reader("public"))
+        self._trade_reader_task = asyncio.create_task(self._reader("trade"))
+        log.info("Connected to Deriv current API: account=%s mode=%s", self.account_id, self.settings.bot_mode)
 
-        # PAT -> REST OTP -> authenticated WS. No authorize request is sent.
-        trade_url = await self._get_authenticated_ws_url()
-        self.trade_ws = await websockets.connect(
-            trade_url, ping_interval=20, ping_timeout=20, close_timeout=5
-        )
-        log.info(
-            "Deriv authenticated WebSocket connected: mode=%s account=%s",
-            self.settings.bot_mode,
-            self.account_id,
-        )
+    async def _select_account(self) -> str:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(
+                f"{API_BASE}/trading/v1/options/accounts",
+                headers=self._headers(),
+            )
+        if response.status_code >= 400:
+            raise RuntimeError(f"Deriv accounts request failed ({response.status_code}): {response.text[:500]}")
+
+        body = response.json()
+        data = body.get("data", [])
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, list):
+            raise RuntimeError(f"Unexpected Deriv accounts response: {body}")
+
+        if self.settings.deriv_account_id:
+            for account in data:
+                if str(account.get("account_id")) == self.settings.deriv_account_id:
+                    return self.settings.deriv_account_id
+            raise RuntimeError(f"DERIV_ACCOUNT_ID={self.settings.deriv_account_id} was not returned for this token")
+
+        wanted = "demo" if self.settings.bot_mode.lower() == "demo" else "real"
+        candidates = [a for a in data if str(a.get("account_type", "")).lower() == wanted]
+        active = [a for a in candidates if str(a.get("status", "active")).lower() == "active"]
+        selected = active[0] if active else (candidates[0] if candidates else None)
+        if not selected or not selected.get("account_id"):
+            raise RuntimeError(f"No active {wanted} Options account was returned by Deriv")
+        return str(selected["account_id"])
+
+    async def _get_otp_url(self, account_id: str) -> str:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(
+                f"{API_BASE}/trading/v1/options/accounts/{account_id}/otp",
+                headers=self._headers(),
+            )
+        if response.status_code >= 400:
+            raise RuntimeError(f"Deriv OTP request failed ({response.status_code}): {response.text[:500]}")
+        body = response.json()
+        url = (body.get("data") or {}).get("url")
+        if not url:
+            raise RuntimeError(f"Deriv OTP response did not contain data.url: {body}")
+        return url
 
     async def close(self):
-        self._closed = True
-        for ws in (self.market_ws, self.trade_ws):
-            if ws is not None:
+        for task in (self._public_reader_task, self._trade_reader_task):
+            if task:
+                task.cancel()
+        for task in (self._public_reader_task, self._trade_reader_task):
+            if task:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._public_reader_task = None
+        self._trade_reader_task = None
+        for ws in (self.public_ws, self.trade_ws):
+            if ws:
                 try:
                     await ws.close()
                 except Exception:
-                    log.exception("Error closing Deriv websocket")
-        self.market_ws = None
+                    pass
+        self.public_ws = None
         self.trade_ws = None
+        self._fail_waiters(RuntimeError("Deriv connection closed"))
 
-    async def request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if not self.trade_ws:
-            raise DerivAPIError("Authenticated Deriv websocket is not connected")
-        async with self.request_lock:
-            self.req_id += 1
-            request_id = self.req_id
-            message = dict(payload)
-            message["req_id"] = request_id
-            await self.trade_ws.send(json.dumps(message))
-            while True:
-                raw = await self.trade_ws.recv()
-                if isinstance(raw, bytes):
-                    raw = raw.decode("utf-8", errors="replace")
+    def _fail_waiters(self, exc: Exception):
+        for waiters in (self._public_waiters, self._trade_waiters):
+            for future in waiters.values():
+                if not future.done():
+                    future.set_exception(exc)
+            waiters.clear()
+
+    async def _reader(self, channel: str):
+        ws = self.public_ws if channel == "public" else self.trade_ws
+        waiters = self._public_waiters if channel == "public" else self._trade_waiters
+        try:
+            async for raw in ws:
                 try:
-                    response = json.loads(raw)
+                    message = json.loads(raw)
                 except json.JSONDecodeError:
+                    log.warning("Ignoring non-JSON Deriv message")
                     continue
-                if response.get("req_id") != request_id:
+
+                req_id = message.get("req_id")
+                if req_id is not None and req_id in waiters:
+                    future = waiters.pop(req_id)
+                    if message.get("error"):
+                        future.set_exception(RuntimeError(str(message["error"])))
+                    else:
+                        future.set_result(message)
                     continue
-                if response.get("error"):
-                    err = response["error"]
-                    raise DerivAPIError(str(err), code=err.get("code") if isinstance(err, dict) else None)
-                return response
+
+                if channel == "public" and message.get("msg_type") == "tick":
+                    try:
+                        self._public_ticks.put_nowait(message)
+                    except asyncio.QueueFull:
+                        _ = self._public_ticks.get_nowait()
+                        self._public_ticks.put_nowait(message)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.exception("Deriv %s WebSocket reader stopped: %s", channel, exc)
+            self._fail_waiters(exc)
+
+    async def request(self, payload: dict[str, Any], channel: str = "trade") -> dict[str, Any]:
+        ws = self.trade_ws if channel == "trade" else self.public_ws
+        waiters = self._trade_waiters if channel == "trade" else self._public_waiters
+        if not ws:
+            raise RuntimeError(f"Deriv {channel} WebSocket is not connected")
+
+        if channel == "trade":
+            self._trade_req_id += 1
+            req_id = self._trade_req_id
+        else:
+            self._public_req_id += 1
+            req_id = self._public_req_id
+
+        future = asyncio.get_running_loop().create_future()
+        waiters[req_id] = future
+        message = dict(payload)
+        message["req_id"] = req_id
+        await ws.send(json.dumps(message))
+        try:
+            return await asyncio.wait_for(future, timeout=20)
+        finally:
+            waiters.pop(req_id, None)
 
     async def subscribe_ticks(self, symbol: str) -> AsyncIterator[dict[str, Any]]:
-        if not self.market_ws:
-            raise DerivAPIError("Public market websocket is not connected")
-        await self.market_ws.send(json.dumps({"ticks": symbol, "subscribe": 1, "req_id": 1}))
-        async for raw in self.market_ws:
-            try:
-                response = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            # Ignore authorize/error/subscription/other messages safely.
-            if response.get("msg_type") != "tick":
-                continue
-            tick = response.get("tick")
-            if not isinstance(tick, dict) or "epoch" not in tick:
-                continue
-            yield response
+        await self.request({"ticks": symbol, "subscribe": 1}, channel="public")
+        while True:
+            yield await self._public_ticks.get()
 
     async def get_candles(self, symbol: str, count: int, granularity: int) -> list[dict[str, Any]]:
         response = await self.request({
@@ -183,17 +198,13 @@ class DerivClient:
             "end": "latest",
             "style": "candles",
             "granularity": granularity,
-        })
-        candles = response.get("candles", [])
-        return candles if isinstance(candles, list) else []
+        }, channel="public")
+        return response.get("candles", [])
 
-    async def proposal(
-        self, symbol: str, direction: str, amount: float, currency: str,
-        duration: int, barrier_distance: float
-    ) -> dict[str, Any]:
+    async def proposal(self, symbol: str, direction: str, amount: float, currency: str,
+                       duration: int, barrier_distance: float) -> dict[str, Any]:
         contract_type = "HIGHER" if direction == "UP" else "LOWER"
-        # Relative barrier is signed: + for HIGHER, - for LOWER.
-        barrier = f"+{barrier_distance:g}" if direction == "UP" else f"-{barrier_distance:g}"
+        barrier = f"+{barrier_distance}" if direction == "UP" else f"-{barrier_distance}"
         return await self.request({
             "proposal": 1,
             "amount": amount,
@@ -204,10 +215,14 @@ class DerivClient:
             "duration_unit": "s",
             "underlying_symbol": symbol,
             "barrier": barrier,
-        })
+        }, channel="trade")
 
     async def buy(self, proposal_id: str, price: float) -> dict[str, Any]:
-        return await self.request({"buy": proposal_id, "price": price})
+        return await self.request({"buy": proposal_id, "price": price}, channel="trade")
 
     async def proposal_open_contract(self, contract_id: str) -> dict[str, Any]:
-        return await self.request({"proposal_open_contract": 1, "contract_id": int(contract_id)})
+        return await self.request({
+            "proposal_open_contract": 1,
+            "contract_id": contract_id,
+            "subscribe": 0,
+        }, channel="trade")

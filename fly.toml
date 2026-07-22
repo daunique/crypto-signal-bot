@@ -3,12 +3,13 @@ primary_region = "ams"
 
 [build]
 
+dockerfile = "Dockerfile"
+
 [env]
   PORT = "8080"
   BOT_MODE = "demo"
   MARKET_SYMBOL = "R_25"
   TIMEFRAME_SECONDS = "180"
-  HISTORY_COUNT = "120"
   AUTO_TRADE = "true"
 
 [http_service]

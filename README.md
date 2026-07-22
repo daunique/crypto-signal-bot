@@ -1,62 +1,89 @@
-# Deriv Higher/Lower Bot v3
+# Deriv Higher/Lower Bot
 
-Production-oriented 3-minute Higher/Lower bot for Deriv Options trading.
+A production-oriented starter system for a 3-minute Deriv Higher/Lower bot.
 
-## Authentication architecture
+## Architecture
 
-This version uses the current PAT application flow:
+- FastAPI backend
+- Async Deriv WebSocket client
+- Exact 3-minute candle boundary signal evaluation
+- Higher signal -> Higher / Above Spot
+- Lower signal -> Lower / Below Spot
+- Demo / Live mode
+- SQLite by default, PostgreSQL-ready via DATABASE_URL
+- Real-time dashboard updates via WebSocket
+- PnL, signals, trades, daily history
+- Fly.io deployment configuration
+- API credentials loaded only from environment variables / Fly secrets
 
-1. `DERIV_APP_ID` identifies the PAT application.
-2. `DERIV_PAT` is sent as `Authorization: Bearer <PAT>` to the current REST API.
-3. The bot discovers the configured demo/real Options account, unless `DERIV_ACCOUNT_ID` is pinned.
-4. The bot requests a short-lived OTP WebSocket URL.
-5. The bot connects directly to that returned authenticated WebSocket URL.
-6. No legacy `authorize(token)` request is used anywhere.
+## Important
 
-The market tick stream uses the public WebSocket. Trading operations use the authenticated WebSocket.
+The included strategy is intentionally modular. `R25Strategy` is a starter implementation based on the current confluence framework. Before live-money use, verify Deriv proposal semantics and contract parameters against your account and run the system in demo mode.
 
-## Fly.io secrets
+## Local run
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Open `http://localhost:8000`.
+
+## Fly.io
+
+Create the app, then set secrets:
+
+```bash
+fly launch --no-deploy
+fly secrets set DERIV_APP_ID="..."
+fly secrets set DERIV_DEMO_TOKEN="..."
+fly secrets set DERIV_LIVE_TOKEN="..."
+fly secrets set BOT_MODE="demo"
+fly deploy
+```
+
+For durable production data, set `DATABASE_URL` to a managed PostgreSQL connection string or attach a Fly volume if using SQLite.
+
+## Runtime model
+
+At each exact UTC 3-minute boundary:
+
+1. Finalize the previous candle.
+2. Calculate features from completed candles only.
+3. Evaluate the strategy.
+4. If qualified, create a Higher or Lower signal.
+5. Request a Deriv proposal.
+6. Buy only when proposal conditions are valid.
+7. Track settlement.
+8. Persist the complete event and update the dashboard.
+
+The bot does not impose an automatic daily drawdown stop. Drawdown is tracked for analytics. Manual emergency stop and technical circuit breakers remain available.
+
+## Deployment verification
+
+The application exposes a build fingerprint at `/health`. After deploying, verify the running image:
+
+```bash
+fly deploy -a crypto-signal-bot-kooj9a --remote-only
+curl https://crypto-signal-bot-kooj9a.fly.dev/health
+```
+
+Expected build value:
+
+```text
+2026-07-22-pat-boundary-fix-1
+```
+
+If `/health` does not show this build value, the new source is not the source running in Fly.io.
+
+Required secrets:
 
 ```bash
 fly secrets set \
   DERIV_APP_ID="YOUR_PAT_APP_ID" \
-  DERIV_PAT="YOUR_FULL_PERSONAL_ACCESS_TOKEN" \
+  DERIV_PAT="YOUR_FULL_PAT_TOKEN" \
+  MARKET_BARRIERS="R_25=YOUR_R25_BARRIER" \
   -a crypto-signal-bot-kooj9a
 ```
 
-Then keep the app in demo mode:
-
-```bash
-fly secrets set BOT_MODE="demo" -a crypto-signal-bot-kooj9a
-```
-
-The PAT must belong to the PAT application and have the required `trade` scope. Do not put the PAT in `fly.toml`, Dockerfile, frontend code, Git, or logs.
-
-## Deploy
-
-```bash
-fly deploy -a crypto-signal-bot-kooj9a
-fly logs -a crypto-signal-bot-kooj9a
-```
-
-The service listens on port 8080 and exposes `/health`.
-
-## Market-specific barriers
-
-There is no universal barrier. Configure each market explicitly:
-
-```env
-MARKET_SYMBOL=R_25
-MARKET_BARRIERS=R_25=YOUR_TESTED_R25_BARRIER,R_10=YOUR_TESTED_R10_BARRIER,R_100=YOUR_TESTED_R100_BARRIER
-```
-
-If the selected market has no configured barrier, the bot refuses to execute.
-
-## Signal timing
-
-At the first tick received in a new UTC 3-minute interval, the engine triggers the boundary evaluation, fetches the completed previous candle, evaluates the strategy, and maps:
-
-* `UP` -> `HIGHER` with a positive relative barrier
-* `DOWN` -> `LOWER` with a negative relative barrier
-
-No automatic daily drawdown stop is implemented.
+The PAT token is sent only as a Bearer token to the current Deriv REST API. The bot does not call the legacy `authorize` WebSocket method.

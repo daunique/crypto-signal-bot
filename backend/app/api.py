@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func
 from .config import get_settings
 from .db import session, Signal, Trade
 from .engine import BotEngine
@@ -13,14 +13,22 @@ engine = BotEngine()
 @router.get("/api/status")
 async def status():
     async with await session() as db:
-        trades = (await db.execute(select(Trade).order_by(Trade.created_at.desc()).limit(1000))).scalars().all()
-        signals = (await db.execute(select(Signal).order_by(Signal.created_at.desc()).limit(1000))).scalars().all()
         today = datetime.now(timezone.utc).date()
-        day_trades = [t for t in trades if t.created_at and t.created_at.date() == today]
-        wins = sum(1 for t in day_trades if t.status == "WON")
-        losses = sum(1 for t in day_trades if t.status == "LOST")
-        pnl = sum((t.profit or 0) for t in day_trades)
-        total = wins + losses
+        start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+        end = start + timedelta(days=1)
+        signal_count = (await db.execute(
+            select(func.count(Signal.id)).where(Signal.created_at >= start, Signal.created_at < end)
+        )).scalar_one()
+        wins = (await db.execute(
+            select(func.count(Trade.id)).where(Trade.created_at >= start, Trade.created_at < end, Trade.status == "WON")
+        )).scalar_one()
+        losses = (await db.execute(
+            select(func.count(Trade.id)).where(Trade.created_at >= start, Trade.created_at < end, Trade.status == "LOST")
+        )).scalar_one()
+        pnl = (await db.execute(
+            select(func.coalesce(func.sum(Trade.profit), 0.0)).where(Trade.created_at >= start, Trade.created_at < end)
+        )).scalar_one() or 0.0
+        trades = wins + losses
         return {
             "bot_status": engine.status,
             "mode": settings.bot_mode,
@@ -30,12 +38,12 @@ async def status():
             "current_signal": engine.current_signal,
             "last_error": engine.last_error,
             "today": {
-                "signals": len([s for s in signals if s.created_at and s.created_at.date() == today]),
-                "trades": total,
-                "wins": wins,
-                "losses": losses,
-                "win_rate": round((wins / total * 100), 2) if total else 0,
-                "pnl": round(pnl, 2),
+                "signals": int(signal_count or 0),
+                "trades": int(trades),
+                "wins": int(wins or 0),
+                "losses": int(losses or 0),
+                "win_rate": round((wins / trades * 100), 2) if trades else 0,
+                "pnl": round(float(pnl), 2),
             },
         }
 
