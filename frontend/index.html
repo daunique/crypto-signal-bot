@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Deriv Higher/Lower Bot</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">⚡ DERIV BOT</div>
+    <nav>
+      <button class="nav active" data-page="dashboard">Dashboard</button>
+      <button class="nav" data-page="signals">Signals</button>
+      <button class="nav" data-page="trades">Trades</button>
+      <button class="nav" data-page="pnl">PnL History</button>
+      <button class="nav" data-page="settings">Settings</button>
+    </nav>
+    <div id="modeBadge" class="mode">DEMO</div>
+  </aside>
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="pageTitle">Dashboard</h1>
+        <div class="muted">3-minute Higher / Lower execution monitor</div>
+      </div>
+      <div class="controls">
+        <button id="startBtn">Start Bot</button>
+        <button id="stopBtn" class="danger">Stop Bot</button>
+      </div>
+    </header>
+    <section id="app"></section>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

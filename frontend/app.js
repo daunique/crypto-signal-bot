@@ -1,0 +1,100 @@
+const app = document.getElementById("app");
+let currentPage = "dashboard";
+
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+}
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  return r.json();
+}
+
+async function renderDashboard() {
+  const s = await getJSON("/api/status");
+  const t = s.today;
+  const signal = s.current_signal;
+  app.innerHTML = `
+    <div class="grid">
+      <div class="card"><h3>Today's PnL</h3><div class="metric">${Number(t.pnl).toFixed(2)}</div></div>
+      <div class="card"><h3>Win Rate</h3><div class="metric">${t.win_rate}%</div></div>
+      <div class="card"><h3>Signals Today</h3><div class="metric">${t.signals}</div></div>
+      <div class="card"><h3>Bot Status</h3><div class="metric">${esc(s.bot_status)}</div></div>
+    </div>
+    <div class="card panel signal">
+      <h2>Current Signal</h2>
+      ${signal ? `<p><b>Status:</b> ${esc(signal.status)}</p>
+      <p><b>Direction:</b> ${esc(signal.direction || "-")}</p>
+      <p><b>Contract:</b> ${esc(signal.contract_type || "-")}</p>
+      <p><b>Barrier:</b> ${esc(signal.barrier || "-")}</p>
+      <p><b>Score:</b> ${esc(signal.score || "-")}</p>
+      <p><b>Reason:</b> ${esc(signal.reason || "-")}</p>` : "<p>Waiting for the next exact candle boundary.</p>"}
+    </div>
+    <div class="card panel">
+      <h2>System</h2>
+      <p>Mode: <b>${esc(s.mode)}</b></p>
+      <p>Market: <b>${esc(s.symbol)}</b></p>
+      <p>Timeframe: <b>${s.timeframe_seconds}s</b></p>
+      <p>Trades today: <b>${t.trades}</b> | Wins: <b>${t.wins}</b> | Losses: <b>${t.losses}</b></p>
+    </div>`;
+}
+
+async function renderSignals() {
+  const rows = await getJSON("/api/signals");
+  app.innerHTML = `<div class="card"><h2>Signals</h2><table><thead><tr><th>Time</th><th>Direction</th><th>Contract</th><th>Barrier</th><th>Score</th><th>Status</th></tr></thead><tbody>
+  ${rows.map(x => `<tr><td>${esc(x.created_at)}</td><td>${esc(x.direction)}</td><td>${esc(x.contract_type)}</td><td>${esc(x.barrier)}</td><td>${esc(x.score)}</td><td><span class="badge">${esc(x.status)}</span></td></tr>`).join("")}
+  </tbody></table></div>`;
+}
+
+async function renderTrades() {
+  const rows = await getJSON("/api/trades");
+  app.innerHTML = `<div class="card"><h2>Trades</h2><table><thead><tr><th>Time</th><th>Mode</th><th>Direction</th><th>Stake</th><th>Profit</th><th>Status</th></tr></thead><tbody>
+  ${rows.map(x => `<tr><td>${esc(x.created_at)}</td><td>${esc(x.mode)}</td><td>${esc(x.direction)}</td><td>${esc(x.stake)}</td><td>${esc(x.profit)}</td><td><span class="badge">${esc(x.status)}</span></td></tr>`).join("")}
+  </tbody></table></div>`;
+}
+
+async function renderPnL() {
+  const rows = await getJSON("/api/trades?limit=500");
+  const byDay = {};
+  rows.forEach(x => {
+    const day = String(x.created_at || "").slice(0, 10);
+    byDay[day] ||= { trades: 0, wins: 0, losses: 0, pnl: 0 };
+    byDay[day].trades++;
+    if (x.status === "WON") byDay[day].wins++;
+    if (x.status === "LOST") byDay[day].losses++;
+    byDay[day].pnl += Number(x.profit || 0);
+  });
+  app.innerHTML = `<div class="card"><h2>Daily PnL History</h2><table><thead><tr><th>Date</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>PnL</th></tr></thead><tbody>
+  ${Object.entries(byDay).sort().reverse().map(([d,x]) => `<tr><td>${d}</td><td>${x.trades}</td><td>${x.wins}</td><td>${x.losses}</td><td>${x.trades ? (x.wins/x.trades*100).toFixed(2) : "0"}%</td><td>${x.pnl.toFixed(2)}</td></tr>`).join("")}
+  </tbody></table></div>`;
+}
+
+function renderSettings() {
+  app.innerHTML = `<div class="card"><h2>Settings</h2>
+    <p>Strategy and execution settings are currently controlled by environment variables.</p>
+    <p>Mode: <b>Demo/Live is selected server-side via BOT_MODE.</b></p>
+    <p>API tokens are never sent to the browser.</p>
+  </div>`;
+}
+
+async function render() {
+  document.getElementById("pageTitle").textContent = currentPage[0].toUpperCase() + currentPage.slice(1);
+  if (currentPage === "dashboard") await renderDashboard();
+  if (currentPage === "signals") await renderSignals();
+  if (currentPage === "trades") await renderTrades();
+  if (currentPage === "pnl") await renderPnL();
+  if (currentPage === "settings") renderSettings();
+}
+
+document.querySelectorAll(".nav").forEach(btn => btn.addEventListener("click", () => {
+  document.querySelectorAll(".nav").forEach(x => x.classList.remove("active"));
+  btn.classList.add("active");
+  currentPage = btn.dataset.page;
+  render();
+}));
+
+document.getElementById("startBtn").onclick = async () => { await fetch("/api/bot/start", {method: "POST"}); render(); };
+document.getElementById("stopBtn").onclick = async () => { await fetch("/api/bot/stop", {method: "POST"}); render(); };
+
+render();
+setInterval(() => { if (currentPage === "dashboard") renderDashboard(); }, 5000);
