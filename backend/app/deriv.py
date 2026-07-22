@@ -5,6 +5,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 import websockets
+from websockets.exceptions import ConnectionClosed, InvalidStatus, InvalidURI
 
 from .config import get_settings
 
@@ -15,12 +16,10 @@ PUBLIC_WS = "wss://api.derivws.com/trading/v1/options/ws/public"
 
 
 class DerivClient:
-    """Current Deriv API client.
+    """Resilient Deriv current API client using PAT authentication.
 
-    Public market data uses the public WebSocket. Trading uses a separate
-    authenticated WebSocket URL obtained through the PAT + App ID REST OTP flow.
-    This separation prevents concurrent market-data and trading requests from
-    consuming each other's WebSocket responses.
+    Market data and trading use separate WebSocket connections. No legacy
+    authorize flow and no manually configured barrier are used.
     """
 
     def __init__(self):
@@ -47,40 +46,57 @@ class DerivClient:
             "Content-Type": "application/json",
         }
 
+    async def _connect_ws(self, uri: str):
+        last_error = None
+        for attempt in range(3):
+            try:
+                return await asyncio.wait_for(
+                    websockets.connect(
+                        uri,
+                        open_timeout=15,
+                        close_timeout=5,
+                        ping_interval=20,
+                        ping_timeout=20,
+                        max_size=2**20,
+                    ),
+                    timeout=20,
+                )
+            except (asyncio.TimeoutError, TimeoutError, OSError, InvalidStatus, InvalidURI, ConnectionClosed) as exc:
+                last_error = exc
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+        raise RuntimeError(f"WebSocket handshake failed after retries: {last_error}")
+
     async def connect(self):
         await self.close()
         self.account_id = await self._select_account()
         otp_url = await self._get_otp_url(self.account_id)
-
-        self.public_ws = await websockets.connect(PUBLIC_WS, ping_interval=20, ping_timeout=20)
-        self.trade_ws = await websockets.connect(otp_url, ping_interval=20, ping_timeout=20)
-        self._public_reader_task = asyncio.create_task(self._reader("public"))
-        self._trade_reader_task = asyncio.create_task(self._reader("trade"))
-        log.info("Connected to Deriv current API: account=%s mode=%s", self.account_id, self.settings.bot_mode)
+        self.public_ws = await self._connect_ws(PUBLIC_WS)
+        try:
+            self.trade_ws = await self._connect_ws(otp_url)
+        except Exception:
+            await self.close()
+            raise
+        self._public_reader_task = asyncio.create_task(self._reader("public"), name="deriv-public-reader")
+        self._trade_reader_task = asyncio.create_task(self._reader("trade"), name="deriv-trade-reader")
+        log.info("DERIV_CONNECTED account=%s mode=%s", self.account_id, self.settings.bot_mode)
 
     async def _select_account(self) -> str:
         async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.get(
-                f"{API_BASE}/trading/v1/options/accounts",
-                headers=self._headers(),
-            )
+            response = await client.get(f"{API_BASE}/trading/v1/options/accounts", headers=self._headers())
         if response.status_code >= 400:
             raise RuntimeError(f"Deriv accounts request failed ({response.status_code}): {response.text[:500]}")
-
         body = response.json()
         data = body.get("data", [])
         if isinstance(data, dict):
             data = [data]
         if not isinstance(data, list):
             raise RuntimeError(f"Unexpected Deriv accounts response: {body}")
-
         if self.settings.deriv_account_id:
-            for account in data:
-                if str(account.get("account_id")) == self.settings.deriv_account_id:
-                    return self.settings.deriv_account_id
+            if any(str(a.get("account_id")) == self.settings.deriv_account_id for a in data):
+                return self.settings.deriv_account_id
             raise RuntimeError(f"DERIV_ACCOUNT_ID={self.settings.deriv_account_id} was not returned for this token")
-
-        wanted = "demo" if self.settings.bot_mode.lower() == "demo" else "real"
+        wanted = "demo" if self.settings.bot_mode == "demo" else "real"
         candidates = [a for a in data if str(a.get("account_type", "")).lower() == wanted]
         active = [a for a in candidates if str(a.get("status", "active")).lower() == "active"]
         selected = active[0] if active else (candidates[0] if candidates else None)
@@ -104,29 +120,27 @@ class DerivClient:
 
     async def close(self):
         for task in (self._public_reader_task, self._trade_reader_task):
-            if task:
+            if task and not task.done():
                 task.cancel()
         for task in (self._public_reader_task, self._trade_reader_task):
             if task:
                 try:
                     await task
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError, Exception):
                     pass
-        self._public_reader_task = None
-        self._trade_reader_task = None
+        self._public_reader_task = self._trade_reader_task = None
         for ws in (self.public_ws, self.trade_ws):
             if ws:
                 try:
                     await ws.close()
                 except Exception:
                     pass
-        self.public_ws = None
-        self.trade_ws = None
+        self.public_ws = self.trade_ws = None
         self._fail_waiters(RuntimeError("Deriv connection closed"))
 
     def _fail_waiters(self, exc: Exception):
         for waiters in (self._public_waiters, self._trade_waiters):
-            for future in waiters.values():
+            for future in list(waiters.values()):
                 if not future.done():
                     future.set_exception(exc)
             waiters.clear()
@@ -136,53 +150,64 @@ class DerivClient:
         waiters = self._public_waiters if channel == "public" else self._trade_waiters
         try:
             async for raw in ws:
+                if isinstance(raw, bytes):
+                    try:
+                        raw = raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        log.warning("Ignoring non-UTF8 WebSocket message")
+                        continue
+                if not isinstance(raw, str):
+                    log.warning("Ignoring non-text WebSocket message")
+                    continue
                 try:
                     message = json.loads(raw)
                 except json.JSONDecodeError:
                     log.warning("Ignoring non-JSON Deriv message")
                     continue
-
+                if not isinstance(message, dict):
+                    continue
                 req_id = message.get("req_id")
                 if req_id is not None and req_id in waiters:
                     future = waiters.pop(req_id)
-                    if message.get("error"):
-                        future.set_exception(RuntimeError(str(message["error"])))
-                    else:
-                        future.set_result(message)
+                    if not future.done():
+                        if message.get("error"):
+                            future.set_exception(RuntimeError(str(message["error"])))
+                        else:
+                            future.set_result(message)
                     continue
-
                 if channel == "public" and message.get("msg_type") == "tick":
                     try:
                         self._public_ticks.put_nowait(message)
                     except asyncio.QueueFull:
-                        _ = self._public_ticks.get_nowait()
+                        try:
+                            self._public_ticks.get_nowait()
+                        except asyncio.QueueEmpty:
+                            pass
                         self._public_ticks.put_nowait(message)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.exception("Deriv %s WebSocket reader stopped: %s", channel, exc)
+            log.exception("Deriv %s reader stopped: %s", channel, exc)
             self._fail_waiters(exc)
 
     async def request(self, payload: dict[str, Any], channel: str = "trade") -> dict[str, Any]:
         ws = self.trade_ws if channel == "trade" else self.public_ws
-        waiters = self._trade_waiters if channel == "trade" else self._public_waiters
-        if not ws:
+        reader = self._trade_reader_task if channel == "trade" else self._public_reader_task
+        if ws is None or reader is None or reader.done():
             raise RuntimeError(f"Deriv {channel} WebSocket is not connected")
-
         if channel == "trade":
             self._trade_req_id += 1
             req_id = self._trade_req_id
+            waiters = self._trade_waiters
         else:
             self._public_req_id += 1
             req_id = self._public_req_id
-
+            waiters = self._public_waiters
         future = asyncio.get_running_loop().create_future()
         waiters[req_id] = future
-        message = dict(payload)
-        message["req_id"] = req_id
-        await ws.send(json.dumps(message))
         try:
-            return await asyncio.wait_for(future, timeout=20)
+            await asyncio.wait_for(ws.send(json.dumps({**payload, "req_id": req_id})), timeout=5)
+            return await asyncio.wait_for(future, timeout=self.settings.request_timeout_seconds)
         finally:
             waiters.pop(req_id, None)
 
@@ -193,18 +218,13 @@ class DerivClient:
 
     async def get_candles(self, symbol: str, count: int, granularity: int) -> list[dict[str, Any]]:
         response = await self.request({
-            "ticks_history": symbol,
-            "count": count,
-            "end": "latest",
-            "style": "candles",
-            "granularity": granularity,
+            "ticks_history": symbol, "count": count, "end": "latest",
+            "style": "candles", "granularity": granularity,
         }, channel="public")
         return response.get("candles", [])
 
-    async def proposal(self, symbol: str, direction: str, amount: float, currency: str,
-                       duration: int, barrier_distance: float) -> dict[str, Any]:
+    async def proposal(self, symbol: str, direction: str, amount: float, currency: str, duration: int) -> dict[str, Any]:
         contract_type = "HIGHER" if direction == "UP" else "LOWER"
-        barrier = f"+{barrier_distance}" if direction == "UP" else f"-{barrier_distance}"
         return await self.request({
             "proposal": 1,
             "amount": amount,
@@ -214,7 +234,6 @@ class DerivClient:
             "duration": duration,
             "duration_unit": "s",
             "underlying_symbol": symbol,
-            "barrier": barrier,
         }, channel="trade")
 
     async def buy(self, proposal_id: str, price: float) -> dict[str, Any]:
@@ -222,7 +241,5 @@ class DerivClient:
 
     async def proposal_open_contract(self, contract_id: str) -> dict[str, Any]:
         return await self.request({
-            "proposal_open_contract": 1,
-            "contract_id": contract_id,
-            "subscribe": 0,
+            "proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 0,
         }, channel="trade")

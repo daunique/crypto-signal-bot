@@ -1,24 +1,33 @@
 # Deriv Higher/Lower Bot
 
-A production-oriented starter system for a 3-minute Deriv Higher/Lower bot.
+Production-oriented 3-minute Deriv Higher/Lower bot.
 
-## Architecture
+## Trading contract semantics
 
-- FastAPI backend
-- Async Deriv WebSocket client
-- Exact 3-minute candle boundary signal evaluation
-- Higher signal -> Higher / Above Spot
-- Lower signal -> Lower / Below Spot
-- Demo / Live mode
-- SQLite by default, PostgreSQL-ready via DATABASE_URL
-- Real-time dashboard updates via WebSocket
-- PnL, signals, trades, daily history
-- Fly.io deployment configuration
-- API credentials loaded only from environment variables / Fly secrets
+The bot predicts the direction of the next complete 3-minute candle:
 
-## Important
+* `UP` signal -> Deriv `HIGHER` -> Above Spot
+* `DOWN` signal -> Deriv `LOWER` -> Below Spot
 
-The included strategy is intentionally modular. `R25Strategy` is a starter implementation based on the current confluence framework. Before live-money use, verify Deriv proposal semantics and contract parameters against your account and run the system in demo mode.
+The strategy is evaluated from completed candles only. A qualified signal is created on the first observed tick belonging to the new 180-second candle boundary and the proposal is requested immediately. The system contains no manually configured barrier logic and does not require a barrier to trade.
+
+## Preserved behavior
+
+* No automatic maximum daily drawdown stop
+* Daily signal tracking
+* Daily PnL history
+* Win rate
+* Pending/open signals and trades
+* Dashboard navigation
+* Demo/live mode
+* PAT authentication
+* SQLite by default and PostgreSQL-compatible DATABASE_URL
+
+## Reliability
+
+The Deriv client uses separate public and trade WebSockets, bounded handshake timeouts, retrying handshakes, request timeouts, reader health checks, safe handling of non-text and non-JSON messages, and engine-level exponential reconnect backoff.
+
+Transient settlement errors are retried until the settlement deadline. A technical reconnect does not activate a financial drawdown stop.
 
 ## Local run
 
@@ -27,63 +36,35 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Open `http://localhost:8000`.
+Open `http://localhost:8080`.
 
 ## Fly.io
 
-Create the app, then set secrets:
+Set secrets:
 
 ```bash
-fly launch --no-deploy
-fly secrets set DERIV_APP_ID="..."
-fly secrets set DERIV_DEMO_TOKEN="..."
-fly secrets set DERIV_LIVE_TOKEN="..."
-fly secrets set BOT_MODE="demo"
-fly deploy
+fly secrets set DERIV_APP_ID="..." DERIV_PAT="..." BOT_MODE="demo" -a crypto-signal-bot-kooj9a
+fly deploy -a crypto-signal-bot-kooj9a
 ```
 
-For durable production data, set `DATABASE_URL` to a managed PostgreSQL connection string or attach a Fly volume if using SQLite.
+Use `BOT_MODE=live` only when you intentionally want live account selection. Keep credentials in Fly secrets. Never commit `.env`.
 
-## Runtime model
+## Runtime
 
-At each exact UTC 3-minute boundary:
+At each 180-second UTC candle boundary:
 
-1. Finalize the previous candle.
-2. Calculate features from completed candles only.
-3. Evaluate the strategy.
-4. If qualified, create a Higher or Lower signal.
-5. Request a Deriv proposal.
-6. Buy only when proposal conditions are valid.
-7. Track settlement.
-8. Persist the complete event and update the dashboard.
-
-The bot does not impose an automatic daily drawdown stop. Drawdown is tracked for analytics. Manual emergency stop and technical circuit breakers remain available.
+1. The previous candle is finalized.
+2. Completed-candle strategy features are evaluated.
+3. A qualified direction is mapped to HIGHER or LOWER.
+4. A barrier-free proposal is requested.
+5. The proposal is bought at the configured stake.
+6. The contract is polled until settlement.
+7. Trade result and PnL are persisted.
 
 ## Deployment verification
 
-The application exposes a build fingerprint at `/health`. After deploying, verify the running image:
-
 ```bash
-fly deploy -a crypto-signal-bot-kooj9a --remote-only
-curl https://crypto-signal-bot-kooj9a.fly.dev/health
+curl https://YOUR_APP.fly.dev/health
 ```
 
-Expected build value:
-
-```text
-2026-07-22-pat-boundary-fix-1
-```
-
-If `/health` does not show this build value, the new source is not the source running in Fly.io.
-
-Required secrets:
-
-```bash
-fly secrets set \
-  DERIV_APP_ID="YOUR_PAT_APP_ID" \
-  DERIV_PAT="YOUR_FULL_PAT_TOKEN" \
-  MARKET_BARRIERS="R_25=YOUR_R25_BARRIER" \
-  -a crypto-signal-bot-kooj9a
-```
-
-The PAT token is sent only as a Bearer token to the current Deriv REST API. The bot does not call the legacy `authorize` WebSocket method.
+Port `8080` is used consistently by the container, Docker Compose, FastAPI, and Fly.io.

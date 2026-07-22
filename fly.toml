@@ -2,8 +2,7 @@ app = "crypto-signal-bot-kooj9a"
 primary_region = "ams"
 
 [build]
-
-dockerfile = "Dockerfile"
+  dockerfile = "Dockerfile"
 
 [env]
   PORT = "8080"

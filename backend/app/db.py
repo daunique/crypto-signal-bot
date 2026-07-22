@@ -1,11 +1,11 @@
 from datetime import datetime, timezone
-from sqlalchemy import String, Float, Integer, Boolean, DateTime, Text
+from sqlalchemy import String, Float, Integer, DateTime, Text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from .config import get_settings
 
 settings = get_settings()
-engine = create_async_engine(settings.database_url, echo=False)
+engine = create_async_engine(settings.database_url, echo=False, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
@@ -18,11 +18,10 @@ class Signal(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
-    candle_epoch: Mapped[int] = mapped_column(Integer, index=True)
+    candle_epoch: Mapped[int] = mapped_column(Integer, index=True, unique=True)
     symbol: Mapped[str] = mapped_column(String(32))
     direction: Mapped[str] = mapped_column(String(16))
     contract_type: Mapped[str] = mapped_column(String(32))
-    barrier: Mapped[float] = mapped_column(Float)
     score: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32), default="QUALIFIED")
     reason: Mapped[str] = mapped_column(Text, default="")
@@ -43,7 +42,6 @@ class Trade(Base):
     profit: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="PENDING")
     entry_spot: Mapped[float | None] = mapped_column(Float, nullable=True)
-    barrier: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class BotEvent(Base):
@@ -61,5 +59,5 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
 
 
-async def session() -> AsyncSession:
+def session() -> AsyncSession:
     return SessionLocal()

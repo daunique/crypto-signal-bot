@@ -26,7 +26,6 @@ async function renderDashboard() {
       ${signal ? `<p><b>Status:</b> ${esc(signal.status)}</p>
       <p><b>Direction:</b> ${esc(signal.direction || "-")}</p>
       <p><b>Contract:</b> ${esc(signal.contract_type || "-")}</p>
-      <p><b>Barrier:</b> ${esc(signal.barrier || "-")}</p>
       <p><b>Score:</b> ${esc(signal.score || "-")}</p>
       <p><b>Reason:</b> ${esc(signal.reason || "-")}</p>` : "<p>Waiting for the next exact candle boundary.</p>"}
     </div>
@@ -41,8 +40,8 @@ async function renderDashboard() {
 
 async function renderSignals() {
   const rows = await getJSON("/api/signals");
-  app.innerHTML = `<div class="card"><h2>Signals</h2><table><thead><tr><th>Time</th><th>Direction</th><th>Contract</th><th>Barrier</th><th>Score</th><th>Status</th></tr></thead><tbody>
-  ${rows.map(x => `<tr><td>${esc(x.created_at)}</td><td>${esc(x.direction)}</td><td>${esc(x.contract_type)}</td><td>${esc(x.barrier)}</td><td>${esc(x.score)}</td><td><span class="badge">${esc(x.status)}</span></td></tr>`).join("")}
+  app.innerHTML = `<div class="card"><h2>Signals</h2><table><thead><tr><th>Time</th><th>Direction</th><th>Contract</th><th>Score</th><th>Status</th></tr></thead><tbody>
+  ${rows.map(x => `<tr><td>${esc(x.created_at)}</td><td>${esc(x.direction)}</td><td>${esc(x.contract_type)}</td><td>${esc(x.score)}</td><td><span class="badge">${esc(x.status)}</span></td></tr>`).join("")}
   </tbody></table></div>`;
 }
 
@@ -54,15 +53,15 @@ async function renderTrades() {
 }
 
 async function renderPnL() {
-  const rows = await getJSON("/api/trades?limit=500");
+  const rows = await getJSON("/api/pnl-history?limit=365");
   const byDay = {};
   rows.forEach(x => {
-    const day = String(x.created_at || "").slice(0, 10);
-    byDay[day] ||= { trades: 0, wins: 0, losses: 0, pnl: 0 };
-    byDay[day].trades++;
-    if (x.status === "WON") byDay[day].wins++;
-    if (x.status === "LOST") byDay[day].losses++;
-    byDay[day].pnl += Number(x.profit || 0);
+    byDay[x.date] = {
+      trades: Number(x.trades || 0),
+      wins: Number(x.wins || 0),
+      losses: Number(x.losses || 0),
+      pnl: Number(x.pnl || 0)
+    };
   });
   app.innerHTML = `<div class="card"><h2>Daily PnL History</h2><table><thead><tr><th>Date</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>PnL</th></tr></thead><tbody>
   ${Object.entries(byDay).sort().reverse().map(([d,x]) => `<tr><td>${d}</td><td>${x.trades}</td><td>${x.wins}</td><td>${x.losses}</td><td>${x.trades ? (x.wins/x.trades*100).toFixed(2) : "0"}%</td><td>${x.pnl.toFixed(2)}</td></tr>`).join("")}

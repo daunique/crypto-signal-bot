@@ -7,10 +7,8 @@ class Settings(BaseSettings):
     environment: str = "production"
     host: str = "0.0.0.0"
     port: int = 8080
-
     database_url: str = "sqlite+aiosqlite:///./data/bot.db"
 
-    # Current Deriv API authentication
     deriv_app_id: str = ""
     deriv_pat: str = ""
     deriv_account_id: str = ""
@@ -20,34 +18,24 @@ class Settings(BaseSettings):
     timeframe_seconds: int = 180
     stake: float = 1.0
     currency: str = "USD"
-    market_barriers: str = ""
     min_confluence_score: int = 6
     auto_trade: bool = True
+    request_timeout_seconds: float = 15.0
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+        case_sensitive=False,
+    )
 
-    @property
-    def barrier_map(self) -> dict[str, float]:
-        result: dict[str, float] = {}
-        for item in self.market_barriers.split(","):
-            item = item.strip()
-            if not item or "=" not in item:
-                continue
-            symbol, value = item.split("=", 1)
-            try:
-                result[symbol.strip()] = float(value.strip())
-            except ValueError:
-                raise ValueError(f"Invalid barrier value for {symbol.strip()}")
-        return result
-
-    def barrier_for(self, symbol: str) -> float:
-        barriers = self.barrier_map
-        if symbol not in barriers:
-            raise RuntimeError(
-                f"No market-specific barrier configured for {symbol}. "
-                "Set MARKET_BARRIERS=SYMBOL=value before trading."
-            )
-        return barriers[symbol]
+    def model_post_init(self, __context):
+        mode = self.bot_mode.lower().strip()
+        if mode not in {"demo", "live"}:
+            raise ValueError("BOT_MODE must be either 'demo' or 'live'")
+        if self.timeframe_seconds != 180:
+            raise ValueError("This bot is intentionally locked to 3-minute candles (180 seconds)")
+        if self.stake <= 0:
+            raise ValueError("STAKE must be greater than zero")
 
 
 @lru_cache
