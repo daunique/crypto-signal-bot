@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from sqlalchemy import select, func
+from sqlalchemy import select, func, and_
 from .config import get_settings
 from .db import session, Signal, Trade
 from .engine import BotEngine
@@ -13,8 +13,8 @@ engine = BotEngine()
 @router.get("/api/status")
 async def status():
     async with await session() as db:
-        trades = (await db.execute(select(Trade).order_by(Trade.created_at.desc()).limit(20))).scalars().all()
-        signals = (await db.execute(select(Signal).order_by(Signal.created_at.desc()).limit(20))).scalars().all()
+        trades = (await db.execute(select(Trade).order_by(Trade.created_at.desc()).limit(1000))).scalars().all()
+        signals = (await db.execute(select(Signal).order_by(Signal.created_at.desc()).limit(1000))).scalars().all()
         today = datetime.now(timezone.utc).date()
         day_trades = [t for t in trades if t.created_at and t.created_at.date() == today]
         wins = sum(1 for t in day_trades if t.status == "WON")

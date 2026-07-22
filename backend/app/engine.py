@@ -22,6 +22,8 @@ class BotEngine:
         self.candles: list[Candle] = []
         self.current_signal = None
         self.last_error = None
+        self.run_task = None
+        self.settlement_tasks: set[asyncio.Task] = set()
 
     async def log_event(self, level: str, event_type: str, message: str):
         async with SessionContext() as db:
@@ -33,17 +35,22 @@ class BotEngine:
             return
         self.running = True
         self.status = "STARTING"
-        asyncio.create_task(self.run())
+        self.run_task = asyncio.create_task(self.run(), name="deriv-bot-engine")
         log.info("Bot engine started")
 
     async def stop(self):
         self.running = False
-        self.status = "STOPPED"
+        self.status = "STOPPING"
         await self.client.close()
+        for task in list(self.settlement_tasks):
+            task.cancel()
+        self.settlement_tasks.clear()
+        self.status = "STOPPED"
 
     async def run(self):
         while self.running:
             try:
+                self.last_error = None
                 await self.client.connect()
                 await self.load_history()
                 self.status = "RUNNING"
@@ -54,11 +61,13 @@ class BotEngine:
                 self.last_error = str(exc)
                 self.status = "ERROR"
                 log.exception("Engine error")
-                await asyncio.sleep(5)
+                await self.client.close()
+                if self.running:
+                    await asyncio.sleep(5)
 
     async def load_history(self):
         raw = await self.client.get_candles(
-            self.settings.market_symbol, 120, self.settings.timeframe_seconds
+            self.settings.market_symbol, self.settings.history_count, self.settings.timeframe_seconds
         )
         self.candles = [
             Candle(
@@ -77,7 +86,10 @@ class BotEngine:
         async for tick in self.client.subscribe_ticks(self.settings.market_symbol):
             if not self.running:
                 break
-            epoch = int(tick["tick"]["epoch"])
+            tick_data = tick.get("tick") if isinstance(tick, dict) else None
+            if not isinstance(tick_data, dict) or "epoch" not in tick_data:
+                continue
+            epoch = int(tick_data["epoch"])
             boundary = epoch - (epoch % self.settings.timeframe_seconds)
             if self.last_candle_epoch is None:
                 self.last_candle_epoch = boundary
@@ -103,8 +115,12 @@ class BotEngine:
             low=float(completed["low"]),
             close=float(completed["close"]),
         )
+        # Replace the candle at this epoch rather than blindly appending.
+        # The initial history request can include the currently forming candle,
+        # and the boundary request returns the now-completed candle.
+        self.candles = [c for c in self.candles if c.epoch < candle.epoch]
         self.candles.append(candle)
-        self.candles = self.candles[-120:]
+        self.candles = self.candles[-self.settings.history_count:]
 
         decision = self.strategy.evaluate(self.candles)
         if not decision:
@@ -113,7 +129,8 @@ class BotEngine:
 
         direction = decision.direction
         contract_type = "HIGHER" if direction == "UP" else "LOWER"
-        barrier = self.settings.barrier_distance
+        # Barriers are market-specific. Never use a universal fallback.
+        barrier = self.settings.barrier_for_symbol(self.settings.market_symbol)
 
         async with SessionContext() as db:
             signal = Signal(
@@ -142,9 +159,9 @@ class BotEngine:
             }
 
             if self.settings.auto_trade:
-                await self.execute(signal, candle.open)
+                await self.execute(signal)
 
-    async def execute(self, signal: Signal, spot: float):
+    async def execute(self, signal: Signal):
         try:
             proposal = await self.client.proposal(
                 self.settings.market_symbol,
@@ -153,7 +170,6 @@ class BotEngine:
                 self.settings.currency,
                 self.settings.timeframe_seconds,
                 signal.barrier,
-                spot,
             )
             prop = proposal.get("proposal", {})
             proposal_id = prop.get("id")
@@ -175,19 +191,23 @@ class BotEngine:
                     stake=self.settings.stake,
                     payout=float(prop.get("payout", 0) or 0),
                     status="OPEN",
-                    entry_spot=spot,
+                    entry_spot=None,
                     barrier=signal.barrier,
                 ))
                 signal.status = "EXECUTED"
                 await db.commit()
 
             if contract_id:
-                asyncio.create_task(self.settle(contract_id))
+                task = asyncio.create_task(self.settle(contract_id), name=f"settle-{contract_id}")
+                self.settlement_tasks.add(task)
+                task.add_done_callback(self.settlement_tasks.discard)
         except Exception as exc:
             log.exception("Execution failed")
             async with SessionContext() as db:
-                signal.status = "EXECUTION_ERROR"
-                await db.commit()
+                row = (await db.execute(select(Signal).where(Signal.id == signal.id))).scalar_one_or_none()
+                if row:
+                    row.status = "EXECUTION_ERROR"
+                    await db.commit()
 
     async def settle(self, contract_id: str):
         # Polling settlement keeps the initial implementation simple and

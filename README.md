@@ -1,60 +1,60 @@
 # Deriv Higher/Lower Bot
 
-A production-oriented starter system for a 3-minute Deriv Higher/Lower bot.
+Production-oriented 3-minute Higher/Lower bot for Volatility 25 Index.
 
-## Architecture
+## Current Deriv API authentication
 
-- FastAPI backend
-- Async Deriv WebSocket client
-- Exact 3-minute candle boundary signal evaluation
-- Higher signal -> Higher / Above Spot
-- Lower signal -> Lower / Below Spot
-- Demo / Live mode
-- SQLite by default, PostgreSQL-ready via DATABASE_URL
-- Real-time dashboard updates via WebSocket
-- PnL, signals, trades, daily history
-- Fly.io deployment configuration
-- API credentials loaded only from environment variables / Fly secrets
+This build uses the current PAT application flow. It does **not** use the legacy `wss://ws.derivws.com/websockets/v3?app_id=...` + `authorize` flow.
 
-## Important
+1. REST: authenticate with `Deriv-App-ID` + `Authorization: Bearer <PAT>`
+2. REST: discover the demo/real Options account, unless `DERIV_ACCOUNT_ID` is explicitly set
+3. REST: request a short-lived OTP WebSocket URL
+4. WebSocket: connect to the returned authenticated URL
+5. Public WebSocket: stream market ticks separately
 
-The included strategy is intentionally modular. `R25Strategy` is a starter implementation based on the current confluence framework. Before live-money use, verify Deriv proposal semantics and contract parameters against your account and run the system in demo mode.
+This separation prevents concurrent reads from one WebSocket from corrupting request/response handling.
 
-## Local run
+## Fly.io secrets
+
+```bash
+fly secrets set \
+  DERIV_APP_ID="YOUR_PAT_APP_ID" \
+  DERIV_PAT="YOUR_FULL_PERSONAL_ACCESS_TOKEN" \
+  BOT_MODE="demo" \
+  -a crypto-signal-bot-kooj9a
+```
+
+Optional if you want to pin the account: `DERIV_ACCOUNT_ID="DOT..."`.
+
+The PAT must belong to the PAT application and include the `trade` scope. Do not put the token in `fly.toml`, Dockerfile, frontend code, Git, or logs.
+
+## Deploy
+
+```bash
+fly deploy
+fly logs -a crypto-signal-bot-kooj9a
+```
+
+The service listens on port 8080 and exposes `/health`.
+
+## Local
 
 ```bash
 cp .env.example .env
 docker compose up --build
 ```
 
-Open `http://localhost:8000`.
+## Runtime
 
-## Fly.io
+At each exact UTC 3-minute boundary, the bot uses completed candle data only, evaluates the strategy, and if qualified maps UP to `HIGHER` with a positive relative barrier and DOWN to `LOWER` with a negative relative barrier. There is no automatic daily drawdown stop.
 
-Create the app, then set secrets:
+## Market-specific barriers
 
-```bash
-fly launch --no-deploy
-fly secrets set DERIV_APP_ID="..."
-fly secrets set DERIV_DEMO_TOKEN="..."
-fly secrets set DERIV_LIVE_TOKEN="..."
-fly secrets set BOT_MODE="demo"
-fly deploy
+The bot does not contain a universal barrier value. Configure barriers explicitly per symbol:
+
+```env
+MARKET_SYMBOL=R_25
+MARKET_BARRIERS=R_25=YOUR_TESTED_R25_BARRIER,R_10=YOUR_TESTED_R10_BARRIER,R_100=YOUR_TESTED_R100_BARRIER
 ```
 
-For durable production data, set `DATABASE_URL` to a managed PostgreSQL connection string or attach a Fly volume if using SQLite.
-
-## Runtime model
-
-At each exact UTC 3-minute boundary:
-
-1. Finalize the previous candle.
-2. Calculate features from completed candles only.
-3. Evaluate the strategy.
-4. If qualified, create a Higher or Lower signal.
-5. Request a Deriv proposal.
-6. Buy only when proposal conditions are valid.
-7. Track settlement.
-8. Persist the complete event and update the dashboard.
-
-The bot does not impose an automatic daily drawdown stop. Drawdown is tracked for analytics. Manual emergency stop and technical circuit breakers remain available.
+If the selected market has no configured barrier, the bot refuses to execute the trade. This prevents a barrier tested for one Volatility Index from being accidentally reused on another.

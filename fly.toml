@@ -1,13 +1,14 @@
-app = "replace-with-your-unique-app-name"
+app = "crypto-signal-bot-kooj9a"
 primary_region = "ams"
 
 [build]
 
 [env]
-  PORT = "8000"
+  PORT = "8080"
   BOT_MODE = "demo"
   MARKET_SYMBOL = "R_25"
   TIMEFRAME_SECONDS = "180"
+  HISTORY_COUNT = "120"
   AUTO_TRADE = "true"
 
 [http_service]
@@ -17,6 +18,13 @@ primary_region = "ams"
   auto_start_machines = true
   min_machines_running = 1
   processes = ["app"]
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/health"
 
 [[vm]]
   memory = "512mb"
