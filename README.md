@@ -2,6 +2,22 @@
 
 Production-oriented 3-minute Deriv Higher/Lower bot.
 
+## 2026-07-23 (latest): barrier value rejected (`InvalidBarrier`) — adaptive retry
+
+After the fix below, trades executed as genuine Higher/Lower, but then started failing with a *different* error:
+
+```
+RuntimeError: {'code': 'ContractBuyValidationError', 'message': 'Invalid barrier.', 'subcode': 'InvalidBarrier'}
+```
+
+This is a different failure than the earlier `InvalidBarrierSingle` — a barrier *is* present now, but its value was rejected. The traceback confirms this happens at the `proposal()` call itself.
+
+**Root cause, honestly stated:** Deriv's documented way to know the valid barrier range for a symbol/duration is the `contracts_for` endpoint, but its precise current response shape (exact field names for min/max barrier limits) couldn't be confidently confirmed against current docs/schemas at the time of this fix, despite substantial research (multiple official Deriv sources were checked — see git history of this file for the trail). Rather than guess a hardcoded "safe" magnitude and risk being wrong again in a different way, the fix makes barrier sizing **self-correcting**:
+
+**Fix:** `deriv.py` now raises a structured `DerivAPIError` (with `.code`/`.subcode`) instead of a generic stringified `RuntimeError`, so calling code can react to specific error types. `engine.py`'s new `_propose_with_barrier_retry()` tries the ATR-derived barrier first, and on a `subcode == "InvalidBarrier"` rejection specifically (any other error still fails immediately, unretried), retries with progressively smaller values, ending with two small fixed fallbacks: `[computed, computed×0.5, computed×0.25, 0.1, 0.05]`. Whichever value Deriv actually accepts is what gets stored on the `Trade` record and used for the real trade — this also means future logs will show exactly what worked, turning this from a guessing game into an evidence trail.
+
+**If trades are still failing after this:** check the logs for `"Barrier %.3f rejected"` / `"Execution failed"` — if every candidate in that list is being rejected, the barrier size isn't the (only) issue and something else needs investigating (e.g. account trading permissions, symbol availability, balance). Please share the new log if that happens.
+
 ## 2026-07-23 (later): real Higher/Lower barrier + settlement tracking fix
 
 Two more issues surfaced once the fix above got trades actually executing:
@@ -121,7 +137,7 @@ At each 180-second UTC candle boundary:
 1. The previous candle is finalized.
 2. Completed-candle strategy features are evaluated, including the recent average candle range (ATR).
 3. A qualified direction is mapped to `CALL` (higher) or `PUT` (lower) — see "Trading contract semantics" above.
-4. A Higher/Lower proposal is requested with a signed barrier sized from the ATR.
+4. A Higher/Lower proposal is requested with a signed barrier sized from the ATR, adaptively retrying with a smaller/fallback barrier if Deriv rejects the value (see changelog above).
 5. The proposal is bought at the configured stake.
 6. The contract is polled until settlement.
 7. Trade result and PnL are persisted.

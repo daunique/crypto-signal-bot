@@ -15,6 +15,22 @@ API_BASE = "https://api.derivws.com"
 PUBLIC_WS = "wss://api.derivws.com/trading/v1/options/ws/public"
 
 
+class DerivAPIError(RuntimeError):
+    """A structured error response from Deriv (the `error` object of a reply).
+
+    Carries `.code`/`.subcode` so callers can react to specific failures
+    (e.g. retrying with an adjusted barrier on InvalidBarrier) without
+    parsing the stringified exception message.
+    """
+
+    def __init__(self, error: dict[str, Any]):
+        self.code = error.get("code")
+        self.subcode = error.get("subcode")
+        self.message = error.get("message")
+        self.details = error.get("details")
+        super().__init__(str(error))
+
+
 class DerivClient:
     """Resilient Deriv current API client using PAT authentication.
 
@@ -186,7 +202,7 @@ class DerivClient:
                     future = waiters.pop(req_id)
                     if not future.done():
                         if message.get("error"):
-                            future.set_exception(RuntimeError(str(message["error"])))
+                            future.set_exception(DerivAPIError(message["error"]))
                         else:
                             future.set_result(message)
                     continue

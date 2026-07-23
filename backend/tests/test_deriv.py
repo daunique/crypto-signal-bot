@@ -1,6 +1,20 @@
 import pytest
 
-from backend.app.deriv import DerivClient
+from backend.app.deriv import DerivClient, DerivAPIError
+
+
+def test_deriv_api_error_exposes_code_and_subcode():
+    # Regression test: engine.py's barrier-retry logic needs to distinguish
+    # an InvalidBarrier rejection from any other API error programmatically
+    # (exc.subcode), not by parsing the stringified exception message.
+    exc = DerivAPIError({
+        "code": "ContractBuyValidationError",
+        "message": "Invalid barrier.",
+        "subcode": "InvalidBarrier",
+    })
+    assert exc.code == "ContractBuyValidationError"
+    assert exc.subcode == "InvalidBarrier"
+    assert exc.message == "Invalid barrier."
 
 
 def test_proposal_payload_uses_deriv_contract_types_not_direction_labels():

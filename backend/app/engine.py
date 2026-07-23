@@ -3,7 +3,7 @@ import logging
 import time
 from .config import get_settings
 from .db import session, Signal, Trade, BotEvent
-from .deriv import DerivClient
+from .deriv import DerivClient, DerivAPIError
 from .strategy import Candle, R25Strategy
 from sqlalchemy import select
 
@@ -179,17 +179,8 @@ class BotEngine:
             if not signal:
                 return
             try:
-                # build_proposal_payload is called here purely to read back
-                # the exact signed barrier string (e.g. "+0.523") for the
-                # Trade record below; proposal() independently builds and
-                # sends the same payload over the wire.
-                barrier_str = self.client.build_proposal_payload(
-                    self.settings.market_symbol, signal.direction, self.settings.stake,
-                    self.settings.currency, self.settings.timeframe_seconds, barrier_offset,
-                )["barrier"]
-                proposal = await self.client.proposal(
-                    self.settings.market_symbol, signal.direction, self.settings.stake,
-                    self.settings.currency, self.settings.timeframe_seconds, barrier_offset,
+                proposal, barrier_str, used_offset = await self._propose_with_barrier_retry(
+                    signal.direction, barrier_offset,
                 )
                 prop = proposal.get("proposal", {})
                 proposal_id = prop.get("id")
@@ -217,6 +208,51 @@ class BotEngine:
                 await db.commit()
                 self.last_error = str(exc)
                 log.exception("Execution failed")
+
+    async def _propose_with_barrier_retry(self, direction: str, barrier_offset: float):
+        """Request a proposal, adaptively adjusting the barrier if Deriv
+        rejects it as invalid.
+
+        The ATR-derived barrier_offset is a reasonable starting estimate,
+        but this bot has no confirmed, authoritative source for Deriv's
+        exact live min/max barrier bounds for this symbol/duration
+        (`contracts_for` is Deriv's documented way to look them up, but its
+        precise current response shape could not be confidently verified).
+        Rather than risk hardcoding a wrong bound, this empirically finds a
+        value Deriv accepts: on a `subcode == "InvalidBarrier"` rejection it
+        retries with the next candidate before giving up. The candidates
+        mostly shrink, but end with two small fixed fallbacks (which could
+        end up *larger* than a very small original estimate) so this can
+        recover whether the rejection was for being too far from spot or
+        too close to it. Any other error (wrong symbol, insufficient
+        balance, connection issue, etc.) is raised immediately, unretried.
+        """
+        candidates = [barrier_offset, barrier_offset * 0.5, barrier_offset * 0.25, 0.1, 0.05]
+        last_error: Exception = RuntimeError("No barrier candidate available")
+        for i, offset in enumerate(candidates):
+            if offset <= 0:
+                continue
+            try:
+                barrier_str = self.client.build_proposal_payload(
+                    self.settings.market_symbol, direction, self.settings.stake,
+                    self.settings.currency, self.settings.timeframe_seconds, offset,
+                )["barrier"]
+                proposal = await self.client.proposal(
+                    self.settings.market_symbol, direction, self.settings.stake,
+                    self.settings.currency, self.settings.timeframe_seconds, offset,
+                )
+                if i > 0:
+                    log.warning(
+                        "Barrier accepted at %.3f after %d rejection(s) (originally computed %.3f)",
+                        offset, i, barrier_offset,
+                    )
+                return proposal, barrier_str, offset
+            except DerivAPIError as exc:
+                last_error = exc
+                if exc.subcode != "InvalidBarrier":
+                    raise
+                log.warning("Barrier %.3f rejected (InvalidBarrier); trying a smaller offset", offset)
+        raise last_error
 
     async def settle(self, contract_id: str):
         deadline = time.monotonic() + self.settings.timeframe_seconds + 120  # + grace period for settlement lag
