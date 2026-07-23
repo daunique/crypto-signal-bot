@@ -145,6 +145,11 @@ class BotEngine:
 
         direction = decision.direction
         contract_type = "HIGHER" if direction == "UP" else "LOWER"
+        # Deriv's Higher/Lower barrier is sized as a fraction of the recent
+        # average candle range (ATR), so it scales with actual current
+        # volatility instead of a fixed point value going stale. See
+        # config.py's barrier_atr_fraction and README.
+        barrier_offset = decision.atr * self.settings.barrier_atr_fraction
         async with session() as db:
             signal = Signal(
                 candle_epoch=candle_epoch,
@@ -154,6 +159,7 @@ class BotEngine:
                 score=decision.score,
                 status="QUALIFIED",
                 reason=decision.reason,
+                barrier_offset=barrier_offset,
             )
             db.add(signal)
             await db.commit()
@@ -162,20 +168,28 @@ class BotEngine:
                 "id": signal.id, "status": "QUALIFIED", "direction": direction,
                 "contract_type": contract_type, "score": decision.score,
                 "reason": decision.reason, "candle_epoch": candle_epoch,
-                "entry_spot": entry_spot,
+                "entry_spot": entry_spot, "barrier_offset": barrier_offset,
             }
             if self.settings.auto_trade:
-                await self.execute(signal.id, entry_spot)
+                await self.execute(signal.id, entry_spot, barrier_offset)
 
-    async def execute(self, signal_id: int, spot: float):
+    async def execute(self, signal_id: int, spot: float, barrier_offset: float):
         async with session() as db:
             signal = await db.get(Signal, signal_id)
             if not signal:
                 return
             try:
+                # build_proposal_payload is called here purely to read back
+                # the exact signed barrier string (e.g. "+0.523") for the
+                # Trade record below; proposal() independently builds and
+                # sends the same payload over the wire.
+                barrier_str = self.client.build_proposal_payload(
+                    self.settings.market_symbol, signal.direction, self.settings.stake,
+                    self.settings.currency, self.settings.timeframe_seconds, barrier_offset,
+                )["barrier"]
                 proposal = await self.client.proposal(
                     self.settings.market_symbol, signal.direction, self.settings.stake,
-                    self.settings.currency, self.settings.timeframe_seconds,
+                    self.settings.currency, self.settings.timeframe_seconds, barrier_offset,
                 )
                 prop = proposal.get("proposal", {})
                 proposal_id = prop.get("id")
@@ -191,7 +205,7 @@ class BotEngine:
                     signal_id=signal.id, contract_id=contract_id, symbol=signal.symbol,
                     mode=self.settings.bot_mode, direction=signal.direction,
                     stake=self.settings.stake, payout=float(prop.get("payout", 0) or 0),
-                    status="OPEN", entry_spot=spot,
+                    status="OPEN", entry_spot=spot, barrier=barrier_str,
                 ))
                 signal.status = "EXECUTED"
                 await db.commit()

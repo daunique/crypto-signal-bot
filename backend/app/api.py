@@ -26,6 +26,7 @@ async def status():
         return {
             "bot_status": engine.status, "mode": settings.bot_mode, "symbol": settings.market_symbol,
             "timeframe_seconds": 180, "auto_trade": settings.auto_trade,
+            "barrier_atr_fraction": settings.barrier_atr_fraction,
             "current_signal": engine.current_signal, "last_error": engine.last_error,
             "today": {"signals": int(signal_count or 0), "trades": int(trades), "pending": int(pending or 0),
                       "wins": int(wins or 0), "losses": int(losses or 0),
@@ -41,7 +42,8 @@ async def signals(limit: int = 100):
         rows = (await db.execute(select(Signal).order_by(Signal.created_at.desc()).limit(limit))).scalars().all()
         return [{"id": x.id, "created_at": x.created_at, "candle_epoch": x.candle_epoch,
                  "symbol": x.symbol, "direction": x.direction, "contract_type": x.contract_type,
-                 "score": x.score, "status": x.status, "reason": x.reason} for x in rows]
+                 "score": x.score, "status": x.status, "reason": x.reason,
+                 "barrier_offset": x.barrier_offset} for x in rows]
 
 
 @router.get("/api/trades")
@@ -52,7 +54,7 @@ async def trades(limit: int = 100):
         return [{"id": x.id, "created_at": x.created_at, "contract_id": x.contract_id,
                  "symbol": x.symbol, "mode": x.mode, "direction": x.direction,
                  "stake": x.stake, "payout": x.payout, "profit": x.profit,
-                 "status": x.status, "entry_spot": x.entry_spot} for x in rows]
+                 "status": x.status, "entry_spot": x.entry_spot, "barrier": x.barrier} for x in rows]
 
 
 @router.get("/api/pnl-history")

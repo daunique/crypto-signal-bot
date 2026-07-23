@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     min_confluence_score: int = 6
     auto_trade: bool = True
     request_timeout_seconds: float = 15.0
+    # Deriv's Higher/Lower product requires a signed offset `barrier` (see
+    # README). This is sized dynamically as a fraction of the recent average
+    # candle range (ATR) rather than a fixed point value, so it scales with
+    # R_25's actual current volatility instead of going stale if the
+    # volatility regime shifts. Larger = harder to win but bigger payout;
+    # smaller = closer to Rise/Fall odds. Tune to taste.
+    barrier_atr_fraction: float = 0.25
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -42,6 +49,8 @@ class Settings(BaseSettings):
             raise ValueError("This bot is intentionally locked to 3-minute candles (180 seconds)")
         if self.stake <= 0:
             raise ValueError("STAKE must be greater than zero")
+        if self.barrier_atr_fraction <= 0:
+            raise ValueError("BARRIER_ATR_FRACTION must be greater than zero")
 
 
 @lru_cache

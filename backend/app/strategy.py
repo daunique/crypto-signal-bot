@@ -17,6 +17,7 @@ class SignalDecision:
     direction: str
     score: int
     reason: str
+    atr: float = 0.0
 
 
 class R25Strategy:
@@ -95,9 +96,9 @@ class R25Strategy:
                 reasons_down.append("acceptable volatility")
 
         if score_up >= self.minimum_score and score_up > score_down:
-            return SignalDecision("UP", score_up, ", ".join(reasons_up))
+            return SignalDecision("UP", score_up, ", ".join(reasons_up), atr=atr)
         if score_down >= self.minimum_score and score_down > score_up:
-            return SignalDecision("DOWN", score_down, ", ".join(reasons_down))
+            return SignalDecision("DOWN", score_down, ", ".join(reasons_down), atr=atr)
         return None
 
     @staticmethod

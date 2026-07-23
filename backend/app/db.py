@@ -1,9 +1,11 @@
+import logging
 from datetime import datetime, timezone
-from sqlalchemy import String, Float, Integer, DateTime, Text
+from sqlalchemy import String, Float, Integer, DateTime, Text, inspect, text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from .config import get_settings
 
+log = logging.getLogger(__name__)
 settings = get_settings()
 engine = create_async_engine(settings.database_url, echo=False, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
@@ -25,6 +27,7 @@ class Signal(Base):
     score: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32), default="QUALIFIED")
     reason: Mapped[str] = mapped_column(Text, default="")
+    barrier_offset: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class Trade(Base):
@@ -42,6 +45,7 @@ class Trade(Base):
     profit: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="PENDING")
     entry_spot: Mapped[float | None] = mapped_column(Float, nullable=True)
+    barrier: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
 class BotEvent(Base):
@@ -57,6 +61,24 @@ class BotEvent(Base):
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # create_all() only creates brand-new tables -- it won't add a
+        # newly-introduced column (barrier_offset, barrier) to a table that
+        # already exists from a prior deploy. This project has no migration
+        # framework, so do the minimal additive migration by hand. Column
+        # existence is checked *before* attempting ALTER TABLE, rather than
+        # attempting-and-ignoring-the-error, because on Postgres a failed
+        # statement (e.g. "column already exists") poisons the rest of the
+        # transaction, unlike on SQLite.
+        await _add_column_if_missing(conn, "signals", "barrier_offset", "FLOAT")
+        await _add_column_if_missing(conn, "trades", "barrier", "VARCHAR(16)")
+
+
+async def _add_column_if_missing(conn, table: str, column: str, ddl_type: str):
+    def _has_column(sync_conn):
+        return column in {c["name"] for c in inspect(sync_conn).get_columns(table)}
+    if not await conn.run_sync(_has_column):
+        await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+        log.info("DB_MIGRATION added %s.%s", table, column)
 
 
 def session() -> AsyncSession:

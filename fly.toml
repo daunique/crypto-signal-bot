@@ -10,6 +10,7 @@ primary_region = "ams"
   MARKET_SYMBOL = "R_25"
   TIMEFRAME_SECONDS = "180"
   AUTO_TRADE = "true"
+  BARRIER_ATR_FRACTION = "0.25"
 
 [http_service]
   internal_port = 8080

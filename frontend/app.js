@@ -30,6 +30,7 @@ async function renderDashboard() {
       <p><b>Direction:</b> ${esc(signal.direction || "-")}</p>
       <p><b>Contract:</b> ${esc(signal.contract_type || "-")}</p>
       <p><b>Score:</b> ${esc(signal.score || "-")}</p>
+      <p><b>Barrier offset:</b> ${signal.barrier_offset != null ? Number(signal.barrier_offset).toFixed(3) : "-"}</p>
       <p><b>Reason:</b> ${esc(signal.reason || "-")}</p>` : "<p>Waiting for the next exact candle boundary.</p>"}
     </div>
     <div class="card panel">
@@ -43,15 +44,15 @@ async function renderDashboard() {
 
 async function renderSignals() {
   const rows = await getJSON("/api/signals");
-  app.innerHTML = `<div class="card"><h2>Signals</h2><table><thead><tr><th>Time</th><th>Direction</th><th>Contract</th><th>Score</th><th>Status</th></tr></thead><tbody>
-  ${rows.map(x => `<tr><td>${esc(x.created_at)}</td><td>${esc(x.direction)}</td><td>${esc(x.contract_type)}</td><td>${esc(x.score)}</td><td><span class="badge">${esc(x.status)}</span></td></tr>`).join("")}
+  app.innerHTML = `<div class="card"><h2>Signals</h2><table><thead><tr><th>Time</th><th>Direction</th><th>Contract</th><th>Barrier</th><th>Score</th><th>Status</th></tr></thead><tbody>
+  ${rows.map(x => `<tr><td>${esc(x.created_at)}</td><td>${esc(x.direction)}</td><td>${esc(x.contract_type)}</td><td>${x.barrier_offset != null ? Number(x.barrier_offset).toFixed(3) : "-"}</td><td>${esc(x.score)}</td><td><span class="badge">${esc(x.status)}</span></td></tr>`).join("")}
   </tbody></table></div>`;
 }
 
 async function renderTrades() {
   const rows = await getJSON("/api/trades");
-  app.innerHTML = `<div class="card"><h2>Trades</h2><table><thead><tr><th>Time</th><th>Mode</th><th>Direction</th><th>Stake</th><th>Profit</th><th>Status</th></tr></thead><tbody>
-  ${rows.map(x => `<tr><td>${esc(x.created_at)}</td><td>${esc(x.mode)}</td><td>${esc(x.direction)}</td><td>${esc(x.stake)}</td><td>${esc(x.profit)}</td><td><span class="badge">${esc(x.status)}</span></td></tr>`).join("")}
+  app.innerHTML = `<div class="card"><h2>Trades</h2><table><thead><tr><th>Time</th><th>Mode</th><th>Direction</th><th>Barrier</th><th>Stake</th><th>Profit</th><th>Status</th></tr></thead><tbody>
+  ${rows.map(x => `<tr><td>${esc(x.created_at)}</td><td>${esc(x.mode)}</td><td>${esc(x.direction)}</td><td>${esc(x.barrier || "-")}</td><td>${esc(x.stake)}</td><td>${esc(x.profit)}</td><td><span class="badge">${esc(x.status)}</span></td></tr>`).join("")}
   </tbody></table></div>`;
 }
 
@@ -71,10 +72,12 @@ async function renderPnL() {
   </tbody></table></div>`;
 }
 
-function renderSettings() {
+async function renderSettings() {
+  const s = await getJSON("/api/status");
   app.innerHTML = `<div class="card"><h2>Settings</h2>
     <p>Strategy and execution settings are currently controlled by environment variables.</p>
     <p>Mode: <b>Demo/Live is selected server-side via BOT_MODE.</b></p>
+    <p>Barrier size: <b>${Number(s.barrier_atr_fraction).toFixed(2)}&times; recent average candle range (BARRIER_ATR_FRACTION)</b></p>
     <p>API tokens are never sent to the browser.</p>
   </div>`;
 }
@@ -85,7 +88,7 @@ async function render() {
   if (currentPage === "signals") await renderSignals();
   if (currentPage === "trades") await renderTrades();
   if (currentPage === "pnl") await renderPnL();
-  if (currentPage === "settings") renderSettings();
+  if (currentPage === "settings") await renderSettings();
 }
 
 document.querySelectorAll(".nav").forEach(btn => btn.addEventListener("click", () => {

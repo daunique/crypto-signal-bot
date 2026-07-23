@@ -20,3 +20,13 @@ def test_bot_mode_rejects_unknown_values():
         assert False, "expected ValueError for an unrecognized BOT_MODE"
     except ValueError:
         pass
+
+
+def test_barrier_atr_fraction_must_be_positive():
+    assert Settings(barrier_atr_fraction=0.25).barrier_atr_fraction == 0.25
+    for bad_value in (0, -0.1):
+        try:
+            Settings(barrier_atr_fraction=bad_value)
+            assert False, "expected ValueError for a non-positive BARRIER_ATR_FRACTION"
+        except ValueError:
+            pass

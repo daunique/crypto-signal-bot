@@ -18,8 +18,9 @@ PUBLIC_WS = "wss://api.derivws.com/trading/v1/options/ws/public"
 class DerivClient:
     """Resilient Deriv current API client using PAT authentication.
 
-    Market data and trading use separate WebSocket connections. No legacy
-    authorize flow and no manually configured barrier are used.
+    Market data and trading use separate WebSocket connections. Trades are
+    genuine Higher/Lower contracts: a signed, relative `barrier` offset is
+    always included (see build_proposal_payload).
     """
 
     # Deriv's real contract_type values for this trade are CALL (predict the
@@ -237,11 +238,20 @@ class DerivClient:
         }, channel="public")
         return response.get("candles", [])
 
-    def build_proposal_payload(self, symbol: str, direction: str, amount: float, currency: str, duration: int) -> dict[str, Any]:
+    def build_proposal_payload(self, symbol: str, direction: str, amount: float, currency: str, duration: int, barrier_offset: float) -> dict[str, Any]:
         try:
             contract_type = self.DIRECTION_TO_CONTRACT_TYPE[direction]
         except KeyError:
             raise ValueError(f"Unknown signal direction: {direction!r}") from None
+        if barrier_offset <= 0:
+            raise ValueError(f"barrier_offset must be > 0 for a Higher/Lower contract, got {barrier_offset!r}")
+        # Deriv's Higher/Lower barrier must be a signed, relative offset for
+        # contracts under 24h in duration (ours are 180s) -- see
+        # https://developers.deriv.com/docs/higherlower and
+        # https://legacy-docs.deriv.com/docs/higherlower. Positive/CALL =
+        # barrier above the entry spot ("Higher"); negative/PUT = barrier
+        # below the entry spot ("Lower").
+        signed_offset = barrier_offset if direction == "UP" else -barrier_offset
         return {
             "proposal": 1,
             "amount": amount,
@@ -251,22 +261,24 @@ class DerivClient:
             "duration": duration,
             "duration_unit": "s",
             "underlying_symbol": symbol,
+            "barrier": f"{signed_offset:+.3f}",
         }
 
-    async def proposal(self, symbol: str, direction: str, amount: float, currency: str, duration: int) -> dict[str, Any]:
-        # No `barrier` field is sent, which is what makes this a barrier-free
-        # "Rise/Fall" style contract, decided purely against the entry spot.
-        # Deriv's separate "Higher/Lower" product reuses this same CALL/PUT
-        # contract_type but additionally requires a signed offset `barrier`
-        # (e.g. "+0.37"), which changes the payout/risk profile and is not
-        # enabled here.
-        payload = self.build_proposal_payload(symbol, direction, amount, currency, duration)
+    async def proposal(self, symbol: str, direction: str, amount: float, currency: str, duration: int, barrier_offset: float) -> dict[str, Any]:
+        payload = self.build_proposal_payload(symbol, direction, amount, currency, duration, barrier_offset)
         return await self.request(payload, channel="trade")
 
     async def buy(self, proposal_id: str, price: float) -> dict[str, Any]:
         return await self.request({"buy": proposal_id, "price": price}, channel="trade")
 
+    def build_proposal_open_contract_payload(self, contract_id: str) -> dict[str, Any]:
+        # Per Deriv's schema, `subscribe` is optional but its *only* legal
+        # value is the integer 1 -- there is no "0" for a one-shot check,
+        # you simply omit the field. Sending 0 (as this used to) is
+        # rejected with InputValidationFailed on every single poll attempt,
+        # meaning contract settlement was never being recorded.
+        return {"proposal_open_contract": 1, "contract_id": int(contract_id)}
+
     async def proposal_open_contract(self, contract_id: str) -> dict[str, Any]:
-        return await self.request({
-            "proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 0,
-        }, channel="trade")
+        payload = self.build_proposal_open_contract_payload(contract_id)
+        return await self.request(payload, channel="trade")
