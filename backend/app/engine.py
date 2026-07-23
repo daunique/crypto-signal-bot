@@ -75,7 +75,7 @@ class BotEngine:
                     backoff = min(backoff * 2, 60)
 
     async def load_history(self):
-        raw = await self.client.get_candles(self.settings.market_symbol, 120, 180)
+        raw = await self.client.get_candles(self.settings.market_symbol, 120, self.settings.timeframe_seconds)
         unique = {}
         for x in raw:
             try:
@@ -99,7 +99,7 @@ class BotEngine:
                 spot = float(tick_data["quote"])
             except (KeyError, TypeError, ValueError):
                 continue
-            boundary = epoch - (epoch % 180)
+            boundary = epoch - (epoch % self.settings.timeframe_seconds)
             if self.last_candle_epoch is None:
                 self.last_candle_epoch = boundary
                 continue
@@ -109,7 +109,23 @@ class BotEngine:
                 await self.on_exact_candle_open(boundary, spot, completed_epoch)
 
     async def on_exact_candle_open(self, candle_epoch: int, entry_spot: float, completed_epoch: int):
-        raw = await self.client.get_candles(self.settings.market_symbol, 2, 180)
+        async with session() as db:
+            existing = (await db.execute(select(Signal).where(Signal.candle_epoch == candle_epoch))).scalar_one_or_none()
+        if existing is not None:
+            # candle_epoch is unique in the DB. Without this check, a
+            # reconnect/restart that lands back on the same in-progress
+            # candle would try to insert a duplicate Signal, raise an
+            # unhandled IntegrityError, and crash the whole engine loop
+            # (which would then just retry the same failure every backoff
+            # cycle until the candle finally closed).
+            self.current_signal = {
+                "id": existing.id, "status": existing.status, "direction": existing.direction,
+                "contract_type": existing.contract_type, "score": existing.score,
+                "reason": existing.reason, "candle_epoch": candle_epoch,
+                "entry_spot": entry_spot,
+            }
+            return
+        raw = await self.client.get_candles(self.settings.market_symbol, 2, self.settings.timeframe_seconds)
         completed = next((x for x in raw if int(x.get("epoch", -1)) == completed_epoch), None)
         if completed is None and len(raw) >= 2:
             completed = raw[-2]
@@ -159,7 +175,7 @@ class BotEngine:
             try:
                 proposal = await self.client.proposal(
                     self.settings.market_symbol, signal.direction, self.settings.stake,
-                    self.settings.currency, 180,
+                    self.settings.currency, self.settings.timeframe_seconds,
                 )
                 prop = proposal.get("proposal", {})
                 proposal_id = prop.get("id")
@@ -189,7 +205,7 @@ class BotEngine:
                 log.exception("Execution failed")
 
     async def settle(self, contract_id: str):
-        deadline = time.monotonic() + 180 + 120
+        deadline = time.monotonic() + self.settings.timeframe_seconds + 120  # + grace period for settlement lag
         while time.monotonic() < deadline and self.running:
             try:
                 result = await self.client.proposal_open_contract(contract_id)

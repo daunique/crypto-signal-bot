@@ -14,6 +14,9 @@ async function renderDashboard() {
   const s = await getJSON("/api/status");
   const t = s.today;
   const signal = s.current_signal;
+  const modeBadge = document.getElementById("modeBadge");
+  modeBadge.textContent = esc(s.mode).toUpperCase();
+  modeBadge.classList.toggle("live", s.mode === "live");
   app.innerHTML = `
     <div class="grid">
       <div class="card"><h3>Today's PnL</h3><div class="metric">${Number(t.pnl).toFixed(2)}</div></div>

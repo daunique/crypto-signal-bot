@@ -32,6 +32,12 @@ class Settings(BaseSettings):
         mode = self.bot_mode.lower().strip()
         if mode not in {"demo", "live"}:
             raise ValueError("BOT_MODE must be either 'demo' or 'live'")
+        # Normalize in place. Without this, a value that passes this
+        # case-insensitive check (e.g. "Demo", "DEMO", or "demo" with
+        # trailing whitespace) would still fail deriv.py's exact `==
+        # "demo"` comparison during account selection, silently falling
+        # through to the *real* (live) account instead of demo.
+        self.bot_mode = mode
         if self.timeframe_seconds != 180:
             raise ValueError("This bot is intentionally locked to 3-minute candles (180 seconds)")
         if self.stake <= 0:

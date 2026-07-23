@@ -22,6 +22,16 @@ class DerivClient:
     authorize flow and no manually configured barrier are used.
     """
 
+    # Deriv's real contract_type values for this trade are CALL (predict the
+    # exit spot finishes above the barrier) and PUT (predict below) -- see
+    # https://developers.deriv.com/docs/higherlower. "HIGHER"/"LOWER" are
+    # only this bot's own direction labels, used for the database/UI; they
+    # are not valid values on the wire. Sending them as contract_type is why
+    # every proposal was being rejected with InvalidBarrierSingle: Deriv
+    # didn't recognize the contract type and fell back to assuming a
+    # barrier was required.
+    DIRECTION_TO_CONTRACT_TYPE = {"UP": "CALL", "DOWN": "PUT"}
+
     def __init__(self):
         self.settings = get_settings()
         self.public_ws = None
@@ -69,10 +79,14 @@ class DerivClient:
 
     async def connect(self):
         await self.close()
-        self.account_id = await self._select_account()
-        otp_url = await self._get_otp_url(self.account_id)
         self.public_ws = await self._connect_ws(PUBLIC_WS)
         try:
+            # OTPs are short-lived and must be used immediately after being
+            # minted, so the account/OTP lookup happens right before the
+            # trade WS connection, not before the (potentially slow, with
+            # up to 3 retries) public WS handshake above.
+            self.account_id = await self._select_account()
+            otp_url = await self._get_otp_url(self.account_id)
             self.trade_ws = await self._connect_ws(otp_url)
         except Exception:
             await self.close()
@@ -223,9 +237,12 @@ class DerivClient:
         }, channel="public")
         return response.get("candles", [])
 
-    async def proposal(self, symbol: str, direction: str, amount: float, currency: str, duration: int) -> dict[str, Any]:
-        contract_type = "HIGHER" if direction == "UP" else "LOWER"
-        return await self.request({
+    def build_proposal_payload(self, symbol: str, direction: str, amount: float, currency: str, duration: int) -> dict[str, Any]:
+        try:
+            contract_type = self.DIRECTION_TO_CONTRACT_TYPE[direction]
+        except KeyError:
+            raise ValueError(f"Unknown signal direction: {direction!r}") from None
+        return {
             "proposal": 1,
             "amount": amount,
             "basis": "stake",
@@ -234,7 +251,17 @@ class DerivClient:
             "duration": duration,
             "duration_unit": "s",
             "underlying_symbol": symbol,
-        }, channel="trade")
+        }
+
+    async def proposal(self, symbol: str, direction: str, amount: float, currency: str, duration: int) -> dict[str, Any]:
+        # No `barrier` field is sent, which is what makes this a barrier-free
+        # "Rise/Fall" style contract, decided purely against the entry spot.
+        # Deriv's separate "Higher/Lower" product reuses this same CALL/PUT
+        # contract_type but additionally requires a signed offset `barrier`
+        # (e.g. "+0.37"), which changes the payout/risk profile and is not
+        # enabled here.
+        payload = self.build_proposal_payload(symbol, direction, amount, currency, duration)
+        return await self.request(payload, channel="trade")
 
     async def buy(self, proposal_id: str, price: float) -> dict[str, Any]:
         return await self.request({"buy": proposal_id, "price": price}, channel="trade")

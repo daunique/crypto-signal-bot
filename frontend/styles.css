@@ -7,6 +7,7 @@ nav { display: grid; gap: 8px; }
 .nav { text-align: left; border: 0; background: transparent; color: #9ba8bd; padding: 12px; border-radius: 8px; cursor: pointer; }
 .nav:hover, .nav.active { background: #202b44; color: #fff; }
 .mode { margin-top: 40px; padding: 10px; border-radius: 8px; text-align: center; background: #183c2b; color: #73e2a4; font-weight: 700; }
+.mode.live { background: #3c1820; color: #ff8a8a; }
 .main { flex: 1; padding: 28px; max-width: 1600px; margin: auto; width: 100%; }
 .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 28px; }
 h1 { margin: 0 0 6px; }

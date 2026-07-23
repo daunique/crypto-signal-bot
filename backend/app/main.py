@@ -7,7 +7,7 @@ from .db import init_db
 from .api import router
 
 settings = get_settings()
-BUILD_VERSION = "2026-07-22-pat-boundary-fix-1"
+BUILD_VERSION = "2026-07-23-call-put-contract-type-fix-1"
 app = FastAPI(title=settings.app_name)
 app.include_router(router)
 
