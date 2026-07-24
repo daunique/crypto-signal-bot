@@ -7,7 +7,7 @@ from .db import init_db
 from .api import router
 
 settings = get_settings()
-BUILD_VERSION = "2026-07-23-invalid-barrier-adaptive-retry-1"
+BUILD_VERSION = "2026-07-23-invalid-barrier-adaptive-retry-2-widened"
 app = FastAPI(title=settings.app_name)
 app.include_router(router)
 

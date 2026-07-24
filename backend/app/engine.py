@@ -218,16 +218,24 @@ class BotEngine:
         exact live min/max barrier bounds for this symbol/duration
         (`contracts_for` is Deriv's documented way to look them up, but its
         precise current response shape could not be confidently verified).
-        Rather than risk hardcoding a wrong bound, this empirically finds a
-        value Deriv accepts: on a `subcode == "InvalidBarrier"` rejection it
-        retries with the next candidate before giving up. The candidates
-        mostly shrink, but end with two small fixed fallbacks (which could
-        end up *larger* than a very small original estimate) so this can
-        recover whether the rejection was for being too far from spot or
-        too close to it. Any other error (wrong symbol, insufficient
-        balance, connection issue, etc.) is raised immediately, unretried.
+
+        A first round of retries (2026-07-23) only ever tried values at or
+        below the original estimate (down to 0.05) and *all* of them were
+        rejected -- which rules out "too large" as the sole explanation, but
+        never actually tested anything larger. This version sweeps both
+        directions: smaller *and* larger than the original estimate, plus
+        fixed fallbacks at both ends. On a `subcode == "InvalidBarrier"`
+        rejection it moves to the next candidate; any other error (wrong
+        symbol, insufficient balance, connection issue, etc.) is raised
+        immediately, unretried.
         """
-        candidates = [barrier_offset, barrier_offset * 0.5, barrier_offset * 0.25, 0.1, 0.05]
+        candidates = [
+            barrier_offset,
+            barrier_offset * 2, barrier_offset * 4, barrier_offset * 8,
+            barrier_offset * 0.5, barrier_offset * 0.25,
+            0.05, 0.1, 0.3,
+            1.0, 2.0, 3.0, 5.0,
+        ]
         last_error: Exception = RuntimeError("No barrier candidate available")
         for i, offset in enumerate(candidates):
             if offset <= 0:
@@ -243,15 +251,22 @@ class BotEngine:
                 )
                 if i > 0:
                     log.warning(
-                        "Barrier accepted at %.3f after %d rejection(s) (originally computed %.3f)",
-                        offset, i, barrier_offset,
+                        "Barrier %s accepted after %d rejection(s) (originally computed offset %.3f)",
+                        barrier_str, i, barrier_offset,
                     )
                 return proposal, barrier_str, offset
             except DerivAPIError as exc:
                 last_error = exc
                 if exc.subcode != "InvalidBarrier":
                     raise
-                log.warning("Barrier %.3f rejected (InvalidBarrier); trying a smaller offset", offset)
+                log.warning(
+                    "Barrier %s rejected (%s: %s); trying next candidate",
+                    barrier_str, exc.subcode, exc.message or exc.details,
+                )
+        log.error(
+            "All %d barrier candidates rejected for direction=%s (originally computed offset %.3f): %s",
+            len(candidates), direction, barrier_offset, last_error,
+        )
         raise last_error
 
     async def settle(self, contract_id: str):

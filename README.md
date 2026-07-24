@@ -2,6 +2,16 @@
 
 Production-oriented 3-minute Deriv Higher/Lower bot.
 
+## 2026-07-23 (newest): all 5 retry candidates were rejected — search widened, still unresolved
+
+The retry logic below worked exactly as designed — the log showed all 5 candidates tried in the right order (`0.560 → 0.280 → 0.140 → 0.100 → 0.050`) — but **every one was rejected** with the same `InvalidBarrier`. That's an important data point: since even 0.05 (very close to spot) failed, "barrier too large" isn't the (whole) explanation, and since 0.560 also failed, it isn't simply "too small" either. The previous retry list only ever tried values *at or below* the original ATR-derived estimate — it never tried anything larger.
+
+**This round's fix:** `_propose_with_barrier_retry()` now sweeps a much wider range — smaller *and* larger than the original estimate (`×0.25` up to `×8`, plus fixed fallbacks from `0.05` up to `5.0`) — and logs the full signed barrier string plus the error's message/details on every rejection, not just the bare offset number, so the next log capture is maximally informative regardless of outcome.
+
+**Honest status:** root cause still isn't confirmed. If this widened sweep also fails across the board, barrier magnitude probably isn't the issue at all, and something else needs to be checked — e.g. whether this specific Deriv account/token has trading permissions for this contract category, or whether R_25 Higher/Lower is actually offered at exactly 180s/duration_unit `s` for this account (as opposed to only being offered in fixed duration steps, or only in minutes) via `contracts_for`.
+
+**A fast way to get ground truth that doesn't depend on me guessing further:** on dtrader.deriv.com, manually open the Higher/Lower ticket for Volatility 25 Index, set Duration to 3 minutes (matching this bot exactly), and see what barrier value/range the ticket itself accepts or defaults to. That's Deriv's own pricing engine for the exact same symbol/duration this bot uses — if the manual ticket also complains about a barrier in the same size range, that's a strong clue; if it accepts something specific, that number is worth trying here directly.
+
 ## 2026-07-23 (latest): barrier value rejected (`InvalidBarrier`) — adaptive retry
 
 After the fix below, trades executed as genuine Higher/Lower, but then started failing with a *different* error:
@@ -14,9 +24,9 @@ This is a different failure than the earlier `InvalidBarrierSingle` — a barrie
 
 **Root cause, honestly stated:** Deriv's documented way to know the valid barrier range for a symbol/duration is the `contracts_for` endpoint, but its precise current response shape (exact field names for min/max barrier limits) couldn't be confidently confirmed against current docs/schemas at the time of this fix, despite substantial research (multiple official Deriv sources were checked — see git history of this file for the trail). Rather than guess a hardcoded "safe" magnitude and risk being wrong again in a different way, the fix makes barrier sizing **self-correcting**:
 
-**Fix:** `deriv.py` now raises a structured `DerivAPIError` (with `.code`/`.subcode`) instead of a generic stringified `RuntimeError`, so calling code can react to specific error types. `engine.py`'s new `_propose_with_barrier_retry()` tries the ATR-derived barrier first, and on a `subcode == "InvalidBarrier"` rejection specifically (any other error still fails immediately, unretried), retries with progressively smaller values, ending with two small fixed fallbacks: `[computed, computed×0.5, computed×0.25, 0.1, 0.05]`. Whichever value Deriv actually accepts is what gets stored on the `Trade` record and used for the real trade — this also means future logs will show exactly what worked, turning this from a guessing game into an evidence trail.
+**Fix:** `deriv.py` now raises a structured `DerivAPIError` (with `.code`/`.subcode`) instead of a generic stringified `RuntimeError`, so calling code can react to specific error types. `engine.py`'s new `_propose_with_barrier_retry()` tries the ATR-derived barrier first, and on a `subcode == "InvalidBarrier"` rejection specifically (any other error still fails immediately, unretried), retries with progressively smaller values, ending with two small fixed fallbacks: `[computed, computed×0.5, computed×0.25, 0.1, 0.05]` (widened further above). Whichever value Deriv actually accepts is what gets stored on the `Trade` record and used for the real trade — this also means future logs will show exactly what worked, turning this from a guessing game into an evidence trail.
 
-**If trades are still failing after this:** check the logs for `"Barrier %.3f rejected"` / `"Execution failed"` — if every candidate in that list is being rejected, the barrier size isn't the (only) issue and something else needs investigating (e.g. account trading permissions, symbol availability, balance). Please share the new log if that happens.
+**If trades are still failing after this:** check the logs for `"rejected"` / `"Execution failed"` — if every candidate in that list is being rejected, the barrier size isn't the (only) issue and something else needs investigating (e.g. account trading permissions, symbol availability, balance). Please share the new log if that happens.
 
 ## 2026-07-23 (later): real Higher/Lower barrier + settlement tracking fix
 
