@@ -145,6 +145,10 @@ class BotEngine:
             return
 
         direction = decision.direction
+        # This also happens to match the actual contract_type sent to Deriv
+        # (see deriv.py's DIRECTION_TO_CONTRACT_TYPE) -- kept as an
+        # independent local label here since this DB column exists for
+        # display regardless of what the wire value happens to be.
         contract_type = "HIGHER" if direction == "UP" else "LOWER"
         # Deriv's Higher/Lower barrier is sized as a fraction of the recent
         # average candle range (ATR), so it scales with actual current
@@ -215,18 +219,17 @@ class BotEngine:
         """Request a proposal, adaptively adjusting the barrier if Deriv
         rejects it as invalid.
 
-        The ATR-derived barrier_offset is a reasonable starting estimate,
-        but this bot has no confirmed, authoritative source for Deriv's
-        exact live min/max barrier bounds for this symbol/duration
-        (`contracts_for` is Deriv's documented way to look them up, but its
-        precise current response shape could not be confidently verified).
-
-        A first round of retries (2026-07-23) only ever tried values at or
-        below the original estimate (down to 0.05) and *all* of them were
-        rejected -- which rules out "too large" as the sole explanation, but
-        never actually tested anything larger. This version sweeps both
-        directions: smaller *and* larger than the original estimate, plus
-        fixed fallbacks at both ends. On a `subcode == "InvalidBarrier"`
+        2026-07-23/24 history: every barrier value was rejected regardless
+        of magnitude or sign (0.05 to 5.0, both directions). That turned out
+        to be because contract_type was CALL/PUT at the time, which doesn't
+        accept a barrier on this account at all -- see
+        DIRECTION_TO_CONTRACT_TYPE in deriv.py and the README. Now that
+        contract_type is HIGHER/LOWER (confirmed correct against this
+        account's own contracts_for response), a rejection here should be
+        rare. This retry loop is kept as a narrower safety net in case the
+        ATR-derived estimate occasionally falls outside whatever min/max
+        bound this specific contract enforces, not because the correct
+        contract shape is still in doubt. On a `subcode == "InvalidBarrier"`
         rejection it moves to the next candidate; any other error (wrong
         symbol, insufficient balance, connection issue, etc.) is raised
         immediately, unretried.

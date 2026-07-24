@@ -17,21 +17,29 @@ def test_deriv_api_error_exposes_code_and_subcode():
     assert exc.message == "Invalid barrier."
 
 
-def test_proposal_payload_uses_deriv_contract_types_not_direction_labels():
-    # Regression test for InvalidBarrierSingle: every proposal used to send
-    # contract_type "HIGHER"/"LOWER", which Deriv does not recognize. The
-    # real values (confirmed against developers.deriv.com/docs/higherlower
-    # and legacy-docs.deriv.com/docs/higherlower) are CALL/PUT.
+def test_proposal_payload_uses_higher_lower_contract_types():
+    # Confirmed directly against this account's own live contracts_for
+    # response (2026-07-24, see README): the "higherlower" contract
+    # category uses contract_type HIGHER/LOWER, separate from "callput"
+    # (CALL/PUT, which is the barrier-free ATM Rise/Fall product on this
+    # account). The original InvalidBarrierSingle bug was a missing
+    # barrier field, not a wrong contract_type -- HIGHER/LOWER was already
+    # correct; an earlier version of this incorrectly "fixed" it to
+    # CALL/PUT based on Deriv's general docs, which describe a different
+    # convention than what this account's API actually accepts. That's
+    # also why every barrier value was rejected as InvalidBarrier
+    # regardless of magnitude or sign: CALL/PUT was never going to accept
+    # a barrier here, no matter its value.
     client = DerivClient()
-    assert client.build_proposal_payload("R_25", "UP", 1.0, "USD", 180, 0.5)["contract_type"] == "CALL"
-    assert client.build_proposal_payload("R_25", "DOWN", 1.0, "USD", 180, 0.5)["contract_type"] == "PUT"
+    assert client.build_proposal_payload("R_25", "UP", 1.0, "USD", 180, 0.5)["contract_type"] == "HIGHER"
+    assert client.build_proposal_payload("R_25", "DOWN", 1.0, "USD", 180, 0.5)["contract_type"] == "LOWER"
 
 
 def test_proposal_payload_includes_signed_barrier_for_higher_lower():
     # This bot trades genuine Higher/Lower contracts, which require a
-    # signed, relative barrier offset: positive for CALL ("Higher", barrier
-    # above spot), negative for PUT ("Lower", barrier below spot). See
-    # developers.deriv.com/docs/higherlower.
+    # signed, relative barrier offset: positive for HIGHER (barrier above
+    # spot), negative for LOWER (barrier below spot). Confirmed against
+    # this account's own contracts_for response (see README).
     client = DerivClient()
     up_payload = client.build_proposal_payload("R_25", "UP", 2.5, "USD", 180, 0.523)
     down_payload = client.build_proposal_payload("R_25", "DOWN", 2.5, "USD", 180, 0.523)
@@ -39,7 +47,7 @@ def test_proposal_payload_includes_signed_barrier_for_higher_lower():
         "proposal": 1,
         "amount": 2.5,
         "basis": "stake",
-        "contract_type": "CALL",
+        "contract_type": "HIGHER",
         "currency": "USD",
         "duration": 180,
         "duration_unit": "s",

@@ -39,15 +39,25 @@ class DerivClient:
     always included (see build_proposal_payload).
     """
 
-    # Deriv's real contract_type values for this trade are CALL (predict the
-    # exit spot finishes above the barrier) and PUT (predict below) -- see
-    # https://developers.deriv.com/docs/higherlower. "HIGHER"/"LOWER" are
-    # only this bot's own direction labels, used for the database/UI; they
-    # are not valid values on the wire. Sending them as contract_type is why
-    # every proposal was being rejected with InvalidBarrierSingle: Deriv
-    # didn't recognize the contract type and fell back to assuming a
-    # barrier was required.
-    DIRECTION_TO_CONTRACT_TYPE = {"UP": "CALL", "DOWN": "PUT"}
+    # This account's own live `contracts_for` response (2026-07-24, via the
+    # /api/diagnostics/contracts-for endpoint -- see README) settled this
+    # definitively: "HIGHER"/"LOWER" *is* correct. contracts_for lists two
+    # separate contract categories for R_25:
+    #   - "callput" (contract_type CALL/PUT) -- barrier-free ATM Rise/Fall.
+    #   - "higherlower" (contract_type HIGHER/LOWER) -- the actual barrier
+    #     product, with an "intraday" duration tier of 15s-1d that covers
+    #     our 180s duration, e.g. {"barrier": "+0.382", "contract_type":
+    #     "HIGHER", "min_contract_duration": "15s", "max_contract_duration":
+    #     "1d"}.
+    # An earlier version of this mapped UP/DOWN to CALL/PUT instead, based
+    # on Deriv's general Higher/Lower docs (developers.deriv.com/docs/
+    # higherlower, legacy-docs.deriv.com/docs/higherlower), which describe
+    # CALL/PUT for this product -- reasonable given that source, but wrong
+    # for what this account's API actually accepts. That's also why every
+    # barrier value was rejected as InvalidBarrier regardless of magnitude
+    # or sign (2026-07-23/24 entries below): CALL/PUT was never going to
+    # accept a barrier here, no matter its value.
+    DIRECTION_TO_CONTRACT_TYPE = {"UP": "HIGHER", "DOWN": "LOWER"}
 
     def __init__(self):
         self.settings = get_settings()
@@ -262,11 +272,11 @@ class DerivClient:
         if barrier_offset <= 0:
             raise ValueError(f"barrier_offset must be > 0 for a Higher/Lower contract, got {barrier_offset!r}")
         # Deriv's Higher/Lower barrier must be a signed, relative offset for
-        # contracts under 24h in duration (ours are 180s) -- see
-        # https://developers.deriv.com/docs/higherlower and
-        # https://legacy-docs.deriv.com/docs/higherlower. Positive/CALL =
-        # barrier above the entry spot ("Higher"); negative/PUT = barrier
-        # below the entry spot ("Lower").
+        # contracts under 24h in duration (ours are 180s) -- confirmed
+        # directly against this account's own contracts_for response (see
+        # README and the class docstring above). Positive/HIGHER = barrier
+        # above the entry spot; negative/LOWER = barrier below the entry
+        # spot.
         signed_offset = barrier_offset if direction == "UP" else -barrier_offset
         return {
             "proposal": 1,

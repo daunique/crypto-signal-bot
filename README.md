@@ -2,11 +2,24 @@
 
 Production-oriented 3-minute Deriv Higher/Lower bot.
 
-## 2026-07-24 (newest): `contracts_for` request shape corrected from Deriv's own error
+## 2026-07-24 (resolved): `contracts_for` confirms `HIGHER`/`LOWER` was correct all along — the CALL/PUT fix was wrong for this account
 
-The first live `contracts_for` query itself failed schema validation: `Properties not allowed: currency, underlying_symbol` — notably *not* complaining about `contracts_for` itself. That's decisive: unlike `proposal`/`proposal_open_contract`, this endpoint doesn't take a `flag=1` plus a separate `underlying_symbol` field. The symbol is the value of `contracts_for` directly (the old API's shape carried over unchanged): `{"contracts_for": "R_25"}`, no other properties. Fixed and covered by a regression test. Re-run "Copy contract specs (live query)" on the Settings page — it should return real contract data now instead of a validation error.
+The live `contracts_for` response (via the Settings page tooling above) settled this definitively. It lists **two separate contract categories** for R_25:
 
-## 2026-07-24 (latest): live `contracts_for` diagnostic added — magnitude conclusively ruled out in both directions
+* `"contract_category": "callput"`, `contract_type: CALL/PUT` — barrier-free ATM Rise/Fall on this account.
+* `"contract_category": "higherlower"`, `contract_type: HIGHER/LOWER` — the actual barrier product, with an `"intraday"` duration tier of `min_contract_duration: "15s"` to `max_contract_duration: "1d"` that covers our 180-second duration directly, e.g. `{"barrier": "+0.382", "contract_type": "HIGHER", ...}`.
+
+**This means the earlier `InvalidBarrierSingle` → "fix" to `CALL`/`PUT` (further below) was wrong for this account.** That fix was reasonably made — it matched Deriv's general Higher/Lower docs (`developers.deriv.com/docs/higherlower`, `legacy-docs.deriv.com/docs/higherlower`), which do describe `CALL`/`PUT` for this product — but this account's actual API doesn't follow that. The original code, before any of this session's changes, already had the right `contract_type` (`HIGHER`/`LOWER`); it was only ever missing the barrier field, which is what actually caused `InvalidBarrierSingle`. Switching to `CALL`/`PUT` masked that by accident: `CALL`/`PUT` *without* a barrier is valid (as Rise/Fall), so trades started executing — just not as Higher/Lower. Then when the barrier was added on top of `CALL`/`PUT`, *every* value was rejected as `InvalidBarrier` regardless of magnitude or sign (documented in the two entries below) — because `CALL`/`PUT` was never going to accept a barrier on this account, no matter what value was sent. Magnitude was never the problem.
+
+**Fix:** `DIRECTION_TO_CONTRACT_TYPE` is back to `{"UP": "HIGHER", "DOWN": "LOWER"}`, this time confirmed against this account's own live data rather than general docs. Barrier format/sign convention (signed relative offset, positive above spot for Higher, negative below for Lower) is unchanged and was already correct. The adaptive barrier-retry mechanism (below) stays in place as a narrower safety net, not because the contract shape is still in doubt.
+
+**Takeaway for future debugging on this account:** trust `contracts_for` over Deriv's general documentation when the two disagree — it reflects what this specific account/landing company actually offers, which apparently differs from the docs in at least this one respect.
+
+## 2026-07-24: `contracts_for` request shape corrected from Deriv's own error
+
+The first live `contracts_for` query itself failed schema validation: `Properties not allowed: currency, underlying_symbol` — notably *not* complaining about `contracts_for` itself. That's decisive: unlike `proposal`/`proposal_open_contract`, this endpoint doesn't take a `flag=1` plus a separate `underlying_symbol` field. The symbol is the value of `contracts_for` directly (the old API's shape carried over unchanged): `{"contracts_for": "R_25"}`, no other properties. Fixed and covered by a regression test.
+
+## 2026-07-24: live `contracts_for` diagnostic added — magnitude conclusively ruled out in both directions
 
 A second diagnostics run confirmed the same failure again, this time for the `UP`/`CALL` (positive barrier) side: **all 13 candidates rejected**, `+0.050` through `+5.000`. Combined with the earlier `DOWN`/`PUT` run (all 13 rejected, `-0.050` through `-5.000`), every barrier candidate tried across a 100x range, in *both* directions, has now been rejected. This is conclusive: it is not the sign, and it is not the magnitude. Continuing to guess numbers isn't a productive path forward.
 
@@ -110,10 +123,10 @@ RuntimeError: {'code': 'InvalidBarrierSingle', 'details': {'field': 'barrier'},
 
 The bot predicts the direction of the next complete 3-minute candle and trades a genuine Higher/Lower contract:
 
-* `UP` signal -> stored/shown as `HIGHER` -> sent to Deriv as `contract_type: CALL` with a positive `barrier` (above entry spot)
-* `DOWN` signal -> stored/shown as `LOWER` -> sent to Deriv as `contract_type: PUT` with a negative `barrier` (below entry spot)
+* `UP` signal -> stored/shown as `HIGHER` -> sent to Deriv as `contract_type: HIGHER` with a positive `barrier` (above entry spot)
+* `DOWN` signal -> stored/shown as `LOWER` -> sent to Deriv as `contract_type: LOWER` with a negative `barrier` (below entry spot)
 
-`HIGHER`/`LOWER` are this bot's own display labels (database column, dashboard). `CALL`/`PUT` plus the signed `barrier` are the actual values sent over the wire — see the fix notes above. The barrier's distance from spot is `BARRIER_ATR_FRACTION` × the recent average candle range; see `.env.example`.
+The database/dashboard display label and the actual wire value are the same string here (`HIGHER`/`LOWER`) — confirmed against this account's own `contracts_for` response (see the changelog entry above); this is a separate, dedicated contract category from `CALL`/`PUT` (which is the barrier-free Rise/Fall product on this account). The barrier's distance from spot is `BARRIER_ATR_FRACTION` × the recent average candle range; see `.env.example`.
 
 The strategy is evaluated from completed candles only. A qualified signal is created on the first observed tick belonging to the new 180-second candle boundary and the proposal is requested immediately.
 
@@ -170,7 +183,7 @@ At each 180-second UTC candle boundary:
 
 1. The previous candle is finalized.
 2. Completed-candle strategy features are evaluated, including the recent average candle range (ATR).
-3. A qualified direction is mapped to `CALL` (higher) or `PUT` (lower) — see "Trading contract semantics" above.
+3. A qualified direction is mapped to `HIGHER` or `LOWER` — see "Trading contract semantics" above.
 4. A Higher/Lower proposal is requested with a signed barrier sized from the ATR, adaptively retrying with a smaller/fallback barrier if Deriv rejects the value (see changelog above).
 5. The proposal is bought at the configured stake.
 6. The contract is polled until settlement.
