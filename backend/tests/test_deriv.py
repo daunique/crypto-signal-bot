@@ -78,9 +78,14 @@ def test_proposal_open_contract_payload_omits_subscribe():
     assert "subscribe" not in payload
 
 
-def test_contracts_for_payload_uses_underlying_symbol():
+def test_contracts_for_payload_matches_deriv_confirmed_shape():
+    # Regression test: an earlier version of this guessed {"contracts_for":
+    # 1, "underlying_symbol": symbol, "currency": ...}, matching the
+    # flag=1-plus-separate-field pattern used by proposal/
+    # proposal_open_contract. Deriv's actual error response ("Properties
+    # not allowed: currency, underlying_symbol" -- notably NOT complaining
+    # about contracts_for itself) showed that guess was wrong: this
+    # endpoint takes the symbol as the value of contracts_for directly.
     client = DerivClient()
     payload = client.build_contracts_for_payload("R_25")
-    assert payload["contracts_for"] == 1
-    assert payload["underlying_symbol"] == "R_25"
-    assert "symbol" not in payload
+    assert payload == {"contracts_for": "R_25"}

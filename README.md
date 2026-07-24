@@ -2,6 +2,10 @@
 
 Production-oriented 3-minute Deriv Higher/Lower bot.
 
+## 2026-07-24 (newest): `contracts_for` request shape corrected from Deriv's own error
+
+The first live `contracts_for` query itself failed schema validation: `Properties not allowed: currency, underlying_symbol` — notably *not* complaining about `contracts_for` itself. That's decisive: unlike `proposal`/`proposal_open_contract`, this endpoint doesn't take a `flag=1` plus a separate `underlying_symbol` field. The symbol is the value of `contracts_for` directly (the old API's shape carried over unchanged): `{"contracts_for": "R_25"}`, no other properties. Fixed and covered by a regression test. Re-run "Copy contract specs (live query)" on the Settings page — it should return real contract data now instead of a validation error.
+
 ## 2026-07-24 (latest): live `contracts_for` diagnostic added — magnitude conclusively ruled out in both directions
 
 A second diagnostics run confirmed the same failure again, this time for the `UP`/`CALL` (positive barrier) side: **all 13 candidates rejected**, `+0.050` through `+5.000`. Combined with the earlier `DOWN`/`PUT` run (all 13 rejected, `-0.050` through `-5.000`), every barrier candidate tried across a 100x range, in *both* directions, has now been rejected. This is conclusive: it is not the sign, and it is not the magnitude. Continuing to guess numbers isn't a productive path forward.

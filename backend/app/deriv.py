@@ -300,7 +300,13 @@ class DerivClient:
         return await self.request(payload, channel="trade")
 
     def build_contracts_for_payload(self, symbol: str) -> dict[str, Any]:
-        return {"contracts_for": 1, "underlying_symbol": symbol, "currency": self.settings.currency}
+        # Deriv's error response was explicit and did NOT complain about the
+        # `contracts_for` key itself: "Properties not allowed: currency,
+        # underlying_symbol." Unlike proposal/proposal_open_contract, this
+        # endpoint does not use the flag=1 + separate underlying_symbol
+        # pattern -- the symbol is the value of contracts_for directly
+        # (matching the old API's shape), with no other properties allowed.
+        return {"contracts_for": symbol}
 
     async def contracts_for(self, symbol: str) -> dict[str, Any]:
         """Live diagnostic query: ask Deriv what contract types, barrier
