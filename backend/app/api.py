@@ -74,6 +74,27 @@ async def pnl_history(limit: int = 365):
     return sorted(by_day.values(), key=lambda x: x["date"], reverse=True)[:limit]
 
 
+@router.get("/api/diagnostics/contracts-for")
+async def diagnostics_contracts_for():
+    """Live query to Deriv asking what's actually valid for this account and
+    symbol -- Deriv's own documented way to find real barrier/duration
+    limits (see README). Requires the bot to be running (connected).
+
+    Returns the *raw* response (or the raw error) rather than a parsed
+    summary: this app's own research couldn't confidently confirm the exact
+    current response shape in advance, so parsing it here risked hiding the
+    real answer behind another wrong guess. Read the raw JSON directly, or
+    copy it back for help reading it.
+    """
+    if engine.client.trade_ws is None:
+        return {"error": "Bot is not currently connected -- start the bot first, then try again."}
+    try:
+        result = await engine.client.contracts_for(settings.market_symbol)
+        return {"generated_at": datetime.now(timezone.utc), "symbol": settings.market_symbol, "result": result}
+    except Exception as exc:
+        return {"generated_at": datetime.now(timezone.utc), "symbol": settings.market_symbol, "error": str(exc)}
+
+
 @router.get("/api/diagnostics")
 async def diagnostics():
     """A single, copy-pasteable snapshot of recent bot activity and errors.

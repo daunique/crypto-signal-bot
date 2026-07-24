@@ -76,3 +76,11 @@ def test_proposal_open_contract_payload_omits_subscribe():
     payload = client.build_proposal_open_contract_payload("6467434599")
     assert payload == {"proposal_open_contract": 1, "contract_id": 6467434599}
     assert "subscribe" not in payload
+
+
+def test_contracts_for_payload_uses_underlying_symbol():
+    client = DerivClient()
+    payload = client.build_contracts_for_payload("R_25")
+    assert payload["contracts_for"] == 1
+    assert payload["underlying_symbol"] == "R_25"
+    assert "symbol" not in payload

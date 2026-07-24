@@ -298,3 +298,20 @@ class DerivClient:
     async def proposal_open_contract(self, contract_id: str) -> dict[str, Any]:
         payload = self.build_proposal_open_contract_payload(contract_id)
         return await self.request(payload, channel="trade")
+
+    def build_contracts_for_payload(self, symbol: str) -> dict[str, Any]:
+        return {"contracts_for": 1, "underlying_symbol": symbol, "currency": self.settings.currency}
+
+    async def contracts_for(self, symbol: str) -> dict[str, Any]:
+        """Live diagnostic query: ask Deriv what contract types, barrier
+        limits, and duration limits actually exist for this symbol on this
+        account. This is Deriv's own documented way to determine valid
+        barrier ranges (see README) -- used here because repeatedly guessing
+        barrier magnitudes (a 100x range, both signs) was conclusively ruled
+        out by empirical retries, and this app's own research couldn't
+        confidently pin down the exact current response shape in advance.
+        Returns the raw response so a human/Claude can read the real field
+        names directly instead of trusting a possibly-wrong parse of them.
+        """
+        payload = self.build_contracts_for_payload(symbol)
+        return await self.request(payload, channel="trade")

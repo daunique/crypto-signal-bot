@@ -84,8 +84,11 @@ async function renderSettings() {
     <h2>Diagnostics</h2>
     <p>Copies a summary of recent bot activity and errors (build version, recent events, signals, trades) so a problem can be shared without exporting raw platform logs.</p>
     <button id="copyDiagnosticsBtn">Copy diagnostics to clipboard</button>
+    <p style="margin-top:16px">Live-asks Deriv what's actually valid for this account/symbol (contract types, barrier and duration limits) -- requires the bot to be running.</p>
+    <button id="copyContractsForBtn">Copy contract specs (live query)</button>
   </div>`;
   document.getElementById("copyDiagnosticsBtn").onclick = copyDiagnostics;
+  document.getElementById("copyContractsForBtn").onclick = copyContractsFor;
 }
 
 function formatDiagnostics(d) {
@@ -108,12 +111,9 @@ function formatDiagnostics(d) {
   return lines.join("\n");
 }
 
-async function copyDiagnostics() {
-  const btn = document.getElementById("copyDiagnosticsBtn");
+async function copyTextToClipboard(btn, text) {
   const original = btn.textContent;
   try {
-    const d = await getJSON("/api/diagnostics");
-    const text = formatDiagnostics(d);
     if (navigator.clipboard && window.isSecureContext) {
       await navigator.clipboard.writeText(text);
       btn.textContent = "Copied!";
@@ -126,6 +126,33 @@ async function copyDiagnostics() {
     console.error(e);
   }
   setTimeout(() => { btn.textContent = original; }, 2500);
+}
+
+async function copyDiagnostics() {
+  const btn = document.getElementById("copyDiagnosticsBtn");
+  try {
+    const d = await getJSON("/api/diagnostics");
+    await copyTextToClipboard(btn, formatDiagnostics(d));
+  } catch (e) {
+    btn.textContent = "Failed - see console";
+    console.error(e);
+    setTimeout(() => { btn.textContent = "Copy diagnostics to clipboard"; }, 2500);
+  }
+}
+
+async function copyContractsFor() {
+  const btn = document.getElementById("copyContractsForBtn");
+  try {
+    const d = await getJSON("/api/diagnostics/contracts-for");
+    const text = d.error
+      ? `contracts_for error for ${d.symbol || "?"}:\n${d.error}`
+      : `contracts_for result for ${d.symbol} (generated ${d.generated_at}):\n${JSON.stringify(d.result, null, 2)}`;
+    await copyTextToClipboard(btn, text);
+  } catch (e) {
+    btn.textContent = "Failed - see console";
+    console.error(e);
+    setTimeout(() => { btn.textContent = "Copy contract specs (live query)"; }, 2500);
+  }
 }
 
 async function render() {

@@ -2,6 +2,16 @@
 
 Production-oriented 3-minute Deriv Higher/Lower bot.
 
+## 2026-07-24 (latest): live `contracts_for` diagnostic added — magnitude conclusively ruled out in both directions
+
+A second diagnostics run confirmed the same failure again, this time for the `UP`/`CALL` (positive barrier) side: **all 13 candidates rejected**, `+0.050` through `+5.000`. Combined with the earlier `DOWN`/`PUT` run (all 13 rejected, `-0.050` through `-5.000`), every barrier candidate tried across a 100x range, in *both* directions, has now been rejected. This is conclusive: it is not the sign, and it is not the magnitude. Continuing to guess numbers isn't a productive path forward.
+
+**New: a live `contracts_for` query, added directly to the diagnostics tooling.** `GET /api/diagnostics/contracts-for` has the bot itself ask Deriv what contract types, barriers, and durations are actually valid for this account and symbol right now — this is Deriv's own documented mechanism for exactly this question. It requires the bot to be running (connected first). On the Settings page, "Copy contract specs (live query)" copies the result.
+
+**Deliberately not parsed/summarized:** the exact current response shape for this endpoint couldn't be confidently confirmed against available docs in advance (same reason the barrier limits themselves couldn't be looked up ahead of time) — attempting to pre-parse specific fields here would risk quietly hiding the real answer behind another wrong guess. It returns the raw JSON (or the raw error, if the request shape itself turns out to be wrong) so the actual field names can be read directly. If the request itself is malformed, the returned error is still useful signal about the correct shape.
+
+**Suggested next step:** run the bot, then click "Copy contract specs (live query)" on the Settings page and share the result — that (or the manual DTrader duration/barrier check suggested earlier) is what actually resolves this, rather than further guessing.
+
 ## 2026-07-24: diagnostics endpoint + confirmation the issue isn't barrier magnitude
 
 The widened sweep below was tested: **all 13 candidates were rejected**, spanning `-0.050` up to `-5.000` (a 100x range). That's conclusive on one point: barrier *magnitude* is not the (sole) issue — no reasonable min/max range fails uniformly across two full orders of magnitude. Something more structural is going on (account/token permissions for this contract category, or how this symbol/duration is actually offered via `contracts_for` are the leading suspects), and it needs either a `contracts_for` response in hand or a manual DTrader test (see below) to pin down with confidence rather than more guessing.
