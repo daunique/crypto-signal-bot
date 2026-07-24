@@ -69,6 +69,7 @@ class BotEngine:
                 self.last_error = str(exc)
                 self.status = "RECONNECTING"
                 log.exception("Engine loop failure")
+                await self.log_event("error", "engine_loop_failure", str(exc))
                 await self.client.close()
                 if self.running:
                     await asyncio.sleep(backoff)
@@ -208,6 +209,7 @@ class BotEngine:
                 await db.commit()
                 self.last_error = str(exc)
                 log.exception("Execution failed")
+                await self.log_event("error", "execution_error", str(exc))
 
     async def _propose_with_barrier_retry(self, direction: str, barrier_offset: float):
         """Request a proposal, adaptively adjusting the barrier if Deriv
@@ -236,6 +238,7 @@ class BotEngine:
             0.05, 0.1, 0.3,
             1.0, 2.0, 3.0, 5.0,
         ]
+        attempted: list[tuple[float, str]] = []
         last_error: Exception = RuntimeError("No barrier candidate available")
         for i, offset in enumerate(candidates):
             if offset <= 0:
@@ -257,17 +260,20 @@ class BotEngine:
                 return proposal, barrier_str, offset
             except DerivAPIError as exc:
                 last_error = exc
+                attempted.append((offset, barrier_str))
                 if exc.subcode != "InvalidBarrier":
                     raise
                 log.warning(
                     "Barrier %s rejected (%s: %s); trying next candidate",
                     barrier_str, exc.subcode, exc.message or exc.details,
                 )
-        log.error(
-            "All %d barrier candidates rejected for direction=%s (originally computed offset %.3f): %s",
-            len(candidates), direction, barrier_offset, last_error,
+        summary = (
+            f"All {len(attempted)} barrier candidates rejected as InvalidBarrier for "
+            f"direction={direction} (originally computed offset {barrier_offset:.3f}). "
+            f"Tried: {[b for _, b in attempted]}. Last Deriv response: {last_error}"
         )
-        raise last_error
+        log.error(summary)
+        raise RuntimeError(summary) from last_error
 
     async def settle(self, contract_id: str):
         deadline = time.monotonic() + self.settings.timeframe_seconds + 120  # + grace period for settlement lag
@@ -290,3 +296,7 @@ class BotEngine:
             except Exception as exc:
                 log.warning("Settlement polling failed for %s: %s", contract_id, exc)
             await asyncio.sleep(3)
+        if self.running:
+            msg = f"Gave up polling settlement for contract {contract_id} after the deadline; outcome unknown"
+            log.warning(msg)
+            await self.log_event("warning", "settlement_timeout", msg)

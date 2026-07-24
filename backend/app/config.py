@@ -1,6 +1,10 @@
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Kept here (rather than main.py) so api.py can import it too without a
+# main.py <-> api.py circular import (main.py imports the router from api.py).
+BUILD_VERSION = "2026-07-24-diagnostics-endpoint-1"
+
 
 class Settings(BaseSettings):
     app_name: str = "deriv-higher-lower-bot"

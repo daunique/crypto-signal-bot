@@ -79,7 +79,53 @@ async function renderSettings() {
     <p>Mode: <b>Demo/Live is selected server-side via BOT_MODE.</b></p>
     <p>Barrier size: <b>${Number(s.barrier_atr_fraction).toFixed(2)}&times; recent average candle range (BARRIER_ATR_FRACTION)</b></p>
     <p>API tokens are never sent to the browser.</p>
+  </div>
+  <div class="card">
+    <h2>Diagnostics</h2>
+    <p>Copies a summary of recent bot activity and errors (build version, recent events, signals, trades) so a problem can be shared without exporting raw platform logs.</p>
+    <button id="copyDiagnosticsBtn">Copy diagnostics to clipboard</button>
   </div>`;
+  document.getElementById("copyDiagnosticsBtn").onclick = copyDiagnostics;
+}
+
+function formatDiagnostics(d) {
+  const lines = [];
+  lines.push("Deriv Higher/Lower Bot diagnostics");
+  lines.push(`Generated: ${d.generated_at}`);
+  lines.push(`Build: ${d.build_version}`);
+  lines.push(`Status: ${d.bot_status} | Mode: ${d.mode} | Symbol: ${d.symbol} | Auto-trade: ${d.auto_trade}`);
+  lines.push(`Barrier ATR fraction: ${d.barrier_atr_fraction}`);
+  lines.push(`Last error: ${d.last_error || "(none)"}`);
+  lines.push("");
+  lines.push(`Recent events (${d.recent_events.length}):`);
+  d.recent_events.forEach(e => lines.push(`  [${e.created_at}] ${String(e.level).toUpperCase()} ${e.event_type}: ${e.message}`));
+  lines.push("");
+  lines.push(`Recent signals (${d.recent_signals.length}):`);
+  d.recent_signals.forEach(x => lines.push(`  [${x.created_at}] ${x.direction} status=${x.status} score=${x.score} barrier_offset=${x.barrier_offset} reason=${x.reason}`));
+  lines.push("");
+  lines.push(`Recent trades (${d.recent_trades.length}):`);
+  d.recent_trades.forEach(x => lines.push(`  [${x.created_at}] ${x.direction} status=${x.status} barrier=${x.barrier} stake=${x.stake} profit=${x.profit} contract=${x.contract_id}`));
+  return lines.join("\n");
+}
+
+async function copyDiagnostics() {
+  const btn = document.getElementById("copyDiagnosticsBtn");
+  const original = btn.textContent;
+  try {
+    const d = await getJSON("/api/diagnostics");
+    const text = formatDiagnostics(d);
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      btn.textContent = "Copied!";
+    } else {
+      window.prompt("Copy this text:", text);
+      btn.textContent = "Ready to copy";
+    }
+  } catch (e) {
+    btn.textContent = "Failed - see console";
+    console.error(e);
+  }
+  setTimeout(() => { btn.textContent = original; }, 2500);
 }
 
 async function render() {

@@ -2,6 +2,16 @@
 
 Production-oriented 3-minute Deriv Higher/Lower bot.
 
+## 2026-07-24: diagnostics endpoint + confirmation the issue isn't barrier magnitude
+
+The widened sweep below was tested: **all 13 candidates were rejected**, spanning `-0.050` up to `-5.000` (a 100x range). That's conclusive on one point: barrier *magnitude* is not the (sole) issue — no reasonable min/max range fails uniformly across two full orders of magnitude. Something more structural is going on (account/token permissions for this contract category, or how this symbol/duration is actually offered via `contracts_for` are the leading suspects), and it needs either a `contracts_for` response in hand or a manual DTrader test (see below) to pin down with confidence rather than more guessing.
+
+**New: a diagnostics endpoint, so this doesn't require exporting raw platform logs each time.** `GET /api/diagnostics` returns recent bot events, signals, and trades as JSON. On the dashboard's **Settings** page, "Copy diagnostics to clipboard" fetches it, formats it as readable text, and copies it — paste that directly here instead of a full log export. It deliberately never includes `DERIV_PAT`/`DERIV_APP_ID`/`DATABASE_URL`, since it's designed to be shared.
+
+This also wired up `BotEvent` / `log_event()`, which existed in `db.py`/`engine.py` but were never actually called anywhere before now (dead infrastructure). Execution errors, engine reconnect-loop failures, and settlement polls that give up at the deadline without ever resolving (previously a *silent* failure mode — it just returned with no log line at all) are now all persisted there, which is what the new endpoint reads from.
+
+`BUILD_VERSION` moved from `main.py` to `config.py` so `api.py` could import it for the diagnostics response without creating a `main.py` ↔ `api.py` circular import (`main.py` imports the router from `api.py`).
+
 ## 2026-07-23 (newest): all 5 retry candidates were rejected — search widened, still unresolved
 
 The retry logic below worked exactly as designed — the log showed all 5 candidates tried in the right order (`0.560 → 0.280 → 0.140 → 0.100 → 0.050`) — but **every one was rejected** with the same `InvalidBarrier`. That's an important data point: since even 0.05 (very close to spot) failed, "barrier too large" isn't the (whole) explanation, and since 0.560 also failed, it isn't simply "too small" either. The previous retry list only ever tried values *at or below* the original ATR-derived estimate — it never tried anything larger.

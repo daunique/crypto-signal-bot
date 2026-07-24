@@ -2,8 +2,8 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select, func
-from .config import get_settings
-from .db import session, Signal, Trade
+from .config import get_settings, BUILD_VERSION
+from .db import session, Signal, Trade, BotEvent
 from .engine import BotEngine
 
 router = APIRouter()
@@ -72,6 +72,47 @@ async def pnl_history(limit: int = 365):
         item["losses"] += int(row.status == "LOST")
         item["pnl"] += float(row.profit or 0)
     return sorted(by_day.values(), key=lambda x: x["date"], reverse=True)[:limit]
+
+
+@router.get("/api/diagnostics")
+async def diagnostics():
+    """A single, copy-pasteable snapshot of recent bot activity and errors.
+
+    Pulls from the BotEvent log (connection/execution/settlement failures),
+    plus the last few signals and trades, so a problem can be diagnosed
+    without exporting raw platform logs. Deliberately allowlists only safe
+    fields below -- never include deriv_pat/deriv_app_id/database_url here,
+    since this endpoint is designed to be copied and shared.
+    """
+    async with session() as db:
+        events = (await db.execute(select(BotEvent).order_by(BotEvent.created_at.desc()).limit(25))).scalars().all()
+        recent_signals = (await db.execute(select(Signal).order_by(Signal.created_at.desc()).limit(10))).scalars().all()
+        recent_trades = (await db.execute(select(Trade).order_by(Trade.created_at.desc()).limit(10))).scalars().all()
+    return {
+        "generated_at": datetime.now(timezone.utc),
+        "build_version": BUILD_VERSION,
+        "bot_status": engine.status,
+        "mode": settings.bot_mode,
+        "symbol": settings.market_symbol,
+        "auto_trade": settings.auto_trade,
+        "barrier_atr_fraction": settings.barrier_atr_fraction,
+        "last_error": engine.last_error,
+        "current_signal": engine.current_signal,
+        "recent_events": [
+            {"created_at": e.created_at, "level": e.level, "event_type": e.event_type, "message": e.message}
+            for e in events
+        ],
+        "recent_signals": [
+            {"created_at": s.created_at, "direction": s.direction, "status": s.status, "score": s.score,
+             "barrier_offset": s.barrier_offset, "reason": s.reason}
+            for s in recent_signals
+        ],
+        "recent_trades": [
+            {"created_at": t.created_at, "direction": t.direction, "status": t.status, "barrier": t.barrier,
+             "stake": t.stake, "profit": t.profit, "contract_id": t.contract_id}
+            for t in recent_trades
+        ],
+    }
 
 
 @router.post("/api/bot/start")

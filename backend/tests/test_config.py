@@ -1,4 +1,4 @@
-from backend.app.config import Settings
+from backend.app.config import Settings, BUILD_VERSION
 
 
 def test_bot_mode_is_normalized_to_lowercase_and_stripped():
@@ -30,3 +30,11 @@ def test_barrier_atr_fraction_must_be_positive():
             assert False, "expected ValueError for a non-positive BARRIER_ATR_FRACTION"
         except ValueError:
             pass
+
+
+def test_build_version_lives_in_config_not_main():
+    # BUILD_VERSION lives here (not main.py) specifically so api.py can
+    # import it without a main.py <-> api.py circular import (main.py
+    # imports the router from api.py). Guards against that getting
+    # "cleaned up" back into main.py in a future edit.
+    assert isinstance(BUILD_VERSION, str) and BUILD_VERSION
