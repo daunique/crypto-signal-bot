@@ -156,7 +156,18 @@ class BotEngine:
             self.current_signal = {"status": "NO_SIGNAL", "candle_epoch": candle_epoch}
             return
 
-        direction = decision.direction
+        raw_direction = decision.direction
+        # Every signal is traded in the OPPOSITE direction from what the
+        # strategy detects (deliberate, requested 2026-07-25) -- e.g. an
+        # "UP" (bullish) reading places a LOWER trade, not a HIGHER one.
+        # `direction` becomes the actual traded direction from here on, so
+        # it stays consistent with contract_type, the barrier's sign, and
+        # what execute() actually sends to Deriv (which reads
+        # signal.direction directly). The reason text keeps the strategy's
+        # own pre-inversion analysis visible, clearly labeled, so this is
+        # never a silent surprise when reviewing signal history.
+        direction = "DOWN" if raw_direction == "UP" else "UP"
+        reason = f"[Inverted from {raw_direction}] {decision.reason}"
         # This also happens to match the actual contract_type sent to Deriv
         # (see deriv.py's DIRECTION_TO_CONTRACT_TYPE) -- kept as an
         # independent local label here since this DB column exists for
@@ -175,7 +186,7 @@ class BotEngine:
                 contract_type=contract_type,
                 score=decision.score,
                 status="QUALIFIED",
-                reason=decision.reason,
+                reason=reason,
                 barrier_offset=barrier_offset,
             )
             db.add(signal)
@@ -184,7 +195,7 @@ class BotEngine:
             self.current_signal = {
                 "id": signal.id, "status": "QUALIFIED", "direction": direction,
                 "contract_type": contract_type, "score": decision.score,
-                "reason": decision.reason, "candle_epoch": candle_epoch,
+                "reason": reason, "candle_epoch": candle_epoch,
                 "entry_spot": entry_spot, "barrier_offset": barrier_offset,
             }
             if self.settings.auto_trade:

@@ -2,6 +2,18 @@
 
 Production-oriented 3-minute Deriv Higher/Lower bot.
 
+## 2026-07-25: dashboard rendered giant/broken and unclickable + signals now trade inverted
+
+### Dashboard was unstyled and unusable after the redesign deployed
+
+Screenshots showed the new nav icons rendering at massive, raw, browser-default size, while dashboard content further down (which happened to share class names like `.card`/`.btn` with the pre-redesign CSS) looked mostly fine. That split is the signature of a **stale cached `styles.css`** being served alongside a fresh `index.html`/`app.js`: brand-new class names introduced only in the redesign (`.appnav`, `.navlink`, `.topbar`, `.hero`, ...) had no matching rules in the old stylesheet, so they rendered completely unstyled; anything reusing an old class name still looked approximately right. This also explains "nothing is clicking" — giant, wrongly-laid-out elements were very likely covering or displacing the real, correctly-wired touch targets, not a JS bug.
+
+**Fix:** `index.html` is no longer served as a flat static file. `GET /` now reads it and rewrites the `styles.css`/`app.js` references to include `?v=<BUILD_VERSION>`, so a browser or intermediate CDN can never serve mismatched assets across a deploy again — a new build version means a genuinely new URL, guaranteed cache miss, every time. If the dashboard still looks broken after this deploys, try a hard refresh once as a one-time fix for whatever was already cached before this change existed.
+
+### Every signal now trades the opposite direction
+
+Requested directly: an "UP" (bullish) reading now places a **LOWER** trade, not a **HIGHER** one, and vice versa. Implemented in `engine.py` rather than `strategy.py`, so the strategy module stays a "pure" indicator (it still just reports what it detects); the engine is where the deliberate decision to trade the opposite lives. `Signal.direction` — and therefore `contract_type`, the barrier's sign, and what actually gets sent to Deriv — is now the **traded** (post-inversion) direction throughout, so the dashboard, the database, and the real trade always agree with each other. The signal's `reason` text is prefixed with `[Inverted from UP/DOWN]` so this is never a silent surprise when reviewing history later.
+
 ## 2026-07-24 (latest): barrier simplification, a real stall bug fixed, dashboard redesign, persisted live/demo toggle
 
 ### Barrier now always exactly matches what was computed at signal opening
