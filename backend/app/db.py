@@ -58,6 +58,51 @@ class BotEvent(Base):
     message: Mapped[str] = mapped_column(Text)
 
 
+class RuntimeSetting(Base):
+    """Generic key-value store for settings changed from the dashboard
+    (currently just bot_mode) that need to persist across restarts without
+    a redeploy. BOT_MODE the env var remains the fallback default when no
+    override has ever been saved here."""
+    __tablename__ = "runtime_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String(256))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+async def get_runtime_setting(key: str, default: str | None = None) -> str | None:
+    async with session() as db:
+        row = await db.get(RuntimeSetting, key)
+        return row.value if row else default
+
+
+async def set_runtime_setting(key: str, value: str) -> None:
+    async with session() as db:
+        row = await db.get(RuntimeSetting, key)
+        if row:
+            row.value = value
+        else:
+            db.add(RuntimeSetting(key=key, value=value))
+        await db.commit()
+
+
+async def get_effective_bot_mode(settings) -> str:
+    """The mode actually in effect: a saved dashboard override if one
+    exists, otherwise the BOT_MODE env var's default."""
+    override = await get_runtime_setting("bot_mode")
+    if override in ("demo", "live"):
+        return override
+    return settings.bot_mode
+
+
+async def set_bot_mode_override(mode: str) -> str:
+    mode = mode.lower().strip()
+    if mode not in ("demo", "live"):
+        raise ValueError("mode must be 'demo' or 'live'")
+    await set_runtime_setting("bot_mode", mode)
+    return mode
+
+
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

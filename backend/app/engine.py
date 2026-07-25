@@ -2,8 +2,8 @@ import asyncio
 import logging
 import time
 from .config import get_settings
-from .db import session, Signal, Trade, BotEvent
-from .deriv import DerivClient, DerivAPIError
+from .db import session, Signal, Trade, BotEvent, get_effective_bot_mode
+from .deriv import DerivClient
 from .strategy import Candle, R25Strategy
 from sqlalchemy import select
 
@@ -55,7 +55,8 @@ class BotEngine:
         backoff = 2
         while self.running:
             try:
-                await self.client.connect()
+                mode = await get_effective_bot_mode(self.settings)
+                await self.client.connect(mode)
                 await self.load_history()
                 self.status = "RUNNING"
                 self.last_error = None
@@ -92,6 +93,17 @@ class BotEngine:
         async for tick in self.client.subscribe_ticks(self.settings.market_symbol):
             if not self.running:
                 return
+            # The public tick stream can keep flowing even after the
+            # separate *trade* connection has silently died (e.g. a brief
+            # network blip severs one but not the other). Previously that
+            # went undetected until a trade was actually attempted, and
+            # even then execute() swallowed the resulting "not connected"
+            # error into EXECUTION_ERROR and returned normally -- so
+            # tick_loop() never raised, run()'s reconnect/backoff never
+            # triggered, and every future signal would just repeat the same
+            # silent failure until the process was restarted by hand.
+            if not self.client.trade_connected:
+                raise RuntimeError("Trade WebSocket is down; reconnecting")
             tick_data = tick.get("tick") if isinstance(tick, dict) else None
             if not isinstance(tick_data, dict):
                 continue
@@ -184,8 +196,22 @@ class BotEngine:
             if not signal:
                 return
             try:
-                proposal, barrier_str, used_offset = await self._propose_with_barrier_retry(
-                    signal.direction, barrier_offset,
+                # Always the exact barrier computed at signal opening (from
+                # the ATR at that moment) -- no substitution. Earlier this
+                # tried a wide sweep of fallback magnitudes when Deriv
+                # rejected a barrier, which was a workaround for
+                # contract_type being wrong (CALL/PUT instead of
+                # HIGHER/LOWER, fixed 2026-07-24 -- see README). With the
+                # root cause fixed, silently trying a different barrier
+                # than what the strategy actually computed would just hide
+                # real problems instead of reporting them.
+                barrier_str = self.client.build_proposal_payload(
+                    self.settings.market_symbol, signal.direction, self.settings.stake,
+                    self.settings.currency, self.settings.timeframe_seconds, barrier_offset,
+                )["barrier"]
+                proposal = await self.client.proposal(
+                    self.settings.market_symbol, signal.direction, self.settings.stake,
+                    self.settings.currency, self.settings.timeframe_seconds, barrier_offset,
                 )
                 prop = proposal.get("proposal", {})
                 proposal_id = prop.get("id")
@@ -199,7 +225,7 @@ class BotEngine:
                     raise RuntimeError(f"Buy response did not contain contract_id: {buy_response}")
                 db.add(Trade(
                     signal_id=signal.id, contract_id=contract_id, symbol=signal.symbol,
-                    mode=self.settings.bot_mode, direction=signal.direction,
+                    mode=self.client.current_mode or self.settings.bot_mode, direction=signal.direction,
                     stake=self.settings.stake, payout=float(prop.get("payout", 0) or 0),
                     status="OPEN", entry_spot=spot, barrier=barrier_str,
                 ))
@@ -214,69 +240,6 @@ class BotEngine:
                 self.last_error = str(exc)
                 log.exception("Execution failed")
                 await self.log_event("error", "execution_error", str(exc))
-
-    async def _propose_with_barrier_retry(self, direction: str, barrier_offset: float):
-        """Request a proposal, adaptively adjusting the barrier if Deriv
-        rejects it as invalid.
-
-        2026-07-23/24 history: every barrier value was rejected regardless
-        of magnitude or sign (0.05 to 5.0, both directions). That turned out
-        to be because contract_type was CALL/PUT at the time, which doesn't
-        accept a barrier on this account at all -- see
-        DIRECTION_TO_CONTRACT_TYPE in deriv.py and the README. Now that
-        contract_type is HIGHER/LOWER (confirmed correct against this
-        account's own contracts_for response), a rejection here should be
-        rare. This retry loop is kept as a narrower safety net in case the
-        ATR-derived estimate occasionally falls outside whatever min/max
-        bound this specific contract enforces, not because the correct
-        contract shape is still in doubt. On a `subcode == "InvalidBarrier"`
-        rejection it moves to the next candidate; any other error (wrong
-        symbol, insufficient balance, connection issue, etc.) is raised
-        immediately, unretried.
-        """
-        candidates = [
-            barrier_offset,
-            barrier_offset * 2, barrier_offset * 4, barrier_offset * 8,
-            barrier_offset * 0.5, barrier_offset * 0.25,
-            0.05, 0.1, 0.3,
-            1.0, 2.0, 3.0, 5.0,
-        ]
-        attempted: list[tuple[float, str]] = []
-        last_error: Exception = RuntimeError("No barrier candidate available")
-        for i, offset in enumerate(candidates):
-            if offset <= 0:
-                continue
-            try:
-                barrier_str = self.client.build_proposal_payload(
-                    self.settings.market_symbol, direction, self.settings.stake,
-                    self.settings.currency, self.settings.timeframe_seconds, offset,
-                )["barrier"]
-                proposal = await self.client.proposal(
-                    self.settings.market_symbol, direction, self.settings.stake,
-                    self.settings.currency, self.settings.timeframe_seconds, offset,
-                )
-                if i > 0:
-                    log.warning(
-                        "Barrier %s accepted after %d rejection(s) (originally computed offset %.3f)",
-                        barrier_str, i, barrier_offset,
-                    )
-                return proposal, barrier_str, offset
-            except DerivAPIError as exc:
-                last_error = exc
-                attempted.append((offset, barrier_str))
-                if exc.subcode != "InvalidBarrier":
-                    raise
-                log.warning(
-                    "Barrier %s rejected (%s: %s); trying next candidate",
-                    barrier_str, exc.subcode, exc.message or exc.details,
-                )
-        summary = (
-            f"All {len(attempted)} barrier candidates rejected as InvalidBarrier for "
-            f"direction={direction} (originally computed offset {barrier_offset:.3f}). "
-            f"Tried: {[b for _, b in attempted]}. Last Deriv response: {last_error}"
-        )
-        log.error(summary)
-        raise RuntimeError(summary) from last_error
 
     async def settle(self, contract_id: str):
         deadline = time.monotonic() + self.settings.timeframe_seconds + 120  # + grace period for settlement lag

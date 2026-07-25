@@ -71,6 +71,23 @@ class DerivClient:
         self._trade_waiters: dict[int, asyncio.Future] = {}
         self._public_ticks: asyncio.Queue = asyncio.Queue(maxsize=5000)
         self.account_id: str | None = None
+        self.current_mode: str | None = None
+
+    @property
+    def trade_connected(self) -> bool:
+        """Whether the trade (authenticated) WebSocket is actually usable.
+
+        A brief network blip can sever just this connection while the
+        separate public/tick connection stays alive -- previously nothing
+        checked for that independently of an actual trade attempt, so a
+        dead trade connection could go unnoticed indefinitely (see
+        BotEngine.tick_loop in engine.py and the README).
+        """
+        return (
+            self.trade_ws is not None
+            and self._trade_reader_task is not None
+            and not self._trade_reader_task.done()
+        )
 
     def _headers(self) -> dict[str, str]:
         if not self.settings.deriv_app_id:
@@ -104,7 +121,7 @@ class DerivClient:
                     await asyncio.sleep(2 ** attempt)
         raise RuntimeError(f"WebSocket handshake failed after retries: {last_error}")
 
-    async def connect(self):
+    async def connect(self, mode: str):
         await self.close()
         self.public_ws = await self._connect_ws(PUBLIC_WS)
         try:
@@ -112,7 +129,7 @@ class DerivClient:
             # minted, so the account/OTP lookup happens right before the
             # trade WS connection, not before the (potentially slow, with
             # up to 3 retries) public WS handshake above.
-            self.account_id = await self._select_account()
+            self.account_id = await self._select_account(mode)
             otp_url = await self._get_otp_url(self.account_id)
             self.trade_ws = await self._connect_ws(otp_url)
         except Exception:
@@ -120,9 +137,19 @@ class DerivClient:
             raise
         self._public_reader_task = asyncio.create_task(self._reader("public"), name="deriv-public-reader")
         self._trade_reader_task = asyncio.create_task(self._reader("trade"), name="deriv-trade-reader")
-        log.info("DERIV_CONNECTED account=%s mode=%s", self.account_id, self.settings.bot_mode)
+        log.info("DERIV_CONNECTED account=%s mode=%s", self.account_id, self.current_mode)
 
-    async def _select_account(self) -> str:
+    async def _select_account(self, mode: str) -> str:
+        # `mode` is resolved by the caller (engine.py, via db.py's
+        # get_effective_bot_mode/RuntimeSetting -- see README) since it can
+        # be changed from the dashboard without a redeploy. Kept as an
+        # explicit parameter here, rather than this module importing the
+        # DB-backed resolver itself, so DerivClient stays a decoupled,
+        # independently-testable Deriv API client with no knowledge of this
+        # app's specific settings-persistence mechanism. Stored so callers
+        # (logging, Trade.mode) show what was actually used, even if
+        # DERIV_ACCOUNT_ID below bypasses using it for selection.
+        self.current_mode = mode
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.get(f"{API_BASE}/trading/v1/options/accounts", headers=self._headers())
         if response.status_code >= 400:
@@ -137,7 +164,7 @@ class DerivClient:
             if any(str(a.get("account_id")) == self.settings.deriv_account_id for a in data):
                 return self.settings.deriv_account_id
             raise RuntimeError(f"DERIV_ACCOUNT_ID={self.settings.deriv_account_id} was not returned for this token")
-        wanted = "demo" if self.settings.bot_mode == "demo" else "real"
+        wanted = "demo" if mode == "demo" else "real"
         candidates = [a for a in data if str(a.get("account_type", "")).lower() == wanted]
         active = [a for a in candidates if str(a.get("status", "active")).lower() == "active"]
         selected = active[0] if active else (candidates[0] if candidates else None)

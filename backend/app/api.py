@@ -1,9 +1,10 @@
 import asyncio
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 from sqlalchemy import select, func
 from .config import get_settings, BUILD_VERSION
-from .db import session, Signal, Trade, BotEvent
+from .db import session, Signal, Trade, BotEvent, get_effective_bot_mode, set_bot_mode_override
 from .engine import BotEngine
 
 router = APIRouter()
@@ -13,6 +14,7 @@ engine = BotEngine()
 
 @router.get("/api/status")
 async def status():
+    mode = await get_effective_bot_mode(settings)
     async with session() as db:
         today = datetime.now(timezone.utc).date()
         start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
@@ -24,7 +26,7 @@ async def status():
         pnl = (await db.execute(select(func.coalesce(func.sum(Trade.profit), 0.0)).where(Trade.created_at >= start, Trade.created_at < end))).scalar_one() or 0.0
         trades = wins + losses
         return {
-            "bot_status": engine.status, "mode": settings.bot_mode, "symbol": settings.market_symbol,
+            "bot_status": engine.status, "mode": mode, "symbol": settings.market_symbol,
             "timeframe_seconds": 180, "auto_trade": settings.auto_trade,
             "barrier_atr_fraction": settings.barrier_atr_fraction,
             "current_signal": engine.current_signal, "last_error": engine.last_error,
@@ -113,7 +115,7 @@ async def diagnostics():
         "generated_at": datetime.now(timezone.utc),
         "build_version": BUILD_VERSION,
         "bot_status": engine.status,
-        "mode": settings.bot_mode,
+        "mode": await get_effective_bot_mode(settings),
         "symbol": settings.market_symbol,
         "auto_trade": settings.auto_trade,
         "barrier_atr_fraction": settings.barrier_atr_fraction,
@@ -148,13 +150,36 @@ async def stop_bot():
     return {"status": engine.status}
 
 
+class ModeChangeRequest(BaseModel):
+    mode: str
+
+
+@router.post("/api/settings/mode")
+async def set_mode(payload: ModeChangeRequest):
+    """Change demo/live and persist it (RuntimeSetting -- see db.py),
+    surviving restarts without needing a redeploy. If the bot is currently
+    running, it's stopped and restarted so the new mode actually takes
+    effect (account selection happens once, at connect time)."""
+    try:
+        new_mode = await set_bot_mode_override(payload.mode)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    restarted = False
+    if engine.running:
+        await engine.stop()
+        await engine.start()
+        restarted = True
+    return {"mode": new_mode, "restarted": restarted, "bot_status": engine.status}
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
+            mode = await get_effective_bot_mode(settings)
             await websocket.send_json({"type": "status", "data": {
-                "status": engine.status, "mode": settings.bot_mode,
+                "status": engine.status, "mode": mode,
                 "current_signal": engine.current_signal, "last_error": engine.last_error,
             }})
             await asyncio.sleep(2)

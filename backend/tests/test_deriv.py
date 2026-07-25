@@ -86,6 +86,32 @@ def test_proposal_open_contract_payload_omits_subscribe():
     assert "subscribe" not in payload
 
 
+def test_trade_connected_reflects_actual_connection_state():
+    # Regression test: a dead trade connection with a still-alive public
+    # connection used to go undetected until a trade was attempted, and
+    # even then the resulting error was swallowed silently (see README).
+    # trade_connected is what tick_loop() now checks on every tick.
+    client = DerivClient()
+    assert client.trade_connected is False  # nothing connected yet
+
+    class FakeTask:
+        def __init__(self, done):
+            self._done = done
+        def done(self):
+            return self._done
+
+    client.trade_ws = object()
+    client._trade_reader_task = FakeTask(done=False)
+    assert client.trade_connected is True
+
+    client._trade_reader_task = FakeTask(done=True)  # reader exited/crashed
+    assert client.trade_connected is False
+
+    client._trade_reader_task = FakeTask(done=False)
+    client.trade_ws = None  # e.g. after close()
+    assert client.trade_connected is False
+
+
 def test_contracts_for_payload_matches_deriv_confirmed_shape():
     # Regression test: an earlier version of this guessed {"contracts_for":
     # 1, "underlying_symbol": symbol, "currency": ...}, matching the

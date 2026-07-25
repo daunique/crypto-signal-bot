@@ -2,6 +2,37 @@
 
 Production-oriented 3-minute Deriv Higher/Lower bot.
 
+## 2026-07-24 (latest): barrier simplification, a real stall bug fixed, dashboard redesign, persisted live/demo toggle
+
+### Barrier now always exactly matches what was computed at signal opening
+
+The adaptive multi-candidate barrier retry (added while the `HIGHER`/`LOWER` root cause below was still unconfirmed) is removed now that it's confirmed fixed. `execute()` sends exactly the ATR-derived barrier computed when the signal was created — no substitution. If Deriv ever rejects it, that's now reported honestly (`EXECUTION_ERROR`, visible in diagnostics) instead of silently trying different magnitudes.
+
+### Trades could silently stop executing until a manual restart
+
+Root cause: the public (tick) and trade (authenticated) connections are separate WebSockets. A brief network blip can sever just the trade one while the public one stays alive — the bot kept detecting signals fine, but `execute()`'s own try/except was swallowing the resulting `"Deriv trade WebSocket is not connected"` error into `EXECUTION_ERROR` and returning normally. That meant `tick_loop()` never raised, so `run()`'s reconnect/backoff logic never triggered — every future signal would silently fail the same way forever, until the process was restarted by hand.
+
+**Fix:** added `DerivClient.trade_connected`, checked on every tick (cheap — ticks arrive every 1-2s). The moment the trade connection is found dead, the engine raises and lets the existing reconnect/backoff logic take over, instead of waiting for a trade attempt to expose it.
+
+### Dashboard redesign
+
+Full visual rework of `frontend/` aimed at a professional trading-terminal feel and an actually-usable mobile layout:
+* Dark, data-dense theme with a deliberate color system: teal-green for wins/higher, coral-red for losses/lower, amber for pending — every signal/trade status is now a clearly labeled, colored badge (not just plain text), directly addressing "can't differentiate win/loss/pending".
+* Responsive nav: a bottom tab bar on narrow/mobile screens, a left sidebar on wide ones — same markup, CSS-driven, rather than two different navs to maintain.
+* A live countdown ring for the current 180s candle, tabular/monospace numerals throughout (IBM Plex Mono) so price/stake columns actually align, and a hand-rolled inline-SVG cumulative PnL chart (no chart library dependency).
+* Typography: Space Grotesk for headings, Inter for body/UI, IBM Plex Mono for all numeric data.
+
+### Live/demo mode is now a dashboard toggle that persists across restarts
+
+Previously `BOT_MODE` was an env var baked in at deploy time — changing it meant editing Fly secrets and redeploying. Settings now has a Demo/Live segmented toggle:
+* A new `RuntimeSetting` key-value table (`db.py`) persists the override; `BOT_MODE` becomes just the fallback default for when no override has ever been saved.
+* `POST /api/settings/mode` validates, persists, and — if the bot is currently running — stops and restarts it so the new mode actually takes effect immediately (account selection happens once, at connect time).
+* Switching *to* Live asks for confirmation in the UI first (real money); switching to Demo doesn't need one.
+* `deriv.py`'s `connect()`/`_select_account()` now take the effective mode as an explicit parameter from `engine.py`, rather than importing the DB-backed resolver directly — keeps `DerivClient` a decoupled, independently-testable Deriv API client with no knowledge of this app's settings-persistence mechanism (this also matters for the test suite, which stubs around `deriv.py` without a real database).
+* `Trade.mode` now records the mode actually connected with at execution time, which can differ from today's dashboard setting if it's since been changed.
+
+**Not execution-tested:** the DB-backed mode persistence and stop/restart cycle couldn't be run end-to-end in the sandbox this was built in (no network access to install the real SQLAlchemy/FastAPI stack — see "Testing" below for how the rest of this project's tests are verified without it). Reviewed carefully by hand; please exercise the actual toggle once deployed and report back if anything looks off.
+
 ## 2026-07-24 (resolved): `contracts_for` confirms `HIGHER`/`LOWER` was correct all along — the CALL/PUT fix was wrong for this account
 
 The live `contracts_for` response (via the Settings page tooling above) settled this definitively. It lists **two separate contract categories** for R_25:
