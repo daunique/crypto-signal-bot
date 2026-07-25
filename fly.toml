@@ -27,6 +27,10 @@ primary_region = "ams"
     method = "GET"
     path = "/health"
 
+[[mounts]]
+  source = "bot_data"
+  destination = "/app/data"
+
 [[vm]]
   memory = "512mb"
   cpu_kind = "shared"

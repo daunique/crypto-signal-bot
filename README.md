@@ -2,6 +2,12 @@
 
 Production-oriented 3-minute Deriv Higher/Lower bot.
 
+## 2026-07-25 (latest): signal/trade history was never actually persisted across deploys
+
+Not a database *connection* problem — the database was always there and working. The real issue: `fly.toml` had no `[[mounts]]`, so the SQLite file at `/app/data/bot.db` lived on the container's local, ephemeral disk. Every `fly deploy` schedules a genuinely new machine, wiping any local-disk-only files with it — so every deploy silently reset signal/trade/event history to empty, which is exactly what looked like "not connected to a database."
+
+**Fix:** `fly.toml` now mounts a persistent Fly Volume at `/app/data`. **The volume has to be created once by hand first** (a config change alone can't create it) — see the "Persistent storage" section under Fly.io below for the exact commands. A real Postgres instance (e.g. Fly's Managed Postgres, which is what the Fly dashboard's "Managed Postgres Attachments" panel — showing "no attached MPG clusters" — refers to) is also already fully supported by just changing `DATABASE_URL`; a volume is simpler and sufficient for this single-machine deployment, so that's the default recommendation here.
+
 ## 2026-07-25: dashboard rendered giant/broken and unclickable + signals now trade inverted
 
 ### Dashboard was unstyled and unusable after the redesign deployed
@@ -219,6 +225,17 @@ fly deploy -a crypto-signal-bot-kooj9a
 ```
 
 Use `BOT_MODE=live` only when you intentionally want live account selection. Keep credentials in Fly secrets. Never commit `.env`.
+
+### Persistent storage (one-time setup)
+
+`fly.toml` mounts a Fly Volume at `/app/data`, where the SQLite database lives. **The volume itself has to be created once, by hand, before it can be mounted** — a redeploy alone won't create it:
+
+```bash
+fly volumes create bot_data --region ams --size 1 -a crypto-signal-bot-kooj9a
+fly deploy -a crypto-signal-bot-kooj9a
+```
+
+`--size 1` is 1GB, far more than a SQLite file of signals/trades needs. Without this, every redeploy runs on a brand-new machine with an empty local filesystem — the database was never actually broken or disconnected, it just had nowhere durable to live, so every deploy quietly reset it to empty. If you'd rather use a real Postgres instance instead of SQLite-on-a-volume (e.g. Fly Managed Postgres, shown as "Managed Postgres Attachments" in the Fly dashboard), that already works too — this app only needs `DATABASE_URL` pointed at it (`asyncpg` is already in `backend/requirements.txt`); a volume is the simpler option for a single-machine deployment like this one.
 
 ## Runtime
 
