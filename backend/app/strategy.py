@@ -58,6 +58,8 @@ class TickEMAStrategy:
 
     EMA_FAST = 10
     EMA_SLOW = 50
+    # Default only -- engine.py actually passes settings.tick_vol_window
+    # into __init__ below, so TICK_VOL_WINDOW in config/.env takes effect.
     VOL_WINDOW = 20
     # EMA(50)'s weight on a data point n ticks back decays as
     # (1 - 2/51)^n, i.e. below 0.1% by n=~170. Keeping this many most-recent
@@ -68,14 +70,20 @@ class TickEMAStrategy:
     # easier to test -- there's no running state that can silently drift or
     # desync across a reconnect.
     HISTORY = 320
-    # Warm-up gate: below this many ticks, EMA(50) and the 20-tick
-    # volatility window aren't meaningfully populated yet. At R_25's
-    # observed ~2s/tick rate this is roughly 6-7 minutes after (re)connect
-    # -- see engine.py's WARMING_UP status and the README.
+    # Warm-up gate: below this many ticks, EMA(50) and the volatility
+    # window aren't meaningfully populated yet. At R_25's observed ~2s/tick
+    # rate this is roughly 6-7 minutes after (re)connect -- see engine.py's
+    # WARMING_UP status and the README.
     MIN_TICKS = 200
 
-    def __init__(self):
+    def __init__(self, vol_window: int | None = None):
         self._ticks: deque[Tick] = deque(maxlen=self.HISTORY)
+        # Regression fix (2026-07-26): this used to silently ignore
+        # TICK_VOL_WINDOW from config entirely -- VOL_WINDOW was a
+        # class-level constant only, never actually read from settings, so
+        # changing TICK_VOL_WINDOW in .env had zero effect on live
+        # behavior. engine.py now passes settings.tick_vol_window here.
+        self.vol_window = vol_window if vol_window is not None else self.VOL_WINDOW
 
     def push_tick(self, tick: Tick) -> None:
         self._ticks.append(tick)
@@ -104,7 +112,7 @@ class TickEMAStrategy:
         ema_fast = self._ema(prices, self.EMA_FAST)
         ema_slow = self._ema(prices, self.EMA_SLOW)
 
-        recent = prices[-(self.VOL_WINDOW + 1):]
+        recent = prices[-(self.vol_window + 1):]
         diffs = [b - a for a, b in zip(recent, recent[1:])]
         vol = statistics.stdev(diffs) if len(diffs) >= 2 else 0.0
         if vol <= 0:

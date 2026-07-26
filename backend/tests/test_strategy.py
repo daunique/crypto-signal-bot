@@ -81,3 +81,29 @@ def test_push_tick_deque_is_bounded_by_history():
     s = TickEMAStrategy()
     _push_constant_walk(s, s.HISTORY + 100, 100.0, 0.01)
     assert s.tick_count == s.HISTORY
+
+
+def test_vol_window_is_actually_configurable():
+    # Regression test: vol_window used to be a class-level constant only
+    # (VOL_WINDOW), never actually read from settings.tick_vol_window --
+    # so changing TICK_VOL_WINDOW in .env had zero effect on live
+    # behavior. engine.py now passes it into __init__ explicitly.
+    default_strategy = TickEMAStrategy()
+    assert default_strategy.vol_window == TickEMAStrategy.VOL_WINDOW
+
+    custom_strategy = TickEMAStrategy(vol_window=5)
+    assert custom_strategy.vol_window == 5
+
+    # A smaller window should generally produce a different (typically
+    # smaller-sample, noisier) volatility estimate than a larger one on the
+    # same tick data -- confirms the parameter actually reaches evaluate(),
+    # not just that the attribute is stored.
+    _push_trending_walk(custom_strategy, custom_strategy.HISTORY, 100.0, 0.05)
+    result_custom = custom_strategy.evaluate()
+
+    default_strategy2 = TickEMAStrategy(vol_window=20)
+    _push_trending_walk(default_strategy2, default_strategy2.HISTORY, 100.0, 0.05)
+    result_default = default_strategy2.evaluate()
+
+    assert result_custom is not None and result_default is not None
+    assert result_custom.vol != result_default.vol

@@ -2,6 +2,12 @@
 
 Production-oriented tick-based Deriv Higher/Lower bot (10-tick contracts).
 
+## 2026-07-26 (latest): barrier value looked "wrong" (0.025 instead of 0.25) -- it isn't, but a related config bug is now fixed
+
+**Not a bug:** `BARRIER_VOL_FRACTION=0.25` is a *multiplier* of rolling tick volatility, not the barrier distance itself. The actual barrier sent to Deriv is `rolling_20_tick_volatility x 0.25`. R_25's tick-to-tick price moves are small in absolute terms -- real historical data puts the rolling 20-tick volatility typically around 0.15-0.20, so a *typical* barrier works out to roughly 0.04-0.05, with the full normal range spanning about 0.013 to 0.09 depending on how volatile the market currently is. An observed barrier around 0.025 sits at the quieter end of that range, not outside it, and both `engine.py` and the backtest apply the exact same `vol x fraction` formula to the same data -- there's no discrepancy between what was backtested and what's deployed.
+
+**Real bug found and fixed while checking this:** `TICK_VOL_WINDOW` in config was never actually wired into the strategy -- `TickEMAStrategy` always used a hardcoded window of 20 internally regardless of what this setting was changed to. It only had zero visible effect at the default (20 = 20); anyone who had changed `TICK_VOL_WINDOW` away from its default would have seen no change in behavior. `strategy.py`'s `TickEMAStrategy.__init__` now takes `vol_window` explicitly, and `engine.py` passes `settings.tick_vol_window` in on every (re)construction. Covered by a new regression test in `test_strategy.py`.
+
 ## 2026-07-26: strategy replaced -- candle confluence score to tick-level EMA(10)/EMA(50) crossover
 
 The whole trading strategy changed, not just parameters. Previous entries below (candle-based, 180s duration, confluence scoring, the barrier/contract-type debugging history) describe the *old* strategy and are kept for reference, but no longer describe how this bot currently trades.

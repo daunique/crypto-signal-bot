@@ -14,7 +14,7 @@ class BotEngine:
     def __init__(self):
         self.settings = get_settings()
         self.client = DerivClient()
-        self.strategy = TickEMAStrategy()
+        self.strategy = TickEMAStrategy(vol_window=self.settings.tick_vol_window)
         self.running = False
         self.status = "STOPPED"
         self.current_signal = None
@@ -62,7 +62,7 @@ class BotEngine:
                 # inside the EMA/volatility window. Re-warming from live
                 # ticks (see WARMING_UP below) is simpler and safer than
                 # trying to detect and patch a gap.
-                self.strategy = TickEMAStrategy()
+                self.strategy = TickEMAStrategy(vol_window=self.settings.tick_vol_window)
                 self.ticks_since_decision = 0
                 self.status = "RUNNING"
                 self.last_error = None
