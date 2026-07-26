@@ -2,7 +2,17 @@
 
 Production-oriented tick-based Deriv Higher/Lower bot (10-tick contracts).
 
-## 2026-07-26 (latest): barrier value looked "wrong" (0.025 instead of 0.25) -- it isn't, but a related config bug is now fixed
+## 2026-07-26 (latest): barrier is now a literal fixed 0.25, shipped despite known negative expected value
+
+**This is a deliberate, explicit user choice, not a recommendation.** `BARRIER_FIXED_OFFSET` (config.py, default 0.25) is now sent to Deriv exactly as configured -- it no longer scales with volatility (that was the immediately preceding same-day revision below, which explained why `BARRIER_VOL_FRACTION=0.25` produced a small ~0.025-0.05 barrier; this entry replaces that setting entirely).
+
+**Stated plainly, because it matters:** a dedicated backtest for this exact configuration (0.25 fixed barrier, 10-tick duration, R_25, ~95 filter combinations tried including conditioning on only the top 0.5% most extreme volatility spikes across the full dataset) found a win rate of roughly **32-34%**. Against the payout structure this was requested for -- $1 stake, $2.60 back on a win ($1.60 profit) -- breakeven requires **~38.46%**. That means this configuration backtested with a **negative expected value per trade**: on average, it loses money, and more volume or bigger stakes would not fix that (it would make the expected loss larger and more certain, not smaller). This is shipped anyway, at explicit request, specifically to redeploy and observe real results directly rather than rely on the backtest alone. See `config.py`'s `barrier_fixed_offset` docstring, `tick_backtest_addendum.md`, and this session's chat history for the full numbers.
+
+One thing worth checking before drawing conclusions from a live run: the payout figures above ($1 stake / $2.60 return) came from the person operating this bot, not from a live Deriv quote pulled in this session -- if a live demo proposal for this exact barrier/duration/symbol comes back with a different payout than assumed, the breakeven math changes accordingly and should be recomputed against the actual quote.
+
+`decision.vol` (rolling tick volatility) no longer sizes the barrier at all -- it's retained only (1) as a guard against a frozen/stale price feed (a reading of exactly 0 is far more likely to mean the feed stalled than that the market went perfectly still), and (2) as informational context on the dashboard (`current_market_vol`, shown next to the fixed barrier so you can see how the two compare in real time).
+
+## 2026-07-26: barrier value looked "wrong" (0.025 instead of 0.25) -- it isn't, but a related config bug is now fixed
 
 **Not a bug:** `BARRIER_VOL_FRACTION=0.25` is a *multiplier* of rolling tick volatility, not the barrier distance itself. The actual barrier sent to Deriv is `rolling_20_tick_volatility x 0.25`. R_25's tick-to-tick price moves are small in absolute terms -- real historical data puts the rolling 20-tick volatility typically around 0.15-0.20, so a *typical* barrier works out to roughly 0.04-0.05, with the full normal range spanning about 0.013 to 0.09 depending on how volatile the market currently is. An observed barrier around 0.025 sits at the quieter end of that range, not outside it, and both `engine.py` and the backtest apply the exact same `vol x fraction` formula to the same data -- there's no discrepancy between what was backtested and what's deployed.
 
@@ -205,7 +215,7 @@ The bot reads the raw R_25 tick stream and trades a genuine 10-tick-duration Hig
 
 The traded direction matches the strategy's raw reading directly -- no inversion (see the 2026-07-26 changelog entry above for why that differs from the previous candle strategy). `HIGHER`/`LOWER` is confirmed against this account's own `contracts_for` response for the *180s/duration_unit "s"* tier (see 2026-07-24 entries below); the current `duration_unit: "t"` (tick) tier has not been separately confirmed the same way -- verify via **Settings -> Copy contract specs (live query)** before relying on this in live mode.
 
-The barrier's distance from spot is `BARRIER_VOL_FRACTION` x the rolling 20-tick price volatility; see `.env.example`.
+The barrier's distance from spot is a literal fixed value, `BARRIER_FIXED_OFFSET` (default 0.25); see `.env.example` and the known-economics note in `config.py`/the changelog above -- this default has backtested below breakeven for a $2.60-on-$1-stake payout, and is set this way by explicit request rather than backtest support.
 
 A decision is evaluated every `TRADE_DURATION_TICKS` ticks (default 10), once the strategy has collected at least 200 ticks since the last (re)connect (see `WARMING_UP` in the Runtime section below). Trades are non-overlapping by design: the next decision is only considered after the previous trade's duration has fully elapsed.
 
@@ -273,7 +283,7 @@ On every (re)connect, the strategy starts cold and warms up live from the tick s
 
 1. `TickEMAStrategy.evaluate()` reads EMA(10)/EMA(50) and rolling 20-tick volatility off the current tick window.
 2. A qualified direction is mapped to `HIGHER` or `LOWER` -- see "Trading contract semantics" above.
-3. A Higher/Lower proposal is requested with a signed barrier sized from the rolling tick volatility.
+3. A Higher/Lower proposal is requested with a signed barrier at the fixed configured distance (`BARRIER_FIXED_OFFSET`) from entry spot.
 4. The proposal is bought at the configured stake.
 5. The contract is polled until settlement.
 6. Trade result and PnL are persisted.

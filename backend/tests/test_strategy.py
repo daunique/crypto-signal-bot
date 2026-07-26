@@ -51,9 +51,11 @@ def test_strategy_uptrend_produces_up_with_positive_vol():
     result = s.evaluate()
     assert result is not None
     assert result.direction == "UP"
-    # engine.py sizes the real Higher/Lower barrier as a fraction of this,
-    # so it must actually be positive (not left at some degenerate
-    # default) whenever a decision is returned.
+    # vol no longer sizes the barrier directly (that's now a fixed config
+    # value -- see strategy.py/config.py), but it must still actually be
+    # positive whenever a decision is returned: it's how evaluate() detects
+    # a frozen/stale feed (vol<=0 -> None), and it's shown on the dashboard
+    # for context.
     assert result.vol > 0
     assert result.score >= 0
 
@@ -68,10 +70,11 @@ def test_strategy_downtrend_produces_down():
 
 
 def test_strategy_flat_zero_volatility_series_returns_none():
-    # A perfectly flat price stream can't size a real barrier (vol would be
-    # exactly 0) -- the strategy should skip rather than hand engine.py a
-    # degenerate barrier_offset of 0, which deriv.py's build_proposal_payload
-    # rejects outright.
+    # A perfectly flat price stream (vol exactly 0) most likely means a
+    # frozen/stale feed rather than genuine inactivity -- the strategy
+    # should skip rather than trade on it. (This no longer affects barrier
+    # sizing -- the barrier is a fixed config value now -- but the guard
+    # itself is still worth keeping.)
     s = TickEMAStrategy()
     _push_constant_walk(s, s.HISTORY, 150.0, 0.0)
     assert s.evaluate() is None

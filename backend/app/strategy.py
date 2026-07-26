@@ -14,10 +14,15 @@ class Tick:
 class SignalDecision:
     direction: str
     reason: str
-    # Rolling tick volatility (stdev of the last VOL_WINDOW tick-to-tick
-    # price changes). engine.py sizes the real Higher/Lower barrier as a
-    # fraction of this -- the tick-strategy equivalent of the old candle
-    # strategy's `atr`.
+    # Rolling tick volatility (stdev of the last vol_window tick-to-tick
+    # price changes). As of 2026-07-26 this does NOT size the barrier --
+    # engine.py uses a literal fixed barrier (config.py's
+    # barrier_fixed_offset) instead. Kept for two reasons: (1) a flat
+    # (exactly zero) reading most likely means a frozen/stale price feed
+    # rather than genuine market inactivity, worth skipping regardless of
+    # how the barrier is sized -- see the vol<=0 check in evaluate() below;
+    # (2) informational context on the dashboard for how the fixed barrier
+    # compares to actual current market movement.
     vol: float
     # EMA(fast)/EMA(slow) separation, in basis points of the current price.
     # Purely informational (dashboard/API display) -- unlike the old candle
@@ -30,30 +35,32 @@ class SignalDecision:
 class TickEMAStrategy:
     """
     EMA(10)/EMA(50) tick-crossover strategy, trading a 10-tick-duration
-    Higher/Lower contract with a barrier sized at 0.25x the rolling 20-tick
-    price volatility.
+    Higher/Lower contract with a literal fixed barrier (config.py's
+    barrier_fixed_offset, 0.25 by default) -- NOT scaled by volatility.
 
-    This is the strategy validated by backtest against ~199 days of R_25
-    tick data (see backtest_report.md, tick_backtest_addendum.md, and
-    best_config_bf25.json from the chat session that produced this bot
-    revision) -- not a default guess. Out-of-sample, full-dataset results
-    for these exact parameters (duration=10 ticks, barrier=0.25x rolling
-    20-tick stdev): ~46.9% overall win rate, ~44.9% minimum single-day win
-    rate, ~4,300 signals/day, worst observed same-day losing streak 20.
-    That min-daily figure is *below* the 47% floor that was actually asked
-    for -- it's the closest the search got, not a strategy that hits it.
-    See tick_backtest_addendum.md for why (this account's synthetic index
-    ticks have ~50% raw directional accuracy with no real edge for any
-    indicator combination tried; the barrier structurally requires beating
-    that, not just matching it).
+    KNOWN ECONOMICS, STATED HONESTLY: at this barrier size and duration,
+    backtesting against ~199 days of R_25 tick data found a win rate of
+    roughly 32-34% (best found across ~95 filter combinations, including
+    conditioning on only the most extreme volatility spikes) -- see
+    tick_backtest_addendum.md and the README's changelog for the full
+    session. Against a payout of $2.60 back on a $1 stake, breakeven needs
+    ~38.46%; this backtest sits below that. This configuration is shipped
+    at explicit user request, to redeploy and observe real results
+    directly, not because backtesting supports it as profitable.
+
+    (An earlier same-day revision instead scaled the barrier to 0.25x the
+    rolling 20-tick volatility, which backtested at ~46.9%/~44.9%
+    overall/min-daily win rate -- a materially different, much smaller
+    barrier in absolute terms. See README for why this changed back to a
+    fixed value.)
 
     Operates directly on the raw tick stream rather than completed candles.
     Every incoming tick is fed to `push_tick()`; `evaluate()` reads off the
     current EMA/volatility state whenever it's called. The engine only
     calls `evaluate()` at decision points -- every `trade_duration_ticks`
     ticks (see engine.py) -- so trades are non-overlapping, matching
-    exactly how the backtest that produced the numbers above was run.
-    Evaluating on overlapping windows was never simulated or validated.
+    exactly how the backtests above were run. Evaluating on overlapping
+    windows was never simulated or validated.
     """
 
     EMA_FAST = 10
@@ -116,9 +123,14 @@ class TickEMAStrategy:
         diffs = [b - a for a, b in zip(recent, recent[1:])]
         vol = statistics.stdev(diffs) if len(diffs) >= 2 else 0.0
         if vol <= 0:
-            # A perfectly flat recent window can't size a real barrier
-            # (engine.py/deriv.py both reject a non-positive barrier
-            # offset outright) -- skip rather than send a degenerate trade.
+            # A perfectly flat window (zero movement across every one of
+            # the last vol_window ticks) most likely indicates a
+            # frozen/stale price feed rather than genuine market
+            # inactivity -- R_25 is a continuously-generated synthetic
+            # index that in practice never shows exactly zero variation
+            # over a real 20-tick span. Skip rather than trade on a
+            # signal that may not reflect live prices. (Does not affect
+            # barrier sizing -- see config.py's barrier_fixed_offset.)
             return None
 
         last_price = prices[-1]

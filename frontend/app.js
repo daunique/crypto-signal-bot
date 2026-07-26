@@ -116,7 +116,7 @@ async function renderDashboard() {
       </div>
       <div class="hero-body">
         <div class="hero-status">${esc(s.bot_status)}</div>
-        <div class="muted">${esc(s.symbol)} &middot; ${esc(s.trade_duration_ticks)}-tick Higher/Lower &middot; barrier ${Number(s.barrier_vol_fraction).toFixed(2)}&times; vol</div>
+        <div class="muted">${esc(s.symbol)} &middot; ${esc(s.trade_duration_ticks)}-tick Higher/Lower &middot; barrier &plusmn;${Number(s.barrier_fixed_offset).toFixed(3)} (fixed)</div>
         ${warmingUp ? `
           <p class="muted" style="margin-top:10px">Warming up: ${esc(signal.tick_count)} / ${esc(signal.min_ticks_required)} ticks collected before the strategy can evaluate.</p>
         ` : hasSignal ? `
@@ -125,6 +125,7 @@ async function renderDashboard() {
             <div class="detail-item"><span class="detail-label">Contract</span><span class="detail-value">${esc(signal.contract_type || "-")}</span></div>
             <div class="detail-item"><span class="detail-label">Score</span><span class="detail-value">${esc(signal.score ?? "-")}</span></div>
             <div class="detail-item"><span class="detail-label">Barrier</span><span class="detail-value">${signal.barrier_offset != null ? Number(signal.barrier_offset).toFixed(3) : "-"}</span></div>
+            <div class="detail-item"><span class="detail-label">Market Vol</span><span class="detail-value">${signal.current_market_vol != null ? Number(signal.current_market_vol).toFixed(3) : "-"}</span></div>
             <div class="detail-item"><span class="detail-label">Status</span><span class="detail-value">${signalBadge(signal.status)}</span></div>
           </div>
           ${signal.reason ? `<p class="muted" style="margin-top:10px">${esc(signal.reason)}</p>` : ""}
@@ -265,9 +266,9 @@ async function renderSettings() {
       <div class="settings-row">
         <div>
           <div class="settings-row-label">Barrier size</div>
-          <div class="settings-row-desc">Distance from spot, as a fraction of rolling tick volatility (stdev of the last TICK_VOL_WINDOW tick-to-tick changes). Set via BARRIER_VOL_FRACTION.</div>
+          <div class="settings-row-desc">Fixed distance from spot (not scaled by volatility). Set via BARRIER_FIXED_OFFSET.</div>
         </div>
-        <span class="chip">${Number(s.barrier_vol_fraction).toFixed(2)}&times; vol</span>
+        <span class="chip">&plusmn;${Number(s.barrier_fixed_offset).toFixed(3)}</span>
       </div>
     </div>
     <div class="card">
@@ -311,7 +312,7 @@ function formatDiagnostics(d) {
   lines.push(`Generated: ${d.generated_at}`);
   lines.push(`Build: ${d.build_version}`);
   lines.push(`Status: ${d.bot_status} | Mode: ${d.mode} | Symbol: ${d.symbol} | Auto-trade: ${d.auto_trade}`);
-  lines.push(`Barrier vol fraction: ${d.barrier_vol_fraction}`);
+  lines.push(`Barrier fixed offset: ${d.barrier_fixed_offset}`);
   lines.push(`Last error: ${d.last_error || "(none)"}`);
   lines.push("");
   lines.push(`Recent events (${d.recent_events.length}):`);

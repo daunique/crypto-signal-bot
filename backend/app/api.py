@@ -28,7 +28,7 @@ async def status():
         return {
             "bot_status": engine.status, "mode": mode, "symbol": settings.market_symbol,
             "trade_duration_ticks": settings.trade_duration_ticks, "auto_trade": settings.auto_trade,
-            "barrier_vol_fraction": settings.barrier_vol_fraction,
+            "barrier_fixed_offset": settings.barrier_fixed_offset,
             "current_signal": engine.current_signal, "last_error": engine.last_error,
             "strategy": {
                 "ready": engine.strategy.ready,
@@ -124,7 +124,7 @@ async def diagnostics():
         "mode": await get_effective_bot_mode(settings),
         "symbol": settings.market_symbol,
         "auto_trade": settings.auto_trade,
-        "barrier_vol_fraction": settings.barrier_vol_fraction,
+        "barrier_fixed_offset": settings.barrier_fixed_offset,
         "last_error": engine.last_error,
         "current_signal": engine.current_signal,
         "recent_events": [

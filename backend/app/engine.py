@@ -162,11 +162,16 @@ class BotEngine:
         direction = decision.direction
         reason = decision.reason
         contract_type = "HIGHER" if direction == "UP" else "LOWER"
-        # Deriv's Higher/Lower barrier is sized as a fraction of the
-        # rolling tick volatility, so it scales with actual current
-        # volatility instead of a fixed point value going stale. See
-        # config.py's barrier_vol_fraction and README.
-        barrier_offset = decision.vol * self.settings.barrier_vol_fraction
+        # Literal fixed barrier distance from spot (config.py's
+        # barrier_fixed_offset) -- not scaled by volatility. See config.py
+        # for the known backtested economics of this exact value (shipped
+        # at explicit user request; the backtest found it below breakeven
+        # for a ~2.6x payout, not above it). decision.vol is *not* used to
+        # size the barrier here -- it's still computed by the strategy
+        # (informational only below) as a guard against a frozen/flat
+        # price feed, and kept in current_signal for context on how the
+        # fixed barrier compares to actual current market movement.
+        barrier_offset = self.settings.barrier_fixed_offset
         if barrier_offset <= 0:
             self.current_signal = {"status": "NO_SIGNAL", "candle_epoch": decision_epoch}
             return
@@ -189,6 +194,7 @@ class BotEngine:
                 "contract_type": contract_type, "score": decision.score,
                 "reason": reason, "candle_epoch": decision_epoch,
                 "entry_spot": entry_spot, "barrier_offset": barrier_offset,
+                "current_market_vol": decision.vol,
             }
             if self.settings.auto_trade:
                 await self.execute(signal.id, entry_spot, barrier_offset)

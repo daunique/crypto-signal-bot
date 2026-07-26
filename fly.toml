@@ -10,7 +10,7 @@ primary_region = "ams"
   MARKET_SYMBOL = "R_25"
   TRADE_DURATION_TICKS = "10"
   AUTO_TRADE = "true"
-  BARRIER_VOL_FRACTION = "0.25"
+  BARRIER_FIXED_OFFSET = "0.25"
   TICK_VOL_WINDOW = "20"
 
 [http_service]
