@@ -1,0 +1,25 @@
+{
+  "instrument": "R_25 (tick data)",
+  "contract": "Higher/Lower, tick duration",
+  "duration_ticks": 10,
+  "barrier_atr_fraction": 0.25,
+  "vol_col": "rolling tick std, 20-tick window",
+  "signal_params": {"ema_fast": 10, "ema_slow": 50},
+  "full_dataset_results_199_days": {
+    "overall_win_rate": 0.4693,
+    "min_daily_win_rate": 0.4493,
+    "max_daily_win_rate": 0.4889,
+    "signals_per_day": 4319.0,
+    "worst_max_loss_streak": 20,
+    "pct_days_below_0.47": 0.556,
+    "pct_days_below_0.52": "~1.0 (all days, not applicable to current relaxed target)"
+  },
+  "alternative_higher_overall_rate_lower_floor": {
+    "signal_params": {"ema_fast": 10, "ema_slow": 20, "ema_trend_n": 200, "macd_filter": true, "roc_n": 5, "roc_min": 0.03, "slope_n": 10, "slope_min": 0.0},
+    "overall_win_rate": 0.4754,
+    "min_daily_win_rate": 0.3065,
+    "signals_per_day": 78.0,
+    "worst_max_loss_streak": 13,
+    "note": "higher signal quality but far lower trade volume -> daily win rate has much more sampling noise, so the floor is actually worse despite a better average"
+  }
+}

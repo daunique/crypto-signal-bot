@@ -1,116 +1,123 @@
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional
-import math
+import statistics
 
 
 @dataclass
-class Candle:
+class Tick:
     epoch: int
-    open: float
-    high: float
-    low: float
-    close: float
+    price: float
 
 
 @dataclass
 class SignalDecision:
     direction: str
-    score: int
     reason: str
-    atr: float = 0.0
+    # Rolling tick volatility (stdev of the last VOL_WINDOW tick-to-tick
+    # price changes). engine.py sizes the real Higher/Lower barrier as a
+    # fraction of this -- the tick-strategy equivalent of the old candle
+    # strategy's `atr`.
+    vol: float
+    # EMA(fast)/EMA(slow) separation, in basis points of the current price.
+    # Purely informational (dashboard/API display) -- unlike the old candle
+    # strategy's confluence score, it is not compared against a threshold;
+    # a signal fires whenever the two EMAs are on different sides, however
+    # close.
+    score: int = 0
 
 
-class R25Strategy:
+class TickEMAStrategy:
     """
-    Modular starter strategy.
+    EMA(10)/EMA(50) tick-crossover strategy, trading a 10-tick-duration
+    Higher/Lower contract with a barrier sized at 0.25x the rolling 20-tick
+    price volatility.
 
-    All features are computed from completed candles. The decision is made
-    only at a 180-second candle boundary. This implementation is intentionally
-    replaceable as the backtest strategy evolves.
+    This is the strategy validated by backtest against ~199 days of R_25
+    tick data (see backtest_report.md, tick_backtest_addendum.md, and
+    best_config_bf25.json from the chat session that produced this bot
+    revision) -- not a default guess. Out-of-sample, full-dataset results
+    for these exact parameters (duration=10 ticks, barrier=0.25x rolling
+    20-tick stdev): ~46.9% overall win rate, ~44.9% minimum single-day win
+    rate, ~4,300 signals/day, worst observed same-day losing streak 20.
+    That min-daily figure is *below* the 47% floor that was actually asked
+    for -- it's the closest the search got, not a strategy that hits it.
+    See tick_backtest_addendum.md for why (this account's synthetic index
+    ticks have ~50% raw directional accuracy with no real edge for any
+    indicator combination tried; the barrier structurally requires beating
+    that, not just matching it).
+
+    Operates directly on the raw tick stream rather than completed candles.
+    Every incoming tick is fed to `push_tick()`; `evaluate()` reads off the
+    current EMA/volatility state whenever it's called. The engine only
+    calls `evaluate()` at decision points -- every `trade_duration_ticks`
+    ticks (see engine.py) -- so trades are non-overlapping, matching
+    exactly how the backtest that produced the numbers above was run.
+    Evaluating on overlapping windows was never simulated or validated.
     """
 
-    def __init__(self, minimum_score: int = 6):
-        self.minimum_score = minimum_score
+    EMA_FAST = 10
+    EMA_SLOW = 50
+    VOL_WINDOW = 20
+    # EMA(50)'s weight on a data point n ticks back decays as
+    # (1 - 2/51)^n, i.e. below 0.1% by n=~170. Keeping this many most-recent
+    # ticks and recomputing the EMA from scratch on every evaluate() call
+    # (rather than hand-maintaining incremental running state tick-to-tick)
+    # is therefore numerically indistinguishable from a true
+    # infinite-history streaming EMA, while being simpler to get right and
+    # easier to test -- there's no running state that can silently drift or
+    # desync across a reconnect.
+    HISTORY = 320
+    # Warm-up gate: below this many ticks, EMA(50) and the 20-tick
+    # volatility window aren't meaningfully populated yet. At R_25's
+    # observed ~2s/tick rate this is roughly 6-7 minutes after (re)connect
+    # -- see engine.py's WARMING_UP status and the README.
+    MIN_TICKS = 200
 
-    def evaluate(self, candles: list[Candle]) -> Optional[SignalDecision]:
-        if len(candles) < 55:
-            return None
+    def __init__(self):
+        self._ticks: deque[Tick] = deque(maxlen=self.HISTORY)
 
-        c = candles[-1]
-        closes = [x.close for x in candles]
-        ema9 = self.ema(closes, 9)
-        ema21 = self.ema(closes, 21)
-        ema50 = self.ema(closes, 50)
+    def push_tick(self, tick: Tick) -> None:
+        self._ticks.append(tick)
 
-        score_up = 0
-        score_down = 0
-        reasons_up = []
-        reasons_down = []
+    @property
+    def tick_count(self) -> int:
+        return len(self._ticks)
 
-        if ema9 > ema21:
-            score_up += 2
-            reasons_up.append("EMA9>EMA21")
-        elif ema9 < ema21:
-            score_down += 2
-            reasons_down.append("EMA9<EMA21")
-
-        if ema21 > ema50:
-            score_up += 1
-            reasons_up.append("EMA21>EMA50")
-        elif ema21 < ema50:
-            score_down += 1
-            reasons_down.append("EMA21<EMA50")
-
-        if closes[-1] > closes[-4]:
-            score_up += 1
-            reasons_up.append("3-candle momentum up")
-        elif closes[-1] < closes[-4]:
-            score_down += 1
-            reasons_down.append("3-candle momentum down")
-
-        if closes[-1] > closes[-6]:
-            score_up += 1
-            reasons_up.append("5-candle momentum up")
-        elif closes[-1] < closes[-6]:
-            score_down += 1
-            reasons_down.append("5-candle momentum down")
-
-        candle_range = max(c.high - c.low, 1e-12)
-        close_position = (c.close - c.low) / candle_range
-
-        if c.close > c.open and close_position >= 0.60:
-            score_up += 1
-            reasons_up.append("strong bullish close")
-        if c.close < c.open and close_position <= 0.40:
-            score_down += 1
-            reasons_down.append("strong bearish close")
-
-        atr = self.atr(candles[-15:])
-        avg_range = sum(x.high - x.low for x in candles[-15:]) / 15
-        if atr >= 0.8 * avg_range:
-            if score_up > score_down:
-                score_up += 1
-                reasons_up.append("acceptable volatility")
-            elif score_down > score_up:
-                score_down += 1
-                reasons_down.append("acceptable volatility")
-
-        if score_up >= self.minimum_score and score_up > score_down:
-            return SignalDecision("UP", score_up, ", ".join(reasons_up), atr=atr)
-        if score_down >= self.minimum_score and score_down > score_up:
-            return SignalDecision("DOWN", score_down, ", ".join(reasons_down), atr=atr)
-        return None
+    @property
+    def ready(self) -> bool:
+        return self.tick_count >= self.MIN_TICKS
 
     @staticmethod
-    def ema(values: list[float], period: int) -> float:
+    def _ema(values: list[float], period: int) -> float:
         k = 2 / (period + 1)
         value = values[0]
         for x in values[1:]:
             value = x * k + value * (1 - k)
         return value
 
-    @staticmethod
-    def atr(candles: list[Candle]) -> float:
-        if not candles:
-            return 0.0
-        return sum(c.high - c.low for c in candles) / len(candles)
+    def evaluate(self) -> Optional[SignalDecision]:
+        if not self.ready:
+            return None
+        prices = [t.price for t in self._ticks]
+
+        ema_fast = self._ema(prices, self.EMA_FAST)
+        ema_slow = self._ema(prices, self.EMA_SLOW)
+
+        recent = prices[-(self.VOL_WINDOW + 1):]
+        diffs = [b - a for a, b in zip(recent, recent[1:])]
+        vol = statistics.stdev(diffs) if len(diffs) >= 2 else 0.0
+        if vol <= 0:
+            # A perfectly flat recent window can't size a real barrier
+            # (engine.py/deriv.py both reject a non-positive barrier
+            # offset outright) -- skip rather than send a degenerate trade.
+            return None
+
+        last_price = prices[-1]
+        spread_bps = round(abs(ema_fast - ema_slow) / last_price * 10000)
+
+        if ema_fast > ema_slow:
+            return SignalDecision("UP", f"EMA{self.EMA_FAST} > EMA{self.EMA_SLOW} (tick)", vol=vol, score=spread_bps)
+        if ema_fast < ema_slow:
+            return SignalDecision("DOWN", f"EMA{self.EMA_FAST} < EMA{self.EMA_SLOW} (tick)", vol=vol, score=spread_bps)
+        return None

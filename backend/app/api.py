@@ -27,9 +27,15 @@ async def status():
         trades = wins + losses
         return {
             "bot_status": engine.status, "mode": mode, "symbol": settings.market_symbol,
-            "timeframe_seconds": 180, "auto_trade": settings.auto_trade,
-            "barrier_atr_fraction": settings.barrier_atr_fraction,
+            "trade_duration_ticks": settings.trade_duration_ticks, "auto_trade": settings.auto_trade,
+            "barrier_vol_fraction": settings.barrier_vol_fraction,
             "current_signal": engine.current_signal, "last_error": engine.last_error,
+            "strategy": {
+                "ready": engine.strategy.ready,
+                "tick_count": engine.strategy.tick_count,
+                "min_ticks_required": engine.strategy.MIN_TICKS,
+                "ticks_since_decision": engine.ticks_since_decision,
+            },
             "today": {"signals": int(signal_count or 0), "trades": int(trades), "pending": int(pending or 0),
                       "wins": int(wins or 0), "losses": int(losses or 0),
                       "win_rate": round((wins / trades * 100), 2) if trades else 0,
@@ -42,7 +48,7 @@ async def signals(limit: int = 100):
     limit = max(1, min(limit, 500))
     async with session() as db:
         rows = (await db.execute(select(Signal).order_by(Signal.created_at.desc()).limit(limit))).scalars().all()
-        return [{"id": x.id, "created_at": x.created_at, "candle_epoch": x.candle_epoch,
+        return [{"id": x.id, "created_at": x.created_at, "decision_epoch": x.candle_epoch,
                  "symbol": x.symbol, "direction": x.direction, "contract_type": x.contract_type,
                  "score": x.score, "status": x.status, "reason": x.reason,
                  "barrier_offset": x.barrier_offset} for x in rows]
@@ -118,7 +124,7 @@ async def diagnostics():
         "mode": await get_effective_bot_mode(settings),
         "symbol": settings.market_symbol,
         "auto_trade": settings.auto_trade,
-        "barrier_atr_fraction": settings.barrier_atr_fraction,
+        "barrier_vol_fraction": settings.barrier_vol_fraction,
         "last_error": engine.last_error,
         "current_signal": engine.current_signal,
         "recent_events": [

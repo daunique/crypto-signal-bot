@@ -4,7 +4,7 @@ import time
 from .config import get_settings
 from .db import session, Signal, Trade, BotEvent, get_effective_bot_mode
 from .deriv import DerivClient
-from .strategy import Candle, R25Strategy
+from .strategy import Tick, TickEMAStrategy
 from sqlalchemy import select
 
 log = logging.getLogger(__name__)
@@ -14,13 +14,12 @@ class BotEngine:
     def __init__(self):
         self.settings = get_settings()
         self.client = DerivClient()
-        self.strategy = R25Strategy(self.settings.min_confluence_score)
+        self.strategy = TickEMAStrategy()
         self.running = False
         self.status = "STOPPED"
-        self.last_candle_epoch = None
-        self.candles: list[Candle] = []
         self.current_signal = None
         self.last_error = None
+        self.ticks_since_decision = 0
         self._task: asyncio.Task | None = None
         self._settlement_tasks: set[asyncio.Task] = set()
 
@@ -57,7 +56,14 @@ class BotEngine:
             try:
                 mode = await get_effective_bot_mode(self.settings)
                 await self.client.connect(mode)
-                await self.load_history()
+                # A fresh strategy instance on every (re)connect, rather
+                # than reusing one across a gap: ticks missed during a
+                # disconnect would otherwise leave a silent discontinuity
+                # inside the EMA/volatility window. Re-warming from live
+                # ticks (see WARMING_UP below) is simpler and safer than
+                # trying to detect and patch a gap.
+                self.strategy = TickEMAStrategy()
+                self.ticks_since_decision = 0
                 self.status = "RUNNING"
                 self.last_error = None
                 backoff = 2
@@ -75,19 +81,6 @@ class BotEngine:
                 if self.running:
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 60)
-
-    async def load_history(self):
-        raw = await self.client.get_candles(self.settings.market_symbol, 120, self.settings.timeframe_seconds)
-        unique = {}
-        for x in raw:
-            try:
-                epoch = int(x["epoch"])
-                unique[epoch] = Candle(epoch, float(x["open"]), float(x["high"]), float(x["low"]), float(x["close"]))
-            except (KeyError, TypeError, ValueError):
-                continue
-        self.candles = sorted(unique.values(), key=lambda c: c.epoch)[-120:]
-        if self.candles:
-            self.last_candle_epoch = self.candles[-1].epoch
 
     async def tick_loop(self):
         async for tick in self.client.subscribe_ticks(self.settings.market_symbol):
@@ -112,75 +105,74 @@ class BotEngine:
                 spot = float(tick_data["quote"])
             except (KeyError, TypeError, ValueError):
                 continue
-            boundary = epoch - (epoch % self.settings.timeframe_seconds)
-            if self.last_candle_epoch is None:
-                self.last_candle_epoch = boundary
-                continue
-            if boundary > self.last_candle_epoch:
-                completed_epoch = self.last_candle_epoch
-                self.last_candle_epoch = boundary
-                await self.on_exact_candle_open(boundary, spot, completed_epoch)
 
-    async def on_exact_candle_open(self, candle_epoch: int, entry_spot: float, completed_epoch: int):
+            self.strategy.push_tick(Tick(epoch, spot))
+
+            if not self.strategy.ready:
+                self.current_signal = {
+                    "status": "WARMING_UP",
+                    "tick_count": self.strategy.tick_count,
+                    "min_ticks_required": self.strategy.MIN_TICKS,
+                }
+                continue
+
+            self.ticks_since_decision += 1
+            if self.ticks_since_decision < self.settings.trade_duration_ticks:
+                continue
+            # A decision point: the previous trade (if any) has had exactly
+            # trade_duration_ticks ticks to run its course, so the next one
+            # is non-overlapping -- matching how the backtest behind this
+            # strategy's numbers was run (see strategy.py's docstring).
+            self.ticks_since_decision = 0
+            await self.on_decision_tick(epoch, spot)
+
+    async def on_decision_tick(self, decision_epoch: int, entry_spot: float):
         async with session() as db:
-            existing = (await db.execute(select(Signal).where(Signal.candle_epoch == candle_epoch))).scalar_one_or_none()
+            existing = (await db.execute(select(Signal).where(Signal.candle_epoch == decision_epoch))).scalar_one_or_none()
         if existing is not None:
-            # candle_epoch is unique in the DB. Without this check, a
-            # reconnect/restart that lands back on the same in-progress
-            # candle would try to insert a duplicate Signal, raise an
-            # unhandled IntegrityError, and crash the whole engine loop
+            # candle_epoch is unique in the DB (column name predates the
+            # tick strategy -- see db.py -- it now holds the decision
+            # tick's epoch rather than a candle-boundary epoch). Without
+            # this check, a reconnect/restart landing back on the exact
+            # same tick epoch would try to insert a duplicate Signal, raise
+            # an unhandled IntegrityError, and crash the whole engine loop
             # (which would then just retry the same failure every backoff
-            # cycle until the candle finally closed).
+            # cycle).
             self.current_signal = {
                 "id": existing.id, "status": existing.status, "direction": existing.direction,
                 "contract_type": existing.contract_type, "score": existing.score,
-                "reason": existing.reason, "candle_epoch": candle_epoch,
+                "reason": existing.reason, "candle_epoch": decision_epoch,
                 "entry_spot": entry_spot,
             }
             return
-        raw = await self.client.get_candles(self.settings.market_symbol, 2, self.settings.timeframe_seconds)
-        completed = next((x for x in raw if int(x.get("epoch", -1)) == completed_epoch), None)
-        if completed is None and len(raw) >= 2:
-            completed = raw[-2]
-        if completed is None:
-            return
-        try:
-            candle = Candle(int(completed["epoch"]), float(completed["open"]), float(completed["high"]), float(completed["low"]), float(completed["close"]))
-        except (KeyError, TypeError, ValueError):
-            return
-        if not any(c.epoch == candle.epoch for c in self.candles):
-            self.candles.append(candle)
-            self.candles = sorted(self.candles, key=lambda c: c.epoch)[-120:]
-        decision = self.strategy.evaluate(self.candles)
+
+        decision = self.strategy.evaluate()
         if not decision:
-            self.current_signal = {"status": "NO_SIGNAL", "candle_epoch": candle_epoch}
+            self.current_signal = {"status": "NO_SIGNAL", "candle_epoch": decision_epoch}
             return
 
-        raw_direction = decision.direction
-        # Every signal is traded in the OPPOSITE direction from what the
-        # strategy detects (deliberate, requested 2026-07-25) -- e.g. an
-        # "UP" (bullish) reading places a LOWER trade, not a HIGHER one.
-        # `direction` becomes the actual traded direction from here on, so
-        # it stays consistent with contract_type, the barrier's sign, and
-        # what execute() actually sends to Deriv (which reads
-        # signal.direction directly). The reason text keeps the strategy's
-        # own pre-inversion analysis visible, clearly labeled, so this is
-        # never a silent surprise when reviewing signal history.
-        direction = "DOWN" if raw_direction == "UP" else "UP"
-        reason = f"[Inverted from {raw_direction}] {decision.reason}"
-        # This also happens to match the actual contract_type sent to Deriv
-        # (see deriv.py's DIRECTION_TO_CONTRACT_TYPE) -- kept as an
-        # independent local label here since this DB column exists for
-        # display regardless of what the wire value happens to be.
+        # Traded direction matches the strategy's raw reading directly (no
+        # inversion). An earlier revision of this bot, for the old candle
+        # strategy, deliberately traded the *opposite* of the detected
+        # direction -- that was a decision specific to the old strategy and
+        # was never validated for this one. This tick strategy's backtested
+        # win rates (see strategy.py's docstring) were measured trading the
+        # raw direction; inverting here would silently make the live bot
+        # trade something different from what was actually backtested.
+        direction = decision.direction
+        reason = decision.reason
         contract_type = "HIGHER" if direction == "UP" else "LOWER"
-        # Deriv's Higher/Lower barrier is sized as a fraction of the recent
-        # average candle range (ATR), so it scales with actual current
+        # Deriv's Higher/Lower barrier is sized as a fraction of the
+        # rolling tick volatility, so it scales with actual current
         # volatility instead of a fixed point value going stale. See
-        # config.py's barrier_atr_fraction and README.
-        barrier_offset = decision.atr * self.settings.barrier_atr_fraction
+        # config.py's barrier_vol_fraction and README.
+        barrier_offset = decision.vol * self.settings.barrier_vol_fraction
+        if barrier_offset <= 0:
+            self.current_signal = {"status": "NO_SIGNAL", "candle_epoch": decision_epoch}
+            return
         async with session() as db:
             signal = Signal(
-                candle_epoch=candle_epoch,
+                candle_epoch=decision_epoch,
                 symbol=self.settings.market_symbol,
                 direction=direction,
                 contract_type=contract_type,
@@ -195,7 +187,7 @@ class BotEngine:
             self.current_signal = {
                 "id": signal.id, "status": "QUALIFIED", "direction": direction,
                 "contract_type": contract_type, "score": decision.score,
-                "reason": reason, "candle_epoch": candle_epoch,
+                "reason": reason, "candle_epoch": decision_epoch,
                 "entry_spot": entry_spot, "barrier_offset": barrier_offset,
             }
             if self.settings.auto_trade:
@@ -208,21 +200,18 @@ class BotEngine:
                 return
             try:
                 # Always the exact barrier computed at signal opening (from
-                # the ATR at that moment) -- no substitution. Earlier this
-                # tried a wide sweep of fallback magnitudes when Deriv
-                # rejected a barrier, which was a workaround for
-                # contract_type being wrong (CALL/PUT instead of
-                # HIGHER/LOWER, fixed 2026-07-24 -- see README). With the
-                # root cause fixed, silently trying a different barrier
-                # than what the strategy actually computed would just hide
-                # real problems instead of reporting them.
+                # the tick volatility at that moment) -- no substitution.
+                # If Deriv rejects it, that's reported honestly
+                # (EXECUTION_ERROR, visible in diagnostics) instead of
+                # silently trying a different value than what the strategy
+                # actually computed.
                 barrier_str = self.client.build_proposal_payload(
                     self.settings.market_symbol, signal.direction, self.settings.stake,
-                    self.settings.currency, self.settings.timeframe_seconds, barrier_offset,
+                    self.settings.currency, self.settings.trade_duration_ticks, barrier_offset,
                 )["barrier"]
                 proposal = await self.client.proposal(
                     self.settings.market_symbol, signal.direction, self.settings.stake,
-                    self.settings.currency, self.settings.timeframe_seconds, barrier_offset,
+                    self.settings.currency, self.settings.trade_duration_ticks, barrier_offset,
                 )
                 prop = proposal.get("proposal", {})
                 proposal_id = prop.get("id")
@@ -253,7 +242,15 @@ class BotEngine:
                 await self.log_event("error", "execution_error", str(exc))
 
     async def settle(self, contract_id: str):
-        deadline = time.monotonic() + self.settings.timeframe_seconds + 120  # + grace period for settlement lag
+        # Tick contracts settle fast (trade_duration_ticks ticks, typically
+        # well under a minute at R_25's observed ~2s/tick rate) but the
+        # deadline stays generous: ticks aren't guaranteed to arrive at any
+        # particular real-time rate, and settlement itself can lag the
+        # underlying contract expiry. 120s alone comfortably covers a slow
+        # feed for a 10-tick contract; the floor is kept in case
+        # trade_duration_ticks is configured lower and ticks are unusually
+        # slow.
+        deadline = time.monotonic() + max(120, self.settings.trade_duration_ticks * 10 + 60)
         while time.monotonic() < deadline and self.running:
             try:
                 result = await self.client.proposal_open_contract(contract_id)
@@ -272,7 +269,7 @@ class BotEngine:
                 raise
             except Exception as exc:
                 log.warning("Settlement polling failed for %s: %s", contract_id, exc)
-            await asyncio.sleep(3)
+            await asyncio.sleep(1)
         if self.running:
             msg = f"Gave up polling settlement for contract {contract_id} after the deadline; outcome unknown"
             log.warning(msg)

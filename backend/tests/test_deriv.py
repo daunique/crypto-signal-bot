@@ -30,9 +30,13 @@ def test_proposal_payload_uses_higher_lower_contract_types():
     # also why every barrier value was rejected as InvalidBarrier
     # regardless of magnitude or sign: CALL/PUT was never going to accept
     # a barrier here, no matter its value.
+    #
+    # 2026-07-26: duration switched from 180 (seconds) to 10 (ticks) for
+    # the new tick strategy -- contract_type itself is unaffected by that
+    # change.
     client = DerivClient()
-    assert client.build_proposal_payload("R_25", "UP", 1.0, "USD", 180, 0.5)["contract_type"] == "HIGHER"
-    assert client.build_proposal_payload("R_25", "DOWN", 1.0, "USD", 180, 0.5)["contract_type"] == "LOWER"
+    assert client.build_proposal_payload("R_25", "UP", 1.0, "USD", 10, 0.5)["contract_type"] == "HIGHER"
+    assert client.build_proposal_payload("R_25", "DOWN", 1.0, "USD", 10, 0.5)["contract_type"] == "LOWER"
 
 
 def test_proposal_payload_includes_signed_barrier_for_higher_lower():
@@ -41,16 +45,16 @@ def test_proposal_payload_includes_signed_barrier_for_higher_lower():
     # spot), negative for LOWER (barrier below spot). Confirmed against
     # this account's own contracts_for response (see README).
     client = DerivClient()
-    up_payload = client.build_proposal_payload("R_25", "UP", 2.5, "USD", 180, 0.523)
-    down_payload = client.build_proposal_payload("R_25", "DOWN", 2.5, "USD", 180, 0.523)
+    up_payload = client.build_proposal_payload("R_25", "UP", 2.5, "USD", 10, 0.523)
+    down_payload = client.build_proposal_payload("R_25", "DOWN", 2.5, "USD", 10, 0.523)
     assert up_payload == {
         "proposal": 1,
         "amount": 2.5,
         "basis": "stake",
         "contract_type": "HIGHER",
         "currency": "USD",
-        "duration": 180,
-        "duration_unit": "s",
+        "duration": 10,
+        "duration_unit": "t",
         "underlying_symbol": "R_25",
         "barrier": "+0.523",
     }
@@ -64,13 +68,23 @@ def test_proposal_payload_rejects_non_positive_barrier_offset():
     client = DerivClient()
     for bad_offset in (0, -0.1):
         with pytest.raises(ValueError):
-            client.build_proposal_payload("R_25", "UP", 1.0, "USD", 180, bad_offset)
+            client.build_proposal_payload("R_25", "UP", 1.0, "USD", 10, bad_offset)
 
 
 def test_proposal_payload_rejects_unknown_direction():
     client = DerivClient()
     with pytest.raises(ValueError):
-        client.build_proposal_payload("R_25", "SIDEWAYS", 1.0, "USD", 180, 0.5)
+        client.build_proposal_payload("R_25", "SIDEWAYS", 1.0, "USD", 10, 0.5)
+
+
+def test_proposal_payload_rejects_duration_outside_one_to_ten_ticks():
+    # Deriv's tick-duration contracts are only valid for 1-10 ticks -- fail
+    # loudly here rather than letting Deriv reject the trade at execution
+    # time with a less obvious error.
+    client = DerivClient()
+    for bad_duration in (0, -1, 11, 180):
+        with pytest.raises(ValueError):
+            client.build_proposal_payload("R_25", "UP", 1.0, "USD", bad_duration, 0.5)
 
 
 def test_proposal_open_contract_payload_omits_subscribe():

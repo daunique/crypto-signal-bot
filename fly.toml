@@ -8,9 +8,10 @@ primary_region = "ams"
   PORT = "8080"
   BOT_MODE = "demo"
   MARKET_SYMBOL = "R_25"
-  TIMEFRAME_SECONDS = "180"
+  TRADE_DURATION_TICKS = "10"
   AUTO_TRADE = "true"
-  BARRIER_ATR_FRACTION = "0.25"
+  BARRIER_VOL_FRACTION = "0.25"
+  TICK_VOL_WINDOW = "20"
 
 [http_service]
   internal_port = 8080

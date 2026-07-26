@@ -22,12 +22,37 @@ def test_bot_mode_rejects_unknown_values():
         pass
 
 
-def test_barrier_atr_fraction_must_be_positive():
-    assert Settings(barrier_atr_fraction=0.25).barrier_atr_fraction == 0.25
+def test_barrier_vol_fraction_must_be_positive():
+    assert Settings(barrier_vol_fraction=0.25).barrier_vol_fraction == 0.25
     for bad_value in (0, -0.1):
         try:
-            Settings(barrier_atr_fraction=bad_value)
-            assert False, "expected ValueError for a non-positive BARRIER_ATR_FRACTION"
+            Settings(barrier_vol_fraction=bad_value)
+            assert False, "expected ValueError for a non-positive BARRIER_VOL_FRACTION"
+        except ValueError:
+            pass
+
+
+def test_trade_duration_ticks_must_be_one_to_ten():
+    # Deriv's tick-duration contracts are only valid for 1-10 ticks; the
+    # strategy this bot ships with (strategy.py) was backtested specifically
+    # at 10. Reject anything outside that range at startup rather than
+    # letting Deriv reject every single trade at execution time.
+    assert Settings(trade_duration_ticks=10).trade_duration_ticks == 10
+    assert Settings(trade_duration_ticks=1).trade_duration_ticks == 1
+    for bad_value in (0, -1, 11, 100):
+        try:
+            Settings(trade_duration_ticks=bad_value)
+            assert False, "expected ValueError for TRADE_DURATION_TICKS outside 1-10"
+        except ValueError:
+            pass
+
+
+def test_tick_vol_window_must_be_at_least_two():
+    assert Settings(tick_vol_window=20).tick_vol_window == 20
+    for bad_value in (0, 1, -5):
+        try:
+            Settings(tick_vol_window=bad_value)
+            assert False, "expected ValueError for TICK_VOL_WINDOW < 2"
         except ValueError:
             pass
 

@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Kept here (rather than main.py) so api.py can import it too without a
 # main.py <-> api.py circular import (main.py imports the router from api.py).
-BUILD_VERSION = "2026-07-25-persistent-volume-fix-1"
+BUILD_VERSION = "2026-07-26-tick-ema-strategy-1"
 
 
 class Settings(BaseSettings):
@@ -19,19 +19,24 @@ class Settings(BaseSettings):
     bot_mode: str = "demo"
 
     market_symbol: str = "R_25"
-    timeframe_seconds: int = 180
+    # Contract duration in ticks (Deriv's tick-duration contracts are valid
+    # for 1-10 ticks). The strategy/backtest this bot ships with (see
+    # strategy.py) was validated specifically at 10.
+    trade_duration_ticks: int = 10
     stake: float = 1.0
     currency: str = "USD"
-    min_confluence_score: int = 6
     auto_trade: bool = True
     request_timeout_seconds: float = 15.0
     # Deriv's Higher/Lower product requires a signed offset `barrier` (see
-    # README). This is sized dynamically as a fraction of the recent average
-    # candle range (ATR) rather than a fixed point value, so it scales with
-    # R_25's actual current volatility instead of going stale if the
-    # volatility regime shifts. Larger = harder to win but bigger payout;
-    # smaller = closer to Rise/Fall odds. Tune to taste.
-    barrier_atr_fraction: float = 0.25
+    # README). Sized dynamically as a fraction of the rolling tick
+    # volatility (stdev of the last `tick_vol_window` tick-to-tick price
+    # changes) rather than a fixed point value, so it scales with R_25's
+    # actual current volatility instead of going stale. Larger = harder to
+    # win but bigger payout; smaller = closer to Rise/Fall odds. 0.25 is the
+    # value the shipped strategy was backtested at (see strategy.py) -- not
+    # a default guess.
+    barrier_vol_fraction: float = 0.25
+    tick_vol_window: int = 20
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -49,12 +54,14 @@ class Settings(BaseSettings):
         # "demo"` comparison during account selection, silently falling
         # through to the *real* (live) account instead of demo.
         self.bot_mode = mode
-        if self.timeframe_seconds != 180:
-            raise ValueError("This bot is intentionally locked to 3-minute candles (180 seconds)")
+        if not (1 <= self.trade_duration_ticks <= 10):
+            raise ValueError("TRADE_DURATION_TICKS must be between 1 and 10 (Deriv's tick-duration contract limit)")
         if self.stake <= 0:
             raise ValueError("STAKE must be greater than zero")
-        if self.barrier_atr_fraction <= 0:
-            raise ValueError("BARRIER_ATR_FRACTION must be greater than zero")
+        if self.barrier_vol_fraction <= 0:
+            raise ValueError("BARRIER_VOL_FRACTION must be greater than zero")
+        if self.tick_vol_window < 2:
+            raise ValueError("TICK_VOL_WINDOW must be at least 2")
 
 
 @lru_cache
