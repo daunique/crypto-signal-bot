@@ -33,7 +33,6 @@ function signalBadge(status) {
   const map = {
     QUALIFIED: ["badge-pending", "Qualified"],
     EXECUTED: ["badge-neutral", "Executed"],
-    PARTIALLY_EXECUTED: ["badge-pending", "Partial"],
     EXECUTION_ERROR: ["badge-error", "Error"],
     NO_SIGNAL: ["badge-neutral", "No signal"],
   };
@@ -73,24 +72,28 @@ async function refreshTopbar() {
   } catch (e) { /* transient network hiccup -- next poll will retry */ }
 }
 
-/* ---------- 180s candle countdown ring (dashboard only) ---------- */
+/* ---------- tick-progress ring (dashboard only) ----------
+   The old ring assumed a fixed 180s wall-clock candle period and animated
+   itself client-side from Date.now(). That assumption no longer holds:
+   the tick strategy's cadence is a *tick count*, not a calendar period --
+   ticks don't arrive at a guaranteed real-time rate, so a self-driven
+   client-side timer would just be showing a plausible-looking number that
+   doesn't actually correspond to the bot's real state. The ring is now
+   driven entirely from /api/status (polled every 5s, same as the rest of
+   the dashboard): either warm-up progress (tick_count/min_ticks_required)
+   before the strategy is ready, or decision-cadence progress
+   (ticks_since_decision/trade_duration_ticks) once it is. */
 
 const RING_CIRCUMFERENCE = 2 * Math.PI * 38;
 
-function updateCountdownRing() {
+function updateProgressRing(fraction, label) {
   const ring = document.getElementById("ringProgress");
-  const label = document.getElementById("ringLabel");
-  if (!ring || !label) return;
-  const period = 180;
-  const now = Math.floor(Date.now() / 1000);
-  const elapsed = now % period;
-  const remaining = period - elapsed;
-  const progress = elapsed / period;
+  const labelEl = document.getElementById("ringLabel");
+  if (!ring || !labelEl) return;
+  const clamped = Math.max(0, Math.min(1, fraction));
   ring.style.strokeDasharray = `${RING_CIRCUMFERENCE}`;
-  ring.style.strokeDashoffset = `${RING_CIRCUMFERENCE * (1 - progress)}`;
-  const m = Math.floor(remaining / 60);
-  const sec = remaining % 60;
-  label.textContent = `${m}:${String(sec).padStart(2, "0")}`;
+  ring.style.strokeDashoffset = `${RING_CIRCUMFERENCE * (1 - clamped)}`;
+  labelEl.textContent = label;
 }
 
 /* ---------- pages ---------- */
@@ -100,7 +103,8 @@ async function renderDashboard() {
   updateTopbar(s);
   const t = s.today;
   const signal = s.current_signal;
-  const hasSignal = signal && signal.status !== "NO_SIGNAL";
+  const warmingUp = signal && signal.status === "WARMING_UP";
+  const hasSignal = signal && signal.status !== "NO_SIGNAL" && signal.status !== "WARMING_UP";
   app.innerHTML = `
     <div class="card hero">
       <div class="ring-wrap">
@@ -112,17 +116,20 @@ async function renderDashboard() {
       </div>
       <div class="hero-body">
         <div class="hero-status">${esc(s.bot_status)}</div>
-        <div class="muted">${esc(s.symbol)} &middot; ${esc(s.timeframe_seconds)}s candles &middot; barrier ${Number(s.barrier_atr_fraction).toFixed(2)}&times; ATR</div>
-        ${hasSignal ? `
+        <div class="muted">${esc(s.symbol)} &middot; ${esc(s.trade_duration_ticks)}-tick Higher/Lower &middot; barrier &plusmn;${Number(s.barrier_fixed_offset).toFixed(3)} (fixed)</div>
+        ${warmingUp ? `
+          <p class="muted" style="margin-top:10px">Warming up: ${esc(signal.tick_count)} / ${esc(signal.min_ticks_required)} ticks collected before the strategy can evaluate.</p>
+        ` : hasSignal ? `
           <div class="hero-detail">
             <div class="detail-item"><span class="detail-label">Direction</span><span class="detail-value">${dirLabel(signal.direction)}</span></div>
             <div class="detail-item"><span class="detail-label">Contract</span><span class="detail-value">${esc(signal.contract_type || "-")}</span></div>
             <div class="detail-item"><span class="detail-label">Score</span><span class="detail-value">${esc(signal.score ?? "-")}</span></div>
             <div class="detail-item"><span class="detail-label">Barrier</span><span class="detail-value">${signal.barrier_offset != null ? Number(signal.barrier_offset).toFixed(3) : "-"}</span></div>
+            <div class="detail-item"><span class="detail-label">Market Vol</span><span class="detail-value">${signal.current_market_vol != null ? Number(signal.current_market_vol).toFixed(3) : "-"}</span></div>
             <div class="detail-item"><span class="detail-label">Status</span><span class="detail-value">${signalBadge(signal.status)}</span></div>
           </div>
           ${signal.reason ? `<p class="muted" style="margin-top:10px">${esc(signal.reason)}</p>` : ""}
-        ` : `<p class="muted" style="margin-top:10px">Waiting for the next candle boundary.</p>`}
+        ` : `<p class="muted" style="margin-top:10px">Waiting for the next decision tick.</p>`}
         ${s.last_error ? `<p style="margin-top:10px;color:var(--down);font-size:12.5px">${esc(s.last_error)}</p>` : ""}
       </div>
     </div>
@@ -134,7 +141,13 @@ async function renderDashboard() {
       <div class="stat"><div class="stat-label">Losses</div><div class="stat-value dir-down">${t.losses}</div></div>
     </div>
   `;
-  updateCountdownRing();
+  if (s.strategy && !s.strategy.ready) {
+    const frac = s.strategy.min_ticks_required ? s.strategy.tick_count / s.strategy.min_ticks_required : 0;
+    updateProgressRing(frac, "warm-up");
+  } else if (s.strategy) {
+    const frac = s.trade_duration_ticks ? s.strategy.ticks_since_decision / s.trade_duration_ticks : 0;
+    updateProgressRing(frac, `${s.strategy.ticks_since_decision}/${s.trade_duration_ticks}`);
+  }
 }
 
 async function renderSignals() {
@@ -253,9 +266,9 @@ async function renderSettings() {
       <div class="settings-row">
         <div>
           <div class="settings-row-label">Barrier size</div>
-          <div class="settings-row-desc">Distance from spot, as a fraction of the recent average candle range. Set via BARRIER_ATR_FRACTION.</div>
+          <div class="settings-row-desc">Fixed distance from spot (not scaled by volatility). Set via BARRIER_FIXED_OFFSET.</div>
         </div>
-        <span class="chip">${Number(s.barrier_atr_fraction).toFixed(2)}&times; ATR</span>
+        <span class="chip">&plusmn;${Number(s.barrier_fixed_offset).toFixed(3)}</span>
       </div>
     </div>
     <div class="card">
@@ -299,7 +312,7 @@ function formatDiagnostics(d) {
   lines.push(`Generated: ${d.generated_at}`);
   lines.push(`Build: ${d.build_version}`);
   lines.push(`Status: ${d.bot_status} | Mode: ${d.mode} | Symbol: ${d.symbol} | Auto-trade: ${d.auto_trade}`);
-  lines.push(`Barrier ATR fraction: ${d.barrier_atr_fraction}`);
+  lines.push(`Barrier fixed offset: ${d.barrier_fixed_offset}`);
   lines.push(`Last error: ${d.last_error || "(none)"}`);
   lines.push("");
   lines.push(`Recent events (${d.recent_events.length}):`);
@@ -382,5 +395,4 @@ document.getElementById("stopBtn").onclick = async () => { await fetch("/api/bot
 
 render();
 refreshTopbar();
-setInterval(updateCountdownRing, 1000);
 setInterval(() => { if (currentPage === "dashboard") renderDashboard(); else refreshTopbar(); }, 5000);

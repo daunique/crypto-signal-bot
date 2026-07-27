@@ -4,23 +4,35 @@ import time
 from .config import get_settings
 from .db import session, Signal, Trade, BotEvent, get_effective_bot_mode
 from .deriv import DerivClient
-from .strategy import Candle, R25Strategy
+from .strategy import Tick, TickEMAStrategy
 from sqlalchemy import select
 
 log = logging.getLogger(__name__)
+
+
+def invert_direction(direction: str) -> str:
+    """Flip a raw 'UP'/'DOWN' strategy reading to the direction that is
+    actually traded (2026-07-27 -- see on_decision_tick() below and the
+    README for why). Pure and stateless on purpose, unlike the rest of
+    this module, so it's unit-testable without the async DB/WebSocket
+    stack engine.py otherwise needs -- see test_engine.py, same reasoning
+    as strategy.py and deriv.py's build_*_payload helpers.
+    """
+    if direction not in ("UP", "DOWN"):
+        raise ValueError(f"Unknown signal direction: {direction!r}")
+    return "DOWN" if direction == "UP" else "UP"
 
 
 class BotEngine:
     def __init__(self):
         self.settings = get_settings()
         self.client = DerivClient()
-        self.strategy = R25Strategy(self.settings.min_confluence_score)
+        self.strategy = TickEMAStrategy(vol_window=self.settings.tick_vol_window)
         self.running = False
         self.status = "STOPPED"
-        self.last_candle_epoch = None
-        self.candles: list[Candle] = []
         self.current_signal = None
         self.last_error = None
+        self.ticks_since_decision = 0
         self._task: asyncio.Task | None = None
         self._settlement_tasks: set[asyncio.Task] = set()
 
@@ -57,7 +69,14 @@ class BotEngine:
             try:
                 mode = await get_effective_bot_mode(self.settings)
                 await self.client.connect(mode)
-                await self.load_history()
+                # A fresh strategy instance on every (re)connect, rather
+                # than reusing one across a gap: ticks missed during a
+                # disconnect would otherwise leave a silent discontinuity
+                # inside the EMA/volatility window. Re-warming from live
+                # ticks (see WARMING_UP below) is simpler and safer than
+                # trying to detect and patch a gap.
+                self.strategy = TickEMAStrategy(vol_window=self.settings.tick_vol_window)
+                self.ticks_since_decision = 0
                 self.status = "RUNNING"
                 self.last_error = None
                 backoff = 2
@@ -75,19 +94,6 @@ class BotEngine:
                 if self.running:
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 60)
-
-    async def load_history(self):
-        raw = await self.client.get_candles(self.settings.market_symbol, 120, self.settings.timeframe_seconds)
-        unique = {}
-        for x in raw:
-            try:
-                epoch = int(x["epoch"])
-                unique[epoch] = Candle(epoch, float(x["open"]), float(x["high"]), float(x["low"]), float(x["close"]))
-            except (KeyError, TypeError, ValueError):
-                continue
-        self.candles = sorted(unique.values(), key=lambda c: c.epoch)[-120:]
-        if self.candles:
-            self.last_candle_epoch = self.candles[-1].epoch
 
     async def tick_loop(self):
         async for tick in self.client.subscribe_ticks(self.settings.market_symbol):
@@ -112,72 +118,106 @@ class BotEngine:
                 spot = float(tick_data["quote"])
             except (KeyError, TypeError, ValueError):
                 continue
-            boundary = epoch - (epoch % self.settings.timeframe_seconds)
-            if self.last_candle_epoch is None:
-                self.last_candle_epoch = boundary
-                continue
-            if boundary > self.last_candle_epoch:
-                completed_epoch = self.last_candle_epoch
-                self.last_candle_epoch = boundary
-                await self.on_exact_candle_open(boundary, spot, completed_epoch)
 
-    async def on_exact_candle_open(self, candle_epoch: int, entry_spot: float, completed_epoch: int):
+            self.strategy.push_tick(Tick(epoch, spot))
+
+            if not self.strategy.ready:
+                self.current_signal = {
+                    "status": "WARMING_UP",
+                    "tick_count": self.strategy.tick_count,
+                    "min_ticks_required": self.strategy.MIN_TICKS,
+                }
+                continue
+
+            self.ticks_since_decision += 1
+            if self.ticks_since_decision < self.settings.trade_duration_ticks:
+                continue
+            # A decision point: the previous trade (if any) has had exactly
+            # trade_duration_ticks ticks to run its course, so the next one
+            # is non-overlapping -- matching how the backtest behind this
+            # strategy's numbers was run (see strategy.py's docstring).
+            self.ticks_since_decision = 0
+            await self.on_decision_tick(epoch, spot)
+
+    async def on_decision_tick(self, decision_epoch: int, entry_spot: float):
         async with session() as db:
-            existing = (await db.execute(select(Signal).where(Signal.candle_epoch == candle_epoch))).scalar_one_or_none()
+            existing = (await db.execute(select(Signal).where(Signal.candle_epoch == decision_epoch))).scalar_one_or_none()
         if existing is not None:
-            # candle_epoch is unique in the DB. Without this check, a
-            # reconnect/restart that lands back on the same in-progress
-            # candle would try to insert a duplicate Signal, raise an
-            # unhandled IntegrityError, and crash the whole engine loop
+            # candle_epoch is unique in the DB (column name predates the
+            # tick strategy -- see db.py -- it now holds the decision
+            # tick's epoch rather than a candle-boundary epoch). Without
+            # this check, a reconnect/restart landing back on the exact
+            # same tick epoch would try to insert a duplicate Signal, raise
+            # an unhandled IntegrityError, and crash the whole engine loop
             # (which would then just retry the same failure every backoff
-            # cycle until the candle finally closed).
+            # cycle).
             self.current_signal = {
                 "id": existing.id, "status": existing.status, "direction": existing.direction,
                 "contract_type": existing.contract_type, "score": existing.score,
-                "reason": existing.reason, "candle_epoch": candle_epoch,
+                "reason": existing.reason, "candle_epoch": decision_epoch,
                 "entry_spot": entry_spot,
             }
             return
-        raw = await self.client.get_candles(self.settings.market_symbol, 2, self.settings.timeframe_seconds)
-        completed = next((x for x in raw if int(x.get("epoch", -1)) == completed_epoch), None)
-        if completed is None and len(raw) >= 2:
-            completed = raw[-2]
-        if completed is None:
-            return
-        try:
-            candle = Candle(int(completed["epoch"]), float(completed["open"]), float(completed["high"]), float(completed["low"]), float(completed["close"]))
-        except (KeyError, TypeError, ValueError):
-            return
-        if not any(c.epoch == candle.epoch for c in self.candles):
-            self.candles.append(candle)
-            self.candles = sorted(self.candles, key=lambda c: c.epoch)[-120:]
-        decision = self.strategy.evaluate(self.candles)
+
+        decision = self.strategy.evaluate()
         if not decision:
-            self.current_signal = {"status": "NO_SIGNAL", "candle_epoch": candle_epoch}
+            self.current_signal = {"status": "NO_SIGNAL", "candle_epoch": decision_epoch}
             return
 
+        # 2026-07-27: traded direction is now the OPPOSITE of the
+        # strategy's raw reading, by explicit request -- reverting, for
+        # this strategy specifically, the 2026-07-26 "direction is no
+        # longer inverted" decision (see README's changelog for that
+        # entry).
+        #
+        # IMPORTANT, stated honestly: this project's own backtests
+        # (backtest_report.md section 2, tick_backtest_addendum.md) found
+        # the raw signal has ~50% *pre-barrier* directional accuracy --
+        # i.e. no real edge in either direction on this synthetic index.
+        # The ~32-34% win rate quoted in strategy.py's docstring comes from
+        # the Higher/Lower barrier's "dead zone" (price has to clear entry
+        # *plus* an offset, not just land on the predicted side -- see
+        # backtest_report.md #2 and config.py's barrier_fixed_offset), and
+        # that dead-zone tax applies symmetrically regardless of which
+        # direction is called. So inverting is NOT expected, by this
+        # project's own numbers, to flip the win rate to its complement
+        # (~66-68%) -- it's more likely to land back near the same ~32-34%,
+        # since there's no found directional bias to flip. This exact
+        # inverted configuration has not itself been separately
+        # backtested; only a fresh backtest or a demo-mode run of this
+        # logic would show the real number. Shipped anyway, as requested,
+        # for exactly that reason -- to observe it directly.
+        #
+        # strategy.py itself is untouched and still reports the raw
+        # reading (`decision.direction`/`.reason`) -- it stays a "pure"
+        # indicator. This deliberate flip lives here in the engine, same
+        # as the one made once before for the old candle strategy (see the
+        # 2026-07-25 README entry): Signal.direction -- and therefore
+        # contract_type, the barrier's sign, and what's actually sent to
+        # Deriv -- is the traded (post-inversion) direction throughout, so
+        # the dashboard, the database, and the real trade always agree.
+        # `reason` is prefixed with `[Inverted from <raw>]` so this is
+        # never a silent surprise when reviewing history later.
         raw_direction = decision.direction
-        # invert_signals (config.py, default False) only flips which side is
-        # *recorded and displayed* as the strategy's predicted direction.
-        # Execution no longer depends on it either way: every qualifying
-        # signal opens BOTH a HIGHER and a LOWER position (requested
-        # 2026-07-26 -- see execute_straddle below), so this setting is
-        # purely cosmetic/labeling now, not a trading behavior switch.
-        direction = ("DOWN" if raw_direction == "UP" else "UP") if self.settings.invert_signals else raw_direction
-        reason = decision.reason if not self.settings.invert_signals else f"[Inverted from {raw_direction}] {decision.reason}"
-        # This also happens to match the actual contract_type sent to Deriv
-        # (see deriv.py's DIRECTION_TO_CONTRACT_TYPE) -- kept as an
-        # independent local label here since this DB column exists for
-        # display regardless of what the wire value happens to be.
+        direction = invert_direction(raw_direction)
+        reason = f"[Inverted from {raw_direction}] {decision.reason}"
         contract_type = "HIGHER" if direction == "UP" else "LOWER"
-        # Deriv's Higher/Lower barrier is sized as a fraction of the recent
-        # average candle range (ATR), so it scales with actual current
-        # volatility instead of a fixed point value going stale. See
-        # config.py's barrier_atr_fraction and README.
-        barrier_offset = decision.atr * self.settings.barrier_atr_fraction
+        # Literal fixed barrier distance from spot (config.py's
+        # barrier_fixed_offset) -- not scaled by volatility. See config.py
+        # for the known backtested economics of this exact value (shipped
+        # at explicit user request; the backtest found it below breakeven
+        # for a ~2.6x payout, not above it). decision.vol is *not* used to
+        # size the barrier here -- it's still computed by the strategy
+        # (informational only below) as a guard against a frozen/flat
+        # price feed, and kept in current_signal for context on how the
+        # fixed barrier compares to actual current market movement.
+        barrier_offset = self.settings.barrier_fixed_offset
+        if barrier_offset <= 0:
+            self.current_signal = {"status": "NO_SIGNAL", "candle_epoch": decision_epoch}
+            return
         async with session() as db:
             signal = Signal(
-                candle_epoch=candle_epoch,
+                candle_epoch=decision_epoch,
                 symbol=self.settings.market_symbol,
                 direction=direction,
                 contract_type=contract_type,
@@ -192,83 +232,71 @@ class BotEngine:
             self.current_signal = {
                 "id": signal.id, "status": "QUALIFIED", "direction": direction,
                 "contract_type": contract_type, "score": decision.score,
-                "reason": reason, "candle_epoch": candle_epoch,
+                "reason": reason, "candle_epoch": decision_epoch,
                 "entry_spot": entry_spot, "barrier_offset": barrier_offset,
+                "current_market_vol": decision.vol,
             }
             if self.settings.auto_trade:
-                await self.execute_straddle(signal.id, entry_spot, barrier_offset)
+                await self.execute(signal.id, entry_spot, barrier_offset)
 
-    async def execute_straddle(self, signal_id: int, spot: float, barrier_offset: float):
-        """Every qualifying signal opens BOTH a HIGHER and a LOWER position,
-        at the same stake and barrier magnitude (requested 2026-07-26) --
-        this is a volatility bet (wins if price moves far enough in EITHER
-        direction past its barrier, loses both legs if it stays inside the
-        barrier band on both sides), not a directional one. Note this
-        doubles capital at risk per signal versus a single-direction trade.
-
-        Each leg is attempted independently via _execute_leg -- they're two
-        unrelated Deriv contracts, not one atomic operation, so one side
-        failing (e.g. a transient API hiccup) must not block or roll back
-        the other.
-        """
-        up_ok = await self._execute_leg(signal_id, spot, barrier_offset, "UP")
-        down_ok = await self._execute_leg(signal_id, spot, barrier_offset, "DOWN")
+    async def execute(self, signal_id: int, spot: float, barrier_offset: float):
         async with session() as db:
             signal = await db.get(Signal, signal_id)
-            if signal:
-                if up_ok and down_ok:
-                    signal.status = "EXECUTED"
-                elif up_ok or down_ok:
-                    signal.status = "PARTIALLY_EXECUTED"
-                else:
-                    signal.status = "EXECUTION_ERROR"
-                await db.commit()
-
-    async def _execute_leg(self, signal_id: int, spot: float, barrier_offset: float, direction: str) -> bool:
-        """Places one leg (direction='UP' -> HIGHER, 'DOWN' -> LOWER) of a
-        straddle pair. Returns True on success; on failure, logs it (both to
-        the app logger and the persisted BotEvent feed) and returns False
-        rather than raising, so execute_straddle can still attempt the other
-        leg and record an accurate partial-success status."""
-        try:
-            barrier_str = self.client.build_proposal_payload(
-                self.settings.market_symbol, direction, self.settings.stake,
-                self.settings.currency, self.settings.timeframe_seconds, barrier_offset,
-            )["barrier"]
-            proposal = await self.client.proposal(
-                self.settings.market_symbol, direction, self.settings.stake,
-                self.settings.currency, self.settings.timeframe_seconds, barrier_offset,
-            )
-            prop = proposal.get("proposal", {})
-            proposal_id = prop.get("id")
-            ask_price = float(prop.get("ask_price", self.settings.stake))
-            if not proposal_id:
-                raise RuntimeError(f"Proposal did not contain an id: {proposal}")
-            buy_response = await self.client.buy(str(proposal_id), ask_price)
-            buy = buy_response.get("buy", {})
-            contract_id = str(buy.get("contract_id", ""))
-            if not contract_id:
-                raise RuntimeError(f"Buy response did not contain contract_id: {buy_response}")
-            async with session() as db:
+            if not signal:
+                return
+            try:
+                # Always the exact barrier computed at signal opening (from
+                # the tick volatility at that moment) -- no substitution.
+                # If Deriv rejects it, that's reported honestly
+                # (EXECUTION_ERROR, visible in diagnostics) instead of
+                # silently trying a different value than what the strategy
+                # actually computed.
+                barrier_str = self.client.build_proposal_payload(
+                    self.settings.market_symbol, signal.direction, self.settings.stake,
+                    self.settings.currency, self.settings.trade_duration_ticks, barrier_offset,
+                )["barrier"]
+                proposal = await self.client.proposal(
+                    self.settings.market_symbol, signal.direction, self.settings.stake,
+                    self.settings.currency, self.settings.trade_duration_ticks, barrier_offset,
+                )
+                prop = proposal.get("proposal", {})
+                proposal_id = prop.get("id")
+                ask_price = float(prop.get("ask_price", self.settings.stake))
+                if not proposal_id:
+                    raise RuntimeError(f"Proposal did not contain an id: {proposal}")
+                buy_response = await self.client.buy(str(proposal_id), ask_price)
+                buy = buy_response.get("buy", {})
+                contract_id = str(buy.get("contract_id", ""))
+                if not contract_id:
+                    raise RuntimeError(f"Buy response did not contain contract_id: {buy_response}")
                 db.add(Trade(
-                    signal_id=signal_id, contract_id=contract_id, symbol=self.settings.market_symbol,
-                    mode=self.client.current_mode or self.settings.bot_mode, direction=direction,
+                    signal_id=signal.id, contract_id=contract_id, symbol=signal.symbol,
+                    mode=self.client.current_mode or self.settings.bot_mode, direction=signal.direction,
                     stake=self.settings.stake, payout=float(prop.get("payout", 0) or 0),
                     status="OPEN", entry_spot=spot, barrier=barrier_str,
                 ))
+                signal.status = "EXECUTED"
                 await db.commit()
-            task = asyncio.create_task(self.settle(contract_id), name=f"settle-{contract_id}")
-            self._settlement_tasks.add(task)
-            task.add_done_callback(self._settlement_tasks.discard)
-            return True
-        except Exception as exc:
-            self.last_error = str(exc)
-            log.exception("Execution failed for %s leg", direction)
-            await self.log_event("error", "execution_error", f"{direction} leg: {exc}")
-            return False
+                task = asyncio.create_task(self.settle(contract_id), name=f"settle-{contract_id}")
+                self._settlement_tasks.add(task)
+                task.add_done_callback(self._settlement_tasks.discard)
+            except Exception as exc:
+                signal.status = "EXECUTION_ERROR"
+                await db.commit()
+                self.last_error = str(exc)
+                log.exception("Execution failed")
+                await self.log_event("error", "execution_error", str(exc))
 
     async def settle(self, contract_id: str):
-        deadline = time.monotonic() + self.settings.timeframe_seconds + 120  # + grace period for settlement lag
+        # Tick contracts settle fast (trade_duration_ticks ticks, typically
+        # well under a minute at R_25's observed ~2s/tick rate) but the
+        # deadline stays generous: ticks aren't guaranteed to arrive at any
+        # particular real-time rate, and settlement itself can lag the
+        # underlying contract expiry. 120s alone comfortably covers a slow
+        # feed for a 10-tick contract; the floor is kept in case
+        # trade_duration_ticks is configured lower and ticks are unusually
+        # slow.
+        deadline = time.monotonic() + max(120, self.settings.trade_duration_ticks * 10 + 60)
         while time.monotonic() < deadline and self.running:
             try:
                 result = await self.client.proposal_open_contract(contract_id)
@@ -287,7 +315,7 @@ class BotEngine:
                 raise
             except Exception as exc:
                 log.warning("Settlement polling failed for %s: %s", contract_id, exc)
-            await asyncio.sleep(3)
+            await asyncio.sleep(1)
         if self.running:
             msg = f"Gave up polling settlement for contract {contract_id} after the deadline; outcome unknown"
             log.warning(msg)
