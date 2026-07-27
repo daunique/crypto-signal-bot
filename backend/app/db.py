@@ -20,11 +20,6 @@ class Signal(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
-    # Column name predates the tick strategy (2026-07-26) and is kept
-    # as-is to avoid a rename migration -- it now holds the epoch of the
-    # tick that triggered the decision, not a 180s candle-boundary epoch.
-    # Still unique per decision point; see engine.py's on_decision_tick().
-    # Exposed to the API/frontend as "decision_epoch".
     candle_epoch: Mapped[int] = mapped_column(Integer, index=True, unique=True)
     symbol: Mapped[str] = mapped_column(String(32))
     direction: Mapped[str] = mapped_column(String(16))

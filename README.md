@@ -1,44 +1,22 @@
 # Deriv Higher/Lower Bot
 
-Production-oriented tick-based Deriv Higher/Lower bot (10-tick contracts).
+Production-oriented 3-minute Deriv Higher/Lower bot.
 
-## 2026-07-26 (latest): barrier is now a literal fixed 0.25, shipped despite known negative expected value
+## 2026-07-26: every signal now opens both a Higher and a Lower position; `invert` is a real setting
 
-**This is a deliberate, explicit user choice, not a recommendation.** `BARRIER_FIXED_OFFSET` (config.py, default 0.25) is now sent to Deriv exactly as configured -- it no longer scales with volatility (that was the immediately preceding same-day revision below, which explained why `BARRIER_VOL_FRACTION=0.25` produced a small ~0.025-0.05 barrier; this entry replaces that setting entirely).
+**Note on process:** a T1_TRUTH_PULLBACK strategy replacement (new indicators, multi-market dynamic barriers, dual timeframe support) was scoped and partially built in this same conversation, then explicitly undone before anything touched the actual codebase -- it never shipped. The current strategy is still `R25Strategy` (EMA9/21 + momentum), unchanged.
 
-**Stated plainly, because it matters:** a dedicated backtest for this exact configuration (0.25 fixed barrier, 10-tick duration, R_25, ~95 filter combinations tried including conditioning on only the top 0.5% most extreme volatility spikes across the full dataset) found a win rate of roughly **32-34%**. Against the payout structure this was requested for -- $1 stake, $2.60 back on a win ($1.60 profit) -- breakeven requires **~38.46%**. That means this configuration backtested with a **negative expected value per trade**: on average, it loses money, and more volume or bigger stakes would not fix that (it would make the expected loss larger and more certain, not smaller). This is shipped anyway, at explicit request, specifically to redeploy and observe real results directly rather than rely on the backtest alone. See `config.py`'s `barrier_fixed_offset` docstring, `tick_backtest_addendum.md`, and this session's chat history for the full numbers.
+### `INVERT_SIGNALS` is now a real, off-by-default setting
 
-One thing worth checking before drawing conclusions from a live run: the payout figures above ($1 stake / $2.60 return) came from the person operating this bot, not from a live Deriv quote pulled in this session -- if a live demo proposal for this exact barrier/duration/symbol comes back with a different payout than assumed, the breakeven math changes accordingly and should be recomputed against the actual quote.
+The direction-inversion added 2026-07-25 was an unconditional flip with no setting. It's now `INVERT_SIGNALS` (default `false`, i.e. off) in `config.py`/`.env.example`/`fly.toml`.
 
-`decision.vol` (rolling tick volatility) no longer sizes the barrier at all -- it's retained only (1) as a guard against a frozen/stale price feed (a reading of exactly 0 is far more likely to mean the feed stalled than that the market went perfectly still), and (2) as informational context on the dashboard (`current_market_vol`, shown next to the fixed barrier so you can see how the two compare in real time).
+### Every qualifying signal now opens both a Higher and a Lower position
 
-## 2026-07-26: barrier value looked "wrong" (0.025 instead of 0.25) -- it isn't, but a related config bug is now fixed
+Requested directly: instead of picking one side, every signal now places **both** a HIGHER and a LOWER trade, at the same stake and barrier magnitude, mirrored around spot. This is a volatility bet (wins if price moves far enough past the barrier in *either* direction, loses both legs if it stays inside the barrier band on both sides), not a directional one -- so `INVERT_SIGNALS` no longer affects execution at all, only which side is labeled as the strategy's "predicted" direction for display purposes.
 
-**Not a bug:** `BARRIER_VOL_FRACTION=0.25` is a *multiplier* of rolling tick volatility, not the barrier distance itself. The actual barrier sent to Deriv is `rolling_20_tick_volatility x 0.25`. R_25's tick-to-tick price moves are small in absolute terms -- real historical data puts the rolling 20-tick volatility typically around 0.15-0.20, so a *typical* barrier works out to roughly 0.04-0.05, with the full normal range spanning about 0.013 to 0.09 depending on how volatile the market currently is. An observed barrier around 0.025 sits at the quieter end of that range, not outside it, and both `engine.py` and the backtest apply the exact same `vol x fraction` formula to the same data -- there's no discrepancy between what was backtested and what's deployed.
+**Important consequence, stated plainly: this doubles capital at risk per signal** (one full stake on each side, not a stake split between them) versus the previous single-direction trade. If you actually wanted the total exposure per signal to stay the same, say so and I'll split the stake across the two legs instead.
 
-**Real bug found and fixed while checking this:** `TICK_VOL_WINDOW` in config was never actually wired into the strategy -- `TickEMAStrategy` always used a hardcoded window of 20 internally regardless of what this setting was changed to. It only had zero visible effect at the default (20 = 20); anyone who had changed `TICK_VOL_WINDOW` away from its default would have seen no change in behavior. `strategy.py`'s `TickEMAStrategy.__init__` now takes `vol_window` explicitly, and `engine.py` passes `settings.tick_vol_window` in on every (re)construction. Covered by a new regression test in `test_strategy.py`.
-
-## 2026-07-26: strategy replaced -- candle confluence score to tick-level EMA(10)/EMA(50) crossover
-
-The whole trading strategy changed, not just parameters. Previous entries below (candle-based, 180s duration, confluence scoring, the barrier/contract-type debugging history) describe the *old* strategy and are kept for reference, but no longer describe how this bot currently trades.
-
-**What changed and why:** this strategy (10-tick duration, 0.25x-volatility barrier, EMA(10)/EMA(50) tick crossover) is the specific configuration that came out of an extensive backtest search -- see `backtest_report.md`, `tick_backtest_addendum.md`, and `best_config_bf25.json` from the session that produced this revision, not a fresh guess:
-
-* **Signal source:** `strategy.py`'s `TickEMAStrategy` now reads the raw tick stream directly (`push_tick()`/`evaluate()`) instead of completed 180s candles. EMA(10) vs EMA(50), recomputed from a bounded 320-tick window on every `evaluate()` call rather than hand-maintained incremental state -- numerically indistinguishable from a true infinite-history streaming EMA (verified directly against the backtest's pandas-based calculation: <1e-5 absolute error on a 2000-tick synthetic series), but with no running state that can silently drift or desync across a reconnect.
-* **Contract duration:** 180 seconds (`duration_unit: "s"`) to 10 ticks (`duration_unit: "t"`) -- `TRADE_DURATION_TICKS` in config, valid range 1-10 (Deriv's tick-duration contract limit, enforced at both startup and proposal-build time).
-* **Barrier sizing:** was a fraction of the recent average *candle* range (ATR); now a fraction of rolling *tick* volatility (stdev of the last `TICK_VOL_WINDOW`=20 tick-to-tick price changes). Config field renamed `BARRIER_ATR_FRACTION` -> `BARRIER_VOL_FRACTION` (same default, 0.25, and same signed-offset convention: positive/above spot for HIGHER, negative/below for LOWER).
-* **No more confluence score / `MIN_CONFLUENCE_SCORE`:** a signal now fires whenever the two EMAs are on different sides, however close -- there's no pass/fail threshold to tune. `Signal.score` (DB column kept, to avoid a migration) is repurposed to hold the EMA(10)/EMA(50) separation in basis points of price -- informational only, not a gate.
-* **Direction is no longer inverted.** The 2026-07-25 entry below made the previous (candle) strategy deliberately trade the *opposite* of its detected direction. That was specific to that strategy's own characteristics and was never validated for this one -- this strategy's backtested win rates were measured trading the **raw** detected direction, so inverting here would silently make the live bot trade something different from what was actually backtested. If you want to test inversion for this strategy too, that's a real, separate experiment to run -- not something carried over by default.
-* **No candle-history prefetch.** The old `load_history()` (120 candles via `get_candles()`, now removed from `deriv.py` as dead code) let the candle strategy start immediately. The tick strategy instead warms up live from the streaming tick subscription: it needs `TickEMAStrategy.MIN_TICKS` = 200 ticks before it will evaluate anything, which is roughly **6-7 minutes** after every fresh connect or reconnect at R_25's observed ~2s/tick rate. The dashboard shows this honestly as a `WARMING_UP` status with a live tick count, rather than silently doing nothing.
-* **Non-overlapping trades by design:** `engine.py` only evaluates a new decision every `trade_duration_ticks` ticks, so a trade always finishes before the next one is considered. This is not an arbitrary choice -- it's exactly how the backtest that produced this strategy's numbers was run; overlapping trades were never simulated.
-
-**Honest backtest numbers (this exact config, out-of-sample on the full ~199-day R_25 tick dataset used in that session):** ~46.9% overall win rate, ~44.9% *minimum* single-day win rate, ~4,300 signals/day, worst observed same-day losing streak of 20. If you were hoping for a strategy that guarantees a 52%+ (or even 47%+) win rate on *every* day with a tight loss-streak cap: that target was searched for extensively (thousands of backtested parameter combinations spanning trend/momentum/pullback/volatility/candle-structure filters) and not found to be achievable on this instrument/contract -- see `tick_backtest_addendum.md` for why (R_25's tick-level directional accuracy is ~50% with no real edge found for any indicator combination tried, and the barrier structurally requires beating that, not matching it). This is the best config that search produced, shipped as requested, with its real numbers stated plainly rather than rounded up.
-
-**Not confirmed against this account's live `contracts_for`:** the `duration_unit: "s"`/180s-duration tier used by the old strategy was explicitly confirmed against this account's own live response (see the 2026-07-24 entries below). The `duration_unit: "t"` (tick-duration) tier follows Deriv's generally documented convention but has **not** been separately confirmed the same way for this account. Before enabling `AUTO_TRADE` in live mode, run the bot in demo first and check **Settings -> Copy contract specs (live query)** (`GET /api/diagnostics/contracts-for`), exactly as this project's own established practice already recommends for exactly this kind of uncertainty.
-
-**Testing note:** this sandbox has no network access to install `fastapi`/`sqlalchemy`/`websockets`/`httpx`/`pydantic-settings`/`aiosqlite` (same limitation the 2026-07-24 dashboard-redesign entry below hit for its DB-backed toggle). `strategy.py` has zero external dependencies, so its tests were actually executed here (all passing, plus a direct numerical comparison against the backtest's pandas-based EMA calculation). Everything touching `config`/`db`/`deriv`/`engine`/`api` was updated carefully and reviewed by hand for consistency (field names, imports, and call signatures cross-checked across every file), and the pre-existing, previously-working parts of `engine.py`/`deriv.py` (reconnect/backoff, proposal/buy/settlement flow, event logging) were left untouched apart from the duration/barrier-source changes described above -- but please actually run `pytest` (see "Testing" below) in an environment with network access before deploying, and exercise a demo-mode run before switching to live.
-
-**API/dashboard renames that came along with this:** `/api/status`'s `timeframe_seconds` -> `trade_duration_ticks`, `barrier_atr_fraction` -> `barrier_vol_fraction`, plus a new `strategy: {ready, tick_count, min_ticks_required, ticks_since_decision}` block. `/api/signals`' `candle_epoch` -> `decision_epoch` (the underlying DB column is unchanged, to avoid a migration -- see `db.py`). The dashboard's countdown ring no longer assumes a fixed 180s wall-clock period (it couldn't -- tick cadence isn't calendar-based); it now shows warm-up or decision-cadence progress driven from polled `/api/status` data instead of a client-side timer.
+`engine.py`: `execute()` is replaced by `execute_straddle()` (orchestrates both legs, sets the Signal's final status) plus `_execute_leg()` (places one leg, independent of the other -- one side failing, e.g. a transient API hiccup, does not block or roll back the other, since they're two unrelated Deriv contracts). New `Signal.status` value: `PARTIALLY_EXECUTED`, when exactly one leg succeeded. `Trade.signal_id` already supported multiple trades per signal (no schema change needed) -- each leg is its own `Trade` row, distinguished by its own `direction`.
 
 ## 2026-07-25 (latest): signal/trade history was never actually persisted across deploys
 
@@ -208,16 +186,16 @@ RuntimeError: {'code': 'InvalidBarrierSingle', 'details': {'field': 'barrier'},
 
 ## Trading contract semantics
 
-The bot reads the raw R_25 tick stream and trades a genuine 10-tick-duration Higher/Lower contract:
+The bot evaluates the direction of the next complete 3-minute candle, then **opens both sides**: a genuine `HIGHER` and a genuine `LOWER` position on every qualifying signal (see the 2026-07-26 changelog entry above).
 
-* `UP` reading (EMA10 > EMA50 on ticks) -> `contract_type: HIGHER` with a positive `barrier` (above entry spot)
-* `DOWN` reading (EMA10 < EMA50 on ticks) -> `contract_type: LOWER` with a negative `barrier` (below entry spot)
+* `contract_type: HIGHER` is sent with a positive `barrier` (above entry spot)
+* `contract_type: LOWER` is sent with a negative `barrier` (below entry spot)
 
-The traded direction matches the strategy's raw reading directly -- no inversion (see the 2026-07-26 changelog entry above for why that differs from the previous candle strategy). `HIGHER`/`LOWER` is confirmed against this account's own `contracts_for` response for the *180s/duration_unit "s"* tier (see 2026-07-24 entries below); the current `duration_unit: "t"` (tick) tier has not been separately confirmed the same way -- verify via **Settings -> Copy contract specs (live query)** before relying on this in live mode.
+The database/dashboard display label and the actual wire value are the same string here (`HIGHER`/`LOWER`) — confirmed against this account's own `contracts_for` response (see the changelog entry further below); this is a separate, dedicated contract category from `CALL`/`PUT` (which is the barrier-free Rise/Fall product on this account). The barrier's distance from spot is `BARRIER_ATR_FRACTION` × the recent average candle range, applied symmetrically to both legs; see `.env.example`.
 
-The barrier's distance from spot is a literal fixed value, `BARRIER_FIXED_OFFSET` (default 0.25); see `.env.example` and the known-economics note in `config.py`/the changelog above -- this default has backtested below breakeven for a $2.60-on-$1-stake payout, and is set this way by explicit request rather than backtest support.
+The strategy's evaluated direction (with `INVERT_SIGNALS` applied if set) is still recorded as the `Signal`'s displayed/predicted direction, but doesn't gate which side gets traded — both always do.
 
-A decision is evaluated every `TRADE_DURATION_TICKS` ticks (default 10), once the strategy has collected at least 200 ticks since the last (re)connect (see `WARMING_UP` in the Runtime section below). Trades are non-overlapping by design: the next decision is only considered after the previous trade's duration has fully elapsed.
+The strategy is evaluated from completed candles only. A qualified signal is created on the first observed tick belonging to the new 180-second candle boundary and both proposals are requested immediately.
 
 ## Preserved behavior
 
@@ -235,7 +213,7 @@ A decision is evaluated every `TRADE_DURATION_TICKS` ticks (default 10), once th
 
 The Deriv client uses separate public and trade WebSockets, bounded handshake timeouts, retrying handshakes, request timeouts, reader health checks, safe handling of non-text and non-JSON messages, and engine-level exponential reconnect backoff.
 
-Transient settlement errors are retried until the settlement deadline. A technical reconnect does not activate a financial drawdown stop. A reconnect landing back on an already-signaled decision tick reuses the existing signal instead of crashing the engine loop (see fix notes above; the underlying check predates the tick strategy but still applies).
+Transient settlement errors are retried until the settlement deadline. A technical reconnect does not activate a financial drawdown stop. A reconnect landing back on an already-signaled candle reuses the existing signal instead of crashing the engine loop (see fix notes above).
 
 ## Local run
 
@@ -279,14 +257,15 @@ fly deploy -a crypto-signal-bot-kooj9a
 
 ## Runtime
 
-On every (re)connect, the strategy starts cold and warms up live from the tick stream (`WARMING_UP`, ~6-7 minutes at R_25's observed ~2s/tick rate) before it evaluates anything -- there is no historical prefetch. Once ready, at each decision point (every `TRADE_DURATION_TICKS` ticks):
+At each 180-second UTC candle boundary:
 
-1. `TickEMAStrategy.evaluate()` reads EMA(10)/EMA(50) and rolling 20-tick volatility off the current tick window.
-2. A qualified direction is mapped to `HIGHER` or `LOWER` -- see "Trading contract semantics" above.
-3. A Higher/Lower proposal is requested with a signed barrier at the fixed configured distance (`BARRIER_FIXED_OFFSET`) from entry spot.
-4. The proposal is bought at the configured stake.
-5. The contract is polled until settlement.
-6. Trade result and PnL are persisted.
+1. The previous candle is finalized.
+2. Completed-candle strategy features are evaluated, including the recent average candle range (ATR).
+3. The strategy's direction (with `INVERT_SIGNALS` applied if set) is recorded as the signal's displayed/predicted direction — see "Trading contract semantics" above.
+4. Both a `HIGHER` and a `LOWER` proposal are requested, each with a signed barrier sized from the ATR, mirrored around spot.
+5. Both proposals are bought at the configured stake (each leg attempted independently — one failing doesn't block the other).
+6. Both contracts are polled until settlement.
+7. Trade results and PnL are persisted per leg.
 
 ## Deployment verification
 

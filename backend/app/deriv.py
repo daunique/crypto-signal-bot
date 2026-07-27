@@ -57,14 +57,6 @@ class DerivClient:
     # barrier value was rejected as InvalidBarrier regardless of magnitude
     # or sign (2026-07-23/24 entries below): CALL/PUT was never going to
     # accept a barrier here, no matter its value.
-    #
-    # 2026-07-26: the intraday (15s-1d, duration_unit "s") tier confirmed
-    # above was for the old 180s candle strategy. The current strategy
-    # (strategy.py) trades a 1-10 tick duration instead (duration_unit
-    # "t") -- contract_type and barrier sign/format are unchanged, but the
-    # "t" duration tier itself has not been separately confirmed against
-    # this account's contracts_for the way the "s" tier was. See the
-    # duration_unit note in build_proposal_payload below.
     DIRECTION_TO_CONTRACT_TYPE = {"UP": "HIGHER", "DOWN": "LOWER"}
 
     def __init__(self):
@@ -292,6 +284,13 @@ class DerivClient:
         while True:
             yield await self._public_ticks.get()
 
+    async def get_candles(self, symbol: str, count: int, granularity: int) -> list[dict[str, Any]]:
+        response = await self.request({
+            "ticks_history": symbol, "count": count, "end": "latest",
+            "style": "candles", "granularity": granularity,
+        }, channel="public")
+        return response.get("candles", [])
+
     def build_proposal_payload(self, symbol: str, direction: str, amount: float, currency: str, duration: int, barrier_offset: float) -> dict[str, Any]:
         try:
             contract_type = self.DIRECTION_TO_CONTRACT_TYPE[direction]
@@ -299,22 +298,12 @@ class DerivClient:
             raise ValueError(f"Unknown signal direction: {direction!r}") from None
         if barrier_offset <= 0:
             raise ValueError(f"barrier_offset must be > 0 for a Higher/Lower contract, got {barrier_offset!r}")
-        if not (1 <= duration <= 10):
-            raise ValueError(f"Tick-duration contracts must be 1-10 ticks, got {duration!r}")
         # Deriv's Higher/Lower barrier must be a signed, relative offset for
-        # contracts under 24h in duration (confirmed directly against this
-        # account's own contracts_for response for the 180s/duration_unit
-        # "s" case -- see README and the class docstring above).
-        # duration_unit "t" (tick-count duration, 1-10 ticks) follows
-        # Deriv's generally documented convention for tick contracts, but
-        # -- unlike the "s" case above -- has NOT been separately confirmed
-        # against this account's live contracts_for response. Verify via
-        # GET /api/diagnostics/contracts-for (or the Settings page's "Copy
-        # contract specs" button) in demo mode before relying on this for
-        # real trades, the same way the "s"-duration barrier shape above
-        # was actually confirmed rather than assumed. Positive/HIGHER =
-        # barrier above the entry spot; negative/LOWER = barrier below the
-        # entry spot.
+        # contracts under 24h in duration (ours are 180s) -- confirmed
+        # directly against this account's own contracts_for response (see
+        # README and the class docstring above). Positive/HIGHER = barrier
+        # above the entry spot; negative/LOWER = barrier below the entry
+        # spot.
         signed_offset = barrier_offset if direction == "UP" else -barrier_offset
         return {
             "proposal": 1,
@@ -323,7 +312,7 @@ class DerivClient:
             "contract_type": contract_type,
             "currency": currency,
             "duration": duration,
-            "duration_unit": "t",
+            "duration_unit": "s",
             "underlying_symbol": symbol,
             "barrier": f"{signed_offset:+.3f}",
         }

@@ -22,37 +22,12 @@ def test_bot_mode_rejects_unknown_values():
         pass
 
 
-def test_barrier_fixed_offset_must_be_positive():
-    assert Settings(barrier_fixed_offset=0.25).barrier_fixed_offset == 0.25
+def test_barrier_atr_fraction_must_be_positive():
+    assert Settings(barrier_atr_fraction=0.25).barrier_atr_fraction == 0.25
     for bad_value in (0, -0.1):
         try:
-            Settings(barrier_fixed_offset=bad_value)
-            assert False, "expected ValueError for a non-positive BARRIER_FIXED_OFFSET"
-        except ValueError:
-            pass
-
-
-def test_trade_duration_ticks_must_be_one_to_ten():
-    # Deriv's tick-duration contracts are only valid for 1-10 ticks; the
-    # strategy this bot ships with (strategy.py) was backtested specifically
-    # at 10. Reject anything outside that range at startup rather than
-    # letting Deriv reject every single trade at execution time.
-    assert Settings(trade_duration_ticks=10).trade_duration_ticks == 10
-    assert Settings(trade_duration_ticks=1).trade_duration_ticks == 1
-    for bad_value in (0, -1, 11, 100):
-        try:
-            Settings(trade_duration_ticks=bad_value)
-            assert False, "expected ValueError for TRADE_DURATION_TICKS outside 1-10"
-        except ValueError:
-            pass
-
-
-def test_tick_vol_window_must_be_at_least_two():
-    assert Settings(tick_vol_window=20).tick_vol_window == 20
-    for bad_value in (0, 1, -5):
-        try:
-            Settings(tick_vol_window=bad_value)
-            assert False, "expected ValueError for TICK_VOL_WINDOW < 2"
+            Settings(barrier_atr_fraction=bad_value)
+            assert False, "expected ValueError for a non-positive BARRIER_ATR_FRACTION"
         except ValueError:
             pass
 
@@ -63,3 +38,10 @@ def test_build_version_lives_in_config_not_main():
     # imports the router from api.py). Guards against that getting
     # "cleaned up" back into main.py in a future edit.
     assert isinstance(BUILD_VERSION, str) and BUILD_VERSION
+
+
+def test_invert_signals_defaults_to_false():
+    # Regression test: invert_signals must default to False (2026-07-26) --
+    # it previously was an unconditional flip with no setting at all.
+    assert Settings().invert_signals is False
+    assert Settings(invert_signals=True).invert_signals is True
