@@ -72,28 +72,28 @@ async function refreshTopbar() {
   } catch (e) { /* transient network hiccup -- next poll will retry */ }
 }
 
-/* ---------- tick-progress ring (dashboard only) ----------
-   The old ring assumed a fixed 180s wall-clock candle period and animated
-   itself client-side from Date.now(). That assumption no longer holds:
-   the tick strategy's cadence is a *tick count*, not a calendar period --
-   ticks don't arrive at a guaranteed real-time rate, so a self-driven
-   client-side timer would just be showing a plausible-looking number that
-   doesn't actually correspond to the bot's real state. The ring is now
-   driven entirely from /api/status (polled every 5s, same as the rest of
-   the dashboard): either warm-up progress (tick_count/min_ticks_required)
-   before the strategy is ready, or decision-cadence progress
-   (ticks_since_decision/trade_duration_ticks) once it is. */
+/* ---------- volatility-vs-threshold ring (dashboard only) ---------- */
+/* Replaces the old 180s candle countdown -- there's no fixed periodic
+   boundary in a tick-driven strategy, so this ring instead shows how close
+   the current rolling volatility reading is to the trailing-percentile
+   threshold a signal needs to clear. */
 
 const RING_CIRCUMFERENCE = 2 * Math.PI * 38;
 
-function updateProgressRing(fraction, label) {
+function updateVolRing(currentVol, threshold) {
   const ring = document.getElementById("ringProgress");
-  const labelEl = document.getElementById("ringLabel");
-  if (!ring || !labelEl) return;
-  const clamped = Math.max(0, Math.min(1, fraction));
+  const label = document.getElementById("ringLabel");
+  if (!ring || !label) return;
+  if (currentVol == null || threshold == null || threshold <= 0) {
+    ring.style.strokeDasharray = `${RING_CIRCUMFERENCE}`;
+    ring.style.strokeDashoffset = `${RING_CIRCUMFERENCE}`;
+    label.textContent = "--";
+    return;
+  }
+  const progress = Math.max(0, Math.min(currentVol / threshold, 1));
   ring.style.strokeDasharray = `${RING_CIRCUMFERENCE}`;
-  ring.style.strokeDashoffset = `${RING_CIRCUMFERENCE * (1 - clamped)}`;
-  labelEl.textContent = label;
+  ring.style.strokeDashoffset = `${RING_CIRCUMFERENCE * (1 - progress)}`;
+  label.textContent = `${Math.round(progress * 100)}%`;
 }
 
 /* ---------- pages ---------- */
@@ -103,8 +103,7 @@ async function renderDashboard() {
   updateTopbar(s);
   const t = s.today;
   const signal = s.current_signal;
-  const warmingUp = signal && signal.status === "WARMING_UP";
-  const hasSignal = signal && signal.status !== "NO_SIGNAL" && signal.status !== "WARMING_UP";
+  const hasSignal = signal && signal.status !== "NO_SIGNAL";
   app.innerHTML = `
     <div class="card hero">
       <div class="ring-wrap">
@@ -116,20 +115,18 @@ async function renderDashboard() {
       </div>
       <div class="hero-body">
         <div class="hero-status">${esc(s.bot_status)}</div>
-        <div class="muted">${esc(s.symbol)} &middot; ${esc(s.trade_duration_ticks)}-tick Higher/Lower &middot; barrier &plusmn;${Number(s.barrier_fixed_offset).toFixed(3)} (fixed)</div>
-        ${warmingUp ? `
-          <p class="muted" style="margin-top:10px">Warming up: ${esc(signal.tick_count)} / ${esc(signal.min_ticks_required)} ticks collected before the strategy can evaluate.</p>
-        ` : hasSignal ? `
+        <div class="muted">${esc(s.symbol)} &middot; ${esc(s.contract_duration_ticks)}-tick contracts &middot; barrier &plusmn;${Number(s.barrier).toFixed(3)} &middot; ${esc(s.bet_direction)}</div>
+        ${hasSignal ? `
           <div class="hero-detail">
             <div class="detail-item"><span class="detail-label">Direction</span><span class="detail-value">${dirLabel(signal.direction)}</span></div>
             <div class="detail-item"><span class="detail-label">Contract</span><span class="detail-value">${esc(signal.contract_type || "-")}</span></div>
-            <div class="detail-item"><span class="detail-label">Score</span><span class="detail-value">${esc(signal.score ?? "-")}</span></div>
+            <div class="detail-item"><span class="detail-label">Vol</span><span class="detail-value">${signal.current_vol != null ? Number(signal.current_vol).toFixed(5) : "-"}</span></div>
+            <div class="detail-item"><span class="detail-label">Threshold</span><span class="detail-value">${signal.vol_threshold != null ? Number(signal.vol_threshold).toFixed(5) : "-"}</span></div>
             <div class="detail-item"><span class="detail-label">Barrier</span><span class="detail-value">${signal.barrier_offset != null ? Number(signal.barrier_offset).toFixed(3) : "-"}</span></div>
-            <div class="detail-item"><span class="detail-label">Market Vol</span><span class="detail-value">${signal.current_market_vol != null ? Number(signal.current_market_vol).toFixed(3) : "-"}</span></div>
             <div class="detail-item"><span class="detail-label">Status</span><span class="detail-value">${signalBadge(signal.status)}</span></div>
           </div>
           ${signal.reason ? `<p class="muted" style="margin-top:10px">${esc(signal.reason)}</p>` : ""}
-        ` : `<p class="muted" style="margin-top:10px">Waiting for the next decision tick.</p>`}
+        ` : `<p class="muted" style="margin-top:10px">${s.current_vol_threshold == null ? "Building trailing volatility history -- no threshold yet." : "Watching for the next volatility-percentile signal."}</p>`}
         ${s.last_error ? `<p style="margin-top:10px;color:var(--down);font-size:12.5px">${esc(s.last_error)}</p>` : ""}
       </div>
     </div>
@@ -141,13 +138,7 @@ async function renderDashboard() {
       <div class="stat"><div class="stat-label">Losses</div><div class="stat-value dir-down">${t.losses}</div></div>
     </div>
   `;
-  if (s.strategy && !s.strategy.ready) {
-    const frac = s.strategy.min_ticks_required ? s.strategy.tick_count / s.strategy.min_ticks_required : 0;
-    updateProgressRing(frac, "warm-up");
-  } else if (s.strategy) {
-    const frac = s.trade_duration_ticks ? s.strategy.ticks_since_decision / s.trade_duration_ticks : 0;
-    updateProgressRing(frac, `${s.strategy.ticks_since_decision}/${s.trade_duration_ticks}`);
-  }
+  updateVolRing(hasSignal ? signal.current_vol : null, s.current_vol_threshold);
 }
 
 async function renderSignals() {
@@ -155,17 +146,18 @@ async function renderSignals() {
   app.innerHTML = `<div class="card">
     <h2>Signals</h2>
     ${rows.length ? `<div class="table-wrap"><table><thead><tr>
-      <th>Time</th><th>Direction</th><th>Contract</th><th class="num">Barrier</th><th class="num">Score</th><th>Status</th>
+      <th>Time</th><th>Direction</th><th>Contract</th><th class="num">Barrier</th><th class="num">Vol</th><th class="num">Threshold</th><th>Status</th>
     </tr></thead><tbody>
     ${rows.map(x => `<tr>
       <td class="time">${esc(x.created_at)}</td>
       <td>${dirLabel(x.direction)}</td>
       <td>${esc(x.contract_type)}</td>
       <td class="num">${x.barrier_offset != null ? Number(x.barrier_offset).toFixed(3) : "-"}</td>
-      <td class="num">${esc(x.score)}</td>
+      <td class="num">${x.current_vol != null ? Number(x.current_vol).toFixed(5) : "-"}</td>
+      <td class="num">${x.vol_threshold != null ? Number(x.vol_threshold).toFixed(5) : "-"}</td>
       <td>${signalBadge(x.status)}</td>
     </tr>`).join("")}
-    </tbody></table></div>` : `<div class="empty-state">No signals yet. They'll show up here as soon as the bot detects one.</div>`}
+    </tbody></table></div>` : `<div class="empty-state">No signals yet. They'll show up here once the trailing volatility threshold is established and a reading clears it.</div>`}
   </div>`;
 }
 
@@ -265,10 +257,24 @@ async function renderSettings() {
       </div>
       <div class="settings-row">
         <div>
-          <div class="settings-row-label">Barrier size</div>
-          <div class="settings-row-desc">Fixed distance from spot (not scaled by volatility). Set via BARRIER_FIXED_OFFSET.</div>
+          <div class="settings-row-label">Barrier</div>
+          <div class="settings-row-desc">Fixed distance from entry spot (not ATR-derived). Set via BARRIER.</div>
         </div>
-        <span class="chip">&plusmn;${Number(s.barrier_fixed_offset).toFixed(3)}</span>
+        <span class="chip">&plusmn;${Number(s.barrier).toFixed(3)}</span>
+      </div>
+      <div class="settings-row">
+        <div>
+          <div class="settings-row-label">Bet direction</div>
+          <div class="settings-row-desc">Fixed for every signal -- no directional edge was found in backtesting, so this only needs to be consistent, not "right". Set via BET_DIRECTION.</div>
+        </div>
+        <span class="chip">${esc(s.bet_direction)}</span>
+      </div>
+      <div class="settings-row">
+        <div>
+          <div class="settings-row-label">Volatility filter</div>
+          <div class="settings-row-desc">Fires when rolling volatility (last ${s.vol_window_ticks} ticks) is at or above this percentile of its trailing ${s.vol_trailing_days}-day history. Set via VOL_TARGET_PERCENTILE.</div>
+        </div>
+        <span class="chip">top ${(100 - s.vol_target_percentile).toFixed(0)}%</span>
       </div>
     </div>
     <div class="card">
@@ -312,14 +318,14 @@ function formatDiagnostics(d) {
   lines.push(`Generated: ${d.generated_at}`);
   lines.push(`Build: ${d.build_version}`);
   lines.push(`Status: ${d.bot_status} | Mode: ${d.mode} | Symbol: ${d.symbol} | Auto-trade: ${d.auto_trade}`);
-  lines.push(`Barrier fixed offset: ${d.barrier_fixed_offset}`);
+  lines.push(`Barrier: +/-${d.barrier}  Direction: ${d.bet_direction}  Vol filter: top ${(100 - d.vol_target_percentile).toFixed(0)}% (window ${d.vol_window_ticks} ticks, trailing ${d.vol_trailing_days}d)  Current threshold: ${d.current_vol_threshold ?? "not yet established"}`);
   lines.push(`Last error: ${d.last_error || "(none)"}`);
   lines.push("");
   lines.push(`Recent events (${d.recent_events.length}):`);
   d.recent_events.forEach(e => lines.push(`  [${e.created_at}] ${String(e.level).toUpperCase()} ${e.event_type}: ${e.message}`));
   lines.push("");
   lines.push(`Recent signals (${d.recent_signals.length}):`);
-  d.recent_signals.forEach(x => lines.push(`  [${x.created_at}] ${x.direction} status=${x.status} score=${x.score} barrier_offset=${x.barrier_offset} reason=${x.reason}`));
+  d.recent_signals.forEach(x => lines.push(`  [${x.created_at}] ${x.direction} status=${x.status} vol=${x.current_vol} threshold=${x.vol_threshold} barrier_offset=${x.barrier_offset} reason=${x.reason}`));
   lines.push("");
   lines.push(`Recent trades (${d.recent_trades.length}):`);
   d.recent_trades.forEach(x => lines.push(`  [${x.created_at}] ${x.direction} status=${x.status} barrier=${x.barrier} stake=${x.stake} profit=${x.profit} contract=${x.contract_id}`));

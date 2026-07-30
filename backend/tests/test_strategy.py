@@ -1,112 +1,84 @@
-from backend.app.strategy import Tick, TickEMAStrategy, SignalDecision
+import pytest
+
+from backend.app.strategy import RollingVolatility, VolatilityTimingStrategy
 
 
-def _push_constant_walk(strategy: TickEMAStrategy, n: int, start_price: float, step: float, start_epoch: int = 0):
-    price = start_price
-    for i in range(n):
-        strategy.push_tick(Tick(start_epoch + i * 2, price))
-        price += step
+def test_rolling_volatility_none_until_window_fills():
+    rv = RollingVolatility(window=3)
+    assert rv.update(1.0) is None   # first price: no delta yet
+    assert rv.update(2.0) is None   # 1 delta, need 3
+    assert rv.update(3.0) is None   # 2 deltas, need 3
+    assert rv.update(4.0) is not None  # 3 deltas: window full
 
 
-def _push_trending_walk(strategy: TickEMAStrategy, n: int, start_price: float, avg_step: float, start_epoch: int = 0):
-    # Alternates the step size around avg_step (rather than a perfectly
-    # constant step) so tick-to-tick volatility is genuinely nonzero, while
-    # still trending in one direction on average -- a perfectly linear walk
-    # has zero variance in its diffs, which would make the strategy's own
-    # vol<=0 guard return None regardless of the trend, defeating the point
-    # of these tests.
-    price = start_price
-    for i in range(n):
-        strategy.push_tick(Tick(start_epoch + i * 2, price))
-        price += avg_step * (1.4 if i % 2 == 0 else 0.6)
+def test_rolling_volatility_matches_known_value():
+    # deltas of [1,2,3,4,5,6,7,8] are all exactly 1.0 -> zero variance
+    rv = RollingVolatility(window=3)
+    outs = [rv.update(p) for p in [1., 2., 3., 4., 5., 6., 7., 8.]]
+    for v in outs[3:]:
+        assert v == pytest.approx(0.0, abs=1e-9)
 
 
-def test_strategy_returns_none_before_warmup():
-    s = TickEMAStrategy()
-    _push_constant_walk(s, s.MIN_TICKS - 1, 100.0, 0.01)
-    assert not s.ready
-    assert s.evaluate() is None
+def test_rolling_volatility_reacts_to_varying_deltas():
+    # A window that has just seen a big jump should read higher than one
+    # that hasn't -- this is the entire premise the strategy trades on.
+    rv = RollingVolatility(window=3)
+    for p in [100.0, 100.01, 100.02, 100.03]:  # calm: tiny, steady deltas
+        calm_vol = rv.update(p)
+    rv2 = RollingVolatility(window=3)
+    for p in [100.0, 100.01, 105.0, 100.02]:  # one big jump in the window
+        volatile_vol = rv2.update(p)
+    assert volatile_vol > calm_vol
 
 
-def test_strategy_ready_once_warmup_reached():
-    s = TickEMAStrategy()
-    _push_constant_walk(s, s.MIN_TICKS, 100.0, 0.01)
-    assert s.ready
-    assert s.tick_count == s.MIN_TICKS
+def test_rolling_volatility_rejects_bad_window():
+    with pytest.raises(ValueError):
+        RollingVolatility(window=1)
+    with pytest.raises(ValueError):
+        RollingVolatility(window=0)
 
 
-def test_strategy_direction_is_up_or_down_only():
-    s = TickEMAStrategy()
-    _push_trending_walk(s, s.HISTORY, 100.0, 0.05)
-    result = s.evaluate()
-    assert result is None or isinstance(result, SignalDecision)
-    assert result is None or result.direction in {"UP", "DOWN"}
+def test_strategy_fires_only_when_vol_at_or_above_threshold():
+    strat = VolatilityTimingStrategy(bet_direction="LOWER", target_percentile=90.0)
+    assert strat.evaluate(current_vol=0.05, threshold=0.10) is None       # below threshold
+    decision = strat.evaluate(current_vol=0.10, threshold=0.10)           # exactly at threshold
+    assert decision is not None
+    decision2 = strat.evaluate(current_vol=0.20, threshold=0.10)          # above threshold
+    assert decision2 is not None
 
 
-def test_strategy_uptrend_produces_up_with_positive_vol():
-    # A rising (but not perfectly linear) price stream: EMA(fast) should
-    # sit above EMA(slow).
-    s = TickEMAStrategy()
-    _push_trending_walk(s, s.HISTORY, 100.0, 0.05)
-    result = s.evaluate()
-    assert result is not None
-    assert result.direction == "UP"
-    # vol no longer sizes the barrier directly (that's now a fixed config
-    # value -- see strategy.py/config.py), but it must still actually be
-    # positive whenever a decision is returned: it's how evaluate() detects
-    # a frozen/stale feed (vol<=0 -> None), and it's shown on the dashboard
-    # for context.
-    assert result.vol > 0
-    assert result.score >= 0
+def test_strategy_returns_none_when_inputs_missing():
+    strat = VolatilityTimingStrategy(bet_direction="LOWER", target_percentile=90.0)
+    assert strat.evaluate(current_vol=None, threshold=0.10) is None
+    assert strat.evaluate(current_vol=0.20, threshold=None) is None
+    assert strat.evaluate(current_vol=None, threshold=None) is None
 
 
-def test_strategy_downtrend_produces_down():
-    s = TickEMAStrategy()
-    _push_trending_walk(s, s.HISTORY, 200.0, -0.05)
-    result = s.evaluate()
-    assert result is not None
-    assert result.direction == "DOWN"
-    assert result.vol > 0
+def test_strategy_direction_is_fixed_not_computed():
+    # No directional edge was found in backtesting (see report); direction
+    # is a fixed configuration choice, so it must be identical regardless
+    # of how large current_vol is relative to the threshold.
+    strat = VolatilityTimingStrategy(bet_direction="LOWER", target_percentile=90.0)
+    for vol in (0.10, 0.50, 5.0):
+        decision = strat.evaluate(current_vol=vol, threshold=0.10)
+        assert decision.direction == "LOWER"
+
+    strat_higher = VolatilityTimingStrategy(bet_direction="HIGHER", target_percentile=90.0)
+    decision = strat_higher.evaluate(current_vol=0.5, threshold=0.10)
+    assert decision.direction == "HIGHER"
 
 
-def test_strategy_flat_zero_volatility_series_returns_none():
-    # A perfectly flat price stream (vol exactly 0) most likely means a
-    # frozen/stale feed rather than genuine inactivity -- the strategy
-    # should skip rather than trade on it. (This no longer affects barrier
-    # sizing -- the barrier is a fixed config value now -- but the guard
-    # itself is still worth keeping.)
-    s = TickEMAStrategy()
-    _push_constant_walk(s, s.HISTORY, 150.0, 0.0)
-    assert s.evaluate() is None
+def test_strategy_rejects_bad_direction():
+    with pytest.raises(ValueError):
+        VolatilityTimingStrategy(bet_direction="SIDEWAYS", target_percentile=90.0)
 
 
-def test_push_tick_deque_is_bounded_by_history():
-    s = TickEMAStrategy()
-    _push_constant_walk(s, s.HISTORY + 100, 100.0, 0.01)
-    assert s.tick_count == s.HISTORY
-
-
-def test_vol_window_is_actually_configurable():
-    # Regression test: vol_window used to be a class-level constant only
-    # (VOL_WINDOW), never actually read from settings.tick_vol_window --
-    # so changing TICK_VOL_WINDOW in .env had zero effect on live
-    # behavior. engine.py now passes it into __init__ explicitly.
-    default_strategy = TickEMAStrategy()
-    assert default_strategy.vol_window == TickEMAStrategy.VOL_WINDOW
-
-    custom_strategy = TickEMAStrategy(vol_window=5)
-    assert custom_strategy.vol_window == 5
-
-    # A smaller window should generally produce a different (typically
-    # smaller-sample, noisier) volatility estimate than a larger one on the
-    # same tick data -- confirms the parameter actually reaches evaluate(),
-    # not just that the attribute is stored.
-    _push_trending_walk(custom_strategy, custom_strategy.HISTORY, 100.0, 0.05)
-    result_custom = custom_strategy.evaluate()
-
-    default_strategy2 = TickEMAStrategy(vol_window=20)
-    _push_trending_walk(default_strategy2, default_strategy2.HISTORY, 100.0, 0.05)
-    result_default = default_strategy2.evaluate()
-
-    assert result_custom is not None and result_default is not None
-    assert result_custom.vol != result_default.vol
+def test_signal_decision_carries_the_values_it_fired_on():
+    # These end up on the Signal DB row (current_vol/vol_threshold) purely
+    # for audit/display -- assert they're the actual inputs, not the
+    # configured percentile or some other derived number.
+    strat = VolatilityTimingStrategy(bet_direction="LOWER", target_percentile=95.0)
+    decision = strat.evaluate(current_vol=0.234, threshold=0.200)
+    assert decision.current_vol == 0.234
+    assert decision.threshold == 0.200
+    assert decision.percentile == 95.0

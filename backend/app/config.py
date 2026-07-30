@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Kept here (rather than main.py) so api.py can import it too without a
 # main.py <-> api.py circular import (main.py imports the router from api.py).
-BUILD_VERSION = "2026-07-27-inverted-signals-1"
+BUILD_VERSION = "2026-07-29-v25-volatility-timing-strategy-1"
 
 
 class Settings(BaseSettings):
@@ -19,35 +19,39 @@ class Settings(BaseSettings):
     bot_mode: str = "demo"
 
     market_symbol: str = "R_25"
-    # Contract duration in ticks (Deriv's tick-duration contracts are valid
-    # for 1-10 ticks). The strategy this bot ships with (see strategy.py)
-    # was backtested specifically at 10.
-    trade_duration_ticks: int = 10
     stake: float = 1.0
     currency: str = "USD"
     auto_trade: bool = True
     request_timeout_seconds: float = 15.0
-    # Deriv's Higher/Lower product requires a signed offset `barrier` (see
-    # README). This is a literal fixed distance from spot, not scaled by
-    # volatility (an earlier revision, same day, scaled it by rolling tick
-    # volatility instead -- see the 2026-07-26 changelog entries in README
-    # for why that changed back to a fixed value).
-    #
-    # KNOWN ECONOMICS, STATED HONESTLY: backtesting this exact value (0.25),
-    # at 10-tick duration, on R_25, with the shipped EMA(10)/EMA(50)
-    # crossover -- and ~95 other filter combinations tried, including
-    # conditioning on only the most extreme volatility spikes -- found a
-    # win rate of roughly 32-34%. Against a payout of $2.60 back on a $1
-    # stake ($1.60 profit per win), breakeven requires ~38.46%. That
-    # backtest sits below breakeven -- see backtest_report.md,
-    # tick_backtest_addendum.md, and the README's changelog for the session
-    # that produced this number. This value is shipped anyway, at explicit
-    # user request, to redeploy and observe real results directly rather
-    # than rely on the backtest alone -- not because backtesting supports
-    # it as profitable. Verify the actual quoted payout for your account
-    # before trading this live with real funds.
-    barrier_fixed_offset: float = 0.25
-    tick_vol_window: int = 20
+
+    # --- Strategy: backtested volatility-timing signal (see PnL note below) ---
+    # Contract duration in ticks. This is fixed at 10 because that is what was
+    # backtested (deriv-data 2026-01-01 to 2026-07-18, 8.55M ticks/symbol) --
+    # changing it means trading something that has not been validated.
+    contract_duration_ticks: int = 10
+    # Fixed, signed-offset barrier magnitude (see deriv.py: sign is applied
+    # automatically from bet_direction -- +barrier for HIGHER, -barrier for
+    # LOWER). NOT ATR-derived. 0.30 was chosen because, of every barrier and
+    # signal combination tested, it came closest to the live quoted payout's
+    # breakeven win rate (still ~1.0-1.6 points short -- see PnL note below).
+    barrier: float = 0.30
+    # Which side every qualifying signal trades. Backtesting found Higher and
+    # Lower statistically indistinguishable on this instrument (no directional
+    # edge exists -- see report), so this is fixed rather than computed; it
+    # only needs to be *a* consistent choice, not the "right" one.
+    bet_direction: str = "LOWER"
+    # Rolling window (in ticks) used to estimate current realized volatility.
+    vol_window_ticks: int = 100
+    # The volatility-percentile threshold is recalculated once per day from
+    # only the preceding N days of data (never future data) -- this is the
+    # "adaptive, non-lookahead" version validated in the backtest, not the
+    # more optimistic fixed-threshold-on-the-whole-sample version.
+    vol_trailing_days: int = 90
+    # A signal fires when current rolling volatility is at or above this
+    # percentile of the trailing window (90 = "top 10% most volatile
+    # moments"). This is a *timing* filter only -- it has no bearing on
+    # direction.
+    vol_target_percentile: float = 90.0
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -65,16 +69,37 @@ class Settings(BaseSettings):
         # "demo"` comparison during account selection, silently falling
         # through to the *real* (live) account instead of demo.
         self.bot_mode = mode
-        if not (1 <= self.trade_duration_ticks <= 10):
-            raise ValueError("TRADE_DURATION_TICKS must be between 1 and 10 (Deriv's tick-duration contract limit)")
         if self.stake <= 0:
             raise ValueError("STAKE must be greater than zero")
-        if self.barrier_fixed_offset <= 0:
-            raise ValueError("BARRIER_FIXED_OFFSET must be greater than zero")
-        if self.tick_vol_window < 2:
-            raise ValueError("TICK_VOL_WINDOW must be at least 2")
+        if self.contract_duration_ticks <= 0:
+            raise ValueError("CONTRACT_DURATION_TICKS must be greater than zero")
+        if self.barrier <= 0:
+            raise ValueError("BARRIER must be greater than zero")
+        direction = self.bet_direction.upper().strip()
+        if direction not in {"HIGHER", "LOWER"}:
+            raise ValueError("BET_DIRECTION must be either 'HIGHER' or 'LOWER'")
+        self.bet_direction = direction
+        if self.vol_window_ticks <= 1:
+            raise ValueError("VOL_WINDOW_TICKS must be greater than 1")
+        if self.vol_trailing_days <= 0:
+            raise ValueError("VOL_TRAILING_DAYS must be greater than zero")
+        if not (0 < self.vol_target_percentile < 100):
+            raise ValueError("VOL_TARGET_PERCENTILE must be between 0 and 100 (exclusive)")
 
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+# ---------------------------------------------------------------------------
+# Honest performance note (carried forward from the backtest report, not
+# reproduced from optimism): at the live payout quoted for R_25 barrier 0.30
+# ($3.00 back per $1 staked -> breakeven win rate 33.33%), the validated,
+# out-of-sample, non-lookahead win rate for this exact configuration was
+# 31.9-32.0% -- short of breakeven by roughly 1.0-1.6 percentage points. This
+# is the closest to breakeven found across an extensive search (pullback
+# patterns, multi-signal ensembles, RNG/periodicity checks, and this
+# volatility-timing signal). It is not known to be profitable. Nothing in
+# this codebase should be read as claiming otherwise.
+# ---------------------------------------------------------------------------

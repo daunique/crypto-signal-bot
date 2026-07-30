@@ -22,37 +22,12 @@ def test_bot_mode_rejects_unknown_values():
         pass
 
 
-def test_barrier_fixed_offset_must_be_positive():
-    assert Settings(barrier_fixed_offset=0.25).barrier_fixed_offset == 0.25
+def test_barrier_must_be_positive():
+    assert Settings(barrier=0.30).barrier == 0.30
     for bad_value in (0, -0.1):
         try:
-            Settings(barrier_fixed_offset=bad_value)
-            assert False, "expected ValueError for a non-positive BARRIER_FIXED_OFFSET"
-        except ValueError:
-            pass
-
-
-def test_trade_duration_ticks_must_be_one_to_ten():
-    # Deriv's tick-duration contracts are only valid for 1-10 ticks; the
-    # strategy this bot ships with (strategy.py) was backtested specifically
-    # at 10. Reject anything outside that range at startup rather than
-    # letting Deriv reject every single trade at execution time.
-    assert Settings(trade_duration_ticks=10).trade_duration_ticks == 10
-    assert Settings(trade_duration_ticks=1).trade_duration_ticks == 1
-    for bad_value in (0, -1, 11, 100):
-        try:
-            Settings(trade_duration_ticks=bad_value)
-            assert False, "expected ValueError for TRADE_DURATION_TICKS outside 1-10"
-        except ValueError:
-            pass
-
-
-def test_tick_vol_window_must_be_at_least_two():
-    assert Settings(tick_vol_window=20).tick_vol_window == 20
-    for bad_value in (0, 1, -5):
-        try:
-            Settings(tick_vol_window=bad_value)
-            assert False, "expected ValueError for TICK_VOL_WINDOW < 2"
+            Settings(barrier=bad_value)
+            assert False, "expected ValueError for a non-positive BARRIER"
         except ValueError:
             pass
 
@@ -63,3 +38,51 @@ def test_build_version_lives_in_config_not_main():
     # imports the router from api.py). Guards against that getting
     # "cleaned up" back into main.py in a future edit.
     assert isinstance(BUILD_VERSION, str) and BUILD_VERSION
+
+
+def test_bet_direction_defaults_to_lower_and_is_normalized():
+    # LOWER is the backtested default (barrier 0.30, ~31.9-32.0% win rate at
+    # the quoted payout -- see the PnL note at the bottom of this file).
+    # Direction has no backtested edge either way (see report), so this only
+    # needs to be a fixed, consistent choice.
+    assert Settings().bet_direction == "LOWER"
+    assert Settings(bet_direction="higher").bet_direction == "HIGHER"
+    assert Settings(bet_direction=" Lower ").bet_direction == "LOWER"
+
+
+def test_bet_direction_rejects_unknown_values():
+    try:
+        Settings(bet_direction="sideways")
+        assert False, "expected ValueError for an unrecognized BET_DIRECTION"
+    except ValueError:
+        pass
+
+
+def test_contract_duration_ticks_defaults_to_backtested_value():
+    # 10 ticks is what was actually backtested (see report); this isn't an
+    # arbitrary default; changing it means trading an unvalidated variant.
+    assert Settings().contract_duration_ticks == 10
+    try:
+        Settings(contract_duration_ticks=0)
+        assert False, "expected ValueError for a non-positive CONTRACT_DURATION_TICKS"
+    except ValueError:
+        pass
+
+
+def test_volatility_settings_have_backtested_defaults_and_are_validated():
+    s = Settings()
+    assert s.vol_window_ticks == 100
+    assert s.vol_trailing_days == 90
+    assert s.vol_target_percentile == 90.0
+    for bad_window in (1, 0, -5):
+        try:
+            Settings(vol_window_ticks=bad_window)
+            assert False, "expected ValueError for VOL_WINDOW_TICKS <= 1"
+        except ValueError:
+            pass
+    for bad_pct in (0, 100, -1, 150):
+        try:
+            Settings(vol_target_percentile=bad_pct)
+            assert False, "expected ValueError for VOL_TARGET_PERCENTILE outside (0, 100)"
+        except ValueError:
+            pass

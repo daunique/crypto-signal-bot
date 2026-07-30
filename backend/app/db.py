@@ -1,6 +1,6 @@
 import logging
-from datetime import datetime, timezone
-from sqlalchemy import String, Float, Integer, DateTime, Text, inspect, text
+from datetime import datetime, timezone, date
+from sqlalchemy import String, Float, Integer, DateTime, Text, Date, inspect, text, delete
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from .config import get_settings
@@ -20,19 +20,25 @@ class Signal(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
-    # Column name predates the tick strategy (2026-07-26) and is kept
-    # as-is to avoid a rename migration -- it now holds the epoch of the
-    # tick that triggered the decision, not a 180s candle-boundary epoch.
-    # Still unique per decision point; see engine.py's on_decision_tick().
-    # Exposed to the API/frontend as "decision_epoch".
+    # Historically named for the old 180s-candle strategy (candle boundary
+    # epoch); repurposed, unchanged, to hold the entry TICK epoch for the
+    # volatility-timing strategy. Left as-is rather than renamed to avoid an
+    # unnecessary destructive migration -- it is still a unique epoch marking
+    # one signal opportunity, which is all the de-duplication check in
+    # engine.py actually needs.
     candle_epoch: Mapped[int] = mapped_column(Integer, index=True, unique=True)
     symbol: Mapped[str] = mapped_column(String(32))
     direction: Mapped[str] = mapped_column(String(16))
     contract_type: Mapped[str] = mapped_column(String(32))
-    score: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32), default="QUALIFIED")
     reason: Mapped[str] = mapped_column(Text, default="")
     barrier_offset: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The rolling realized-volatility reading that qualified this signal, and
+    # the trailing-percentile threshold it cleared -- kept for auditability
+    # (the old EMA strategy's integer "score" column is gone; these are its
+    # replacement, and are more directly meaningful for this strategy).
+    current_vol: Mapped[float | None] = mapped_column(Float, nullable=True)
+    vol_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class Trade(Base):
@@ -75,6 +81,26 @@ class RuntimeSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
+class VolSample(Base):
+    """A once-per-30-ticks sample of rolling realized volatility, kept for
+    `vol_trailing_days` (config) so the volatility-percentile threshold can be
+    recomputed from a *persisted* trailing window across restarts, instead of
+    only from whatever has accumulated in-process since the bot last started.
+
+    Sampling every ~30 ticks (not every tick) keeps this table's size sane --
+    ~90 days x ~1440 samples/day is a few hundred thousand rows, not the ~3.9M
+    ticks/symbol that a full-resolution version would need for 90 days at R_25's
+    ~2s tick rate.
+    """
+    __tablename__ = "vol_samples"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    day: Mapped[date] = mapped_column(Date, index=True)
+    epoch: Mapped[int] = mapped_column(Integer)
+    vol: Mapped[float] = mapped_column(Float)
+
+
 async def get_runtime_setting(key: str, default: str | None = None) -> str | None:
     async with session() as db:
         row = await db.get(RuntimeSetting, key)
@@ -108,18 +134,31 @@ async def set_bot_mode_override(mode: str) -> str:
     return mode
 
 
+async def prune_old_vol_samples(symbol: str, keep_days: int) -> None:
+    """Delete VolSample rows older than `keep_days` (plus a small buffer) so
+    this table doesn't grow unbounded over months of uptime."""
+    from datetime import timedelta
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=keep_days + 5)
+    async with session() as db:
+        await db.execute(delete(VolSample).where(VolSample.symbol == symbol, VolSample.day < cutoff))
+        await db.commit()
+
+
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         # create_all() only creates brand-new tables -- it won't add a
-        # newly-introduced column (barrier_offset, barrier) to a table that
-        # already exists from a prior deploy. This project has no migration
-        # framework, so do the minimal additive migration by hand. Column
-        # existence is checked *before* attempting ALTER TABLE, rather than
-        # attempting-and-ignoring-the-error, because on Postgres a failed
-        # statement (e.g. "column already exists") poisons the rest of the
-        # transaction, unlike on SQLite.
+        # newly-introduced column (barrier_offset, barrier, current_vol,
+        # vol_threshold) to a table that already exists from a prior deploy.
+        # This project has no migration framework, so do the minimal
+        # additive migration by hand. Column existence is checked *before*
+        # attempting ALTER TABLE, rather than attempting-and-ignoring-the-
+        # error, because on Postgres a failed statement (e.g. "column
+        # already exists") poisons the rest of the transaction, unlike on
+        # SQLite.
         await _add_column_if_missing(conn, "signals", "barrier_offset", "FLOAT")
+        await _add_column_if_missing(conn, "signals", "current_vol", "FLOAT")
+        await _add_column_if_missing(conn, "signals", "vol_threshold", "FLOAT")
         await _add_column_if_missing(conn, "trades", "barrier", "VARCHAR(16)")
 
 

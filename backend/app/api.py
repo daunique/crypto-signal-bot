@@ -27,15 +27,12 @@ async def status():
         trades = wins + losses
         return {
             "bot_status": engine.status, "mode": mode, "symbol": settings.market_symbol,
-            "trade_duration_ticks": settings.trade_duration_ticks, "auto_trade": settings.auto_trade,
-            "barrier_fixed_offset": settings.barrier_fixed_offset,
+            "contract_duration_ticks": settings.contract_duration_ticks, "auto_trade": settings.auto_trade,
+            "barrier": settings.barrier, "bet_direction": settings.bet_direction,
+            "vol_window_ticks": settings.vol_window_ticks, "vol_trailing_days": settings.vol_trailing_days,
+            "vol_target_percentile": settings.vol_target_percentile,
+            "current_vol_threshold": engine.vol_tracker.current_threshold(),
             "current_signal": engine.current_signal, "last_error": engine.last_error,
-            "strategy": {
-                "ready": engine.strategy.ready,
-                "tick_count": engine.strategy.tick_count,
-                "min_ticks_required": engine.strategy.MIN_TICKS,
-                "ticks_since_decision": engine.ticks_since_decision,
-            },
             "today": {"signals": int(signal_count or 0), "trades": int(trades), "pending": int(pending or 0),
                       "wins": int(wins or 0), "losses": int(losses or 0),
                       "win_rate": round((wins / trades * 100), 2) if trades else 0,
@@ -48,9 +45,10 @@ async def signals(limit: int = 100):
     limit = max(1, min(limit, 500))
     async with session() as db:
         rows = (await db.execute(select(Signal).order_by(Signal.created_at.desc()).limit(limit))).scalars().all()
-        return [{"id": x.id, "created_at": x.created_at, "decision_epoch": x.candle_epoch,
+        return [{"id": x.id, "created_at": x.created_at, "candle_epoch": x.candle_epoch,
                  "symbol": x.symbol, "direction": x.direction, "contract_type": x.contract_type,
-                 "score": x.score, "status": x.status, "reason": x.reason,
+                 "current_vol": x.current_vol, "vol_threshold": x.vol_threshold,
+                 "status": x.status, "reason": x.reason,
                  "barrier_offset": x.barrier_offset} for x in rows]
 
 
@@ -124,7 +122,13 @@ async def diagnostics():
         "mode": await get_effective_bot_mode(settings),
         "symbol": settings.market_symbol,
         "auto_trade": settings.auto_trade,
-        "barrier_fixed_offset": settings.barrier_fixed_offset,
+        "contract_duration_ticks": settings.contract_duration_ticks,
+        "barrier": settings.barrier,
+        "bet_direction": settings.bet_direction,
+        "vol_window_ticks": settings.vol_window_ticks,
+        "vol_trailing_days": settings.vol_trailing_days,
+        "vol_target_percentile": settings.vol_target_percentile,
+        "current_vol_threshold": engine.vol_tracker.current_threshold(),
         "last_error": engine.last_error,
         "current_signal": engine.current_signal,
         "recent_events": [
@@ -132,7 +136,8 @@ async def diagnostics():
             for e in events
         ],
         "recent_signals": [
-            {"created_at": s.created_at, "direction": s.direction, "status": s.status, "score": s.score,
+            {"created_at": s.created_at, "direction": s.direction, "status": s.status,
+             "current_vol": s.current_vol, "vol_threshold": s.vol_threshold,
              "barrier_offset": s.barrier_offset, "reason": s.reason}
             for s in recent_signals
         ],

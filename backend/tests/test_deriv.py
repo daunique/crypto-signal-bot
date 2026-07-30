@@ -30,10 +30,6 @@ def test_proposal_payload_uses_higher_lower_contract_types():
     # also why every barrier value was rejected as InvalidBarrier
     # regardless of magnitude or sign: CALL/PUT was never going to accept
     # a barrier here, no matter its value.
-    #
-    # 2026-07-26: duration switched from 180 (seconds) to 10 (ticks) for
-    # the new tick strategy -- contract_type itself is unaffected by that
-    # change.
     client = DerivClient()
     assert client.build_proposal_payload("R_25", "UP", 1.0, "USD", 10, 0.5)["contract_type"] == "HIGHER"
     assert client.build_proposal_payload("R_25", "DOWN", 1.0, "USD", 10, 0.5)["contract_type"] == "LOWER"
@@ -61,6 +57,24 @@ def test_proposal_payload_includes_signed_barrier_for_higher_lower():
     assert down_payload["barrier"] == "-0.523"
 
 
+def test_proposal_payload_supports_seconds_duration_unit_too():
+    # duration_unit defaults to "t" (ticks) since that's what this bot's
+    # backtested strategy uses, but the parameter itself stays general --
+    # nothing about a Higher/Lower proposal *requires* tick duration, and a
+    # future duration change shouldn't need a deriv.py edit, only a config
+    # one.
+    client = DerivClient()
+    payload = client.build_proposal_payload("R_25", "UP", 1.0, "USD", 60, 0.5, duration_unit="s")
+    assert payload["duration"] == 60
+    assert payload["duration_unit"] == "s"
+
+
+def test_proposal_payload_rejects_bad_duration_unit():
+    client = DerivClient()
+    with pytest.raises(ValueError):
+        client.build_proposal_payload("R_25", "UP", 1.0, "USD", 10, 0.5, duration_unit="m")
+
+
 def test_proposal_payload_rejects_non_positive_barrier_offset():
     # A Higher/Lower contract with no real distance from spot isn't a valid
     # barrier -- this should fail loudly rather than silently send a
@@ -75,16 +89,6 @@ def test_proposal_payload_rejects_unknown_direction():
     client = DerivClient()
     with pytest.raises(ValueError):
         client.build_proposal_payload("R_25", "SIDEWAYS", 1.0, "USD", 10, 0.5)
-
-
-def test_proposal_payload_rejects_duration_outside_one_to_ten_ticks():
-    # Deriv's tick-duration contracts are only valid for 1-10 ticks -- fail
-    # loudly here rather than letting Deriv reject the trade at execution
-    # time with a less obvious error.
-    client = DerivClient()
-    for bad_duration in (0, -1, 11, 180):
-        with pytest.raises(ValueError):
-            client.build_proposal_payload("R_25", "UP", 1.0, "USD", bad_duration, 0.5)
 
 
 def test_proposal_open_contract_payload_omits_subscribe():
