@@ -167,6 +167,21 @@ async def init_db():
         await _add_column_if_missing(conn, "signals", "vol_threshold", "FLOAT")
         await _add_column_if_missing(conn, "trades", "barrier", "VARCHAR(16)")
         await _add_column_if_missing(conn, "trades", "pnl_track", "VARCHAR(16)")
+        # The reverse problem: a column that's IN an existing live database
+        # (from a schema this table had before) but is no longer in this
+        # code's model at all -- e.g. `signals.score`, an Integer NOT NULL
+        # column from the pre-2026-07-29 EMA-strategy schema. Adding columns
+        # never breaks anything, but a leftover NOT NULL column with no
+        # default does: every INSERT that doesn't mention it fails outright
+        # (sqlite3.IntegrityError / IntegrityError on Postgres) -- which is
+        # exactly what happened here (2026-07-30 22:00 UTC: every qualifying
+        # signal crashed on insert, which uncaught propagated out of
+        # on_tick() and looked like a connection failure, repeatedly kicking
+        # the engine into RECONNECTING). Dropped rather than made nullable
+        # because it's not just unused by accident -- nothing in this
+        # strategy has a "score" concept to put there.
+        for table_name in ("signals", "trades"):
+            await _drop_unknown_columns(conn, table_name)
 
 
 _PNL_TRACK_KEYS = ("pnl_track", "pnl_track_delta", "pnl_track_consec_losses", "pnl_track_auto_demo")
@@ -220,6 +235,30 @@ async def _add_column_if_missing(conn, table: str, column: str, ddl_type: str):
     if not await conn.run_sync(_has_column):
         await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
         log.info("DB_MIGRATION added %s.%s", table, column)
+
+
+async def _drop_unknown_columns(conn, table: str):
+    """Drops any column present in the live database but absent from this
+    table's current model -- see the long comment in init_db() for why this
+    matters (a leftover NOT NULL column with no default breaks every
+    INSERT, not just ones that happen to touch it). Requires SQLite
+    3.35+ (2021) or Postgres, both of which support DROP COLUMN directly;
+    if it fails for any reason, this logs and leaves the column in place
+    rather than raising, since a redundant unused column existing is far
+    less bad than the migration step itself crashing startup.
+    """
+    known_columns = set(Base.metadata.tables[table].columns.keys())
+    def _get_columns(sync_conn):
+        return [c["name"] for c in inspect(sync_conn).get_columns(table)]
+    existing_columns = await conn.run_sync(_get_columns)
+    for column in existing_columns:
+        if column in known_columns:
+            continue
+        try:
+            await conn.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
+            log.info("DB_MIGRATION dropped stale column %s.%s", table, column)
+        except Exception:
+            log.exception("Could not drop stale column %s.%s -- leaving it in place", table, column)
 
 
 def session() -> AsyncSession:

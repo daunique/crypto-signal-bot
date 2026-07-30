@@ -305,6 +305,24 @@ class BotEngine:
             self.current_signal = {"status": "NO_SIGNAL", "candle_epoch": epoch}
             return
 
+        try:
+            await self._handle_qualified_signal(epoch, spot, decision)
+        except Exception as exc:
+            # A qualifying signal is rare and valuable (that's the whole
+            # point of the volatility filter) -- losing this one tick's
+            # opportunity to an unexpected DB/execution error is much
+            # better than what an uncaught exception here does: propagate
+            # out of on_tick() -> tick_loop() -> run(), which reads as a
+            # connection failure and drops the engine into a reconnect
+            # loop that re-hits the same error on the next qualifying
+            # signal. (This is exactly what a stale NOT NULL column with
+            # no default did on 2026-07-30 -- see db.py's
+            # _drop_unknown_columns -- before it was caught here too.)
+            self.last_error = str(exc)
+            log.exception("Failed to handle qualified signal at epoch %s", epoch)
+            await self.log_event("error", "signal_handling_error", str(exc))
+
+    async def _handle_qualified_signal(self, epoch: int, spot: float, decision):
         async with session() as db:
             # Only checked once a signal actually qualifies (not on every
             # tick) -- candle_epoch is unique in the DB, and this only
