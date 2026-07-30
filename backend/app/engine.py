@@ -4,9 +4,13 @@ import math
 import time
 from datetime import date, datetime, timedelta, timezone
 from .config import get_settings
-from .db import session, Signal, Trade, BotEvent, VolSample, get_effective_bot_mode, prune_old_vol_samples
+from .db import (
+    session, Signal, Trade, BotEvent, VolSample, get_effective_bot_mode, prune_old_vol_samples,
+    load_pnl_track_state, save_pnl_track_state, set_bot_mode_override,
+)
 from .deriv import DerivClient
 from .strategy import RollingVolatility, VolatilityTimingStrategy
+from .pnl_tracker import apply_trade_outcome
 from sqlalchemy import select
 
 log = logging.getLogger(__name__)
@@ -30,7 +34,7 @@ def _percentile(values: list[float], pct: float) -> float:
 
 
 class VolatilityTracker:
-    """Owns the rolling realized-volatility estimate and the trailing-day
+    """Owns the rolling realized-volatility estimate and the trailing-window
     percentile threshold that VolatilityTimingStrategy fires against. This is
     the stateful counterpart to strategy.py's stateless decision function --
     matching this project's existing split (see strategy.py's module
@@ -38,20 +42,38 @@ class VolatilityTracker:
     strategy.py) between "what does the data say right now" (owned here) and
     "given that, what do we do" (owned by VolatilityTimingStrategy).
 
-    Threshold is recomputed once per UTC day, from `vol_samples` rows in the
-    trailing `vol_trailing_days` window (never including today), so a signal
-    firing today never depends on today's own data -- matching the
-    non-lookahead backtest in the report (Section 11).
+    Threshold is recomputed continuously (every RECOMPUTE_EVERY_N_SAMPLES new
+    samples, roughly every 5 minutes) from `vol_samples` rows in the trailing
+    `vol_trailing_days`, using an absolute time cutoff rather than calendar-day
+    boundaries. This is still fully causal -- every sample used was recorded
+    from a tick strictly before the one currently being evaluated, so it's the
+    same non-lookahead property the backtest validated (Section 11), just
+    updated continuously instead of once a day.
+
+    (An earlier version of this recomputed once per UTC day and explicitly
+    excluded "today"'s own samples, to mirror the backtest's once-daily
+    threshold exactly. That turned out to have a real practical cost: on a
+    brand-new deployment there is no prior day at all, so the threshold
+    stayed None -- and the bot fired zero signals -- for the entire first
+    calendar day. Excluding "today" was never necessary for correctness
+    (a continuously-updated threshold that only ever looks at
+    already-elapsed ticks is exactly as non-lookahead as a once-daily one --
+    "today" isn't special, only "not yet happened" is), so this switches to
+    the continuous version, which reaches its first threshold within about
+    RECOMPUTE_EVERY_N_SAMPLES x SAMPLE_EVERY_N_TICKS ticks (roughly 3-4 hours
+    from a cold start) instead of a full day.)
     """
 
     SAMPLE_EVERY_N_TICKS = 30
     MIN_SAMPLES_FOR_THRESHOLD = 200  # below this, treat the threshold as unknown rather than noisy
+    RECOMPUTE_EVERY_N_SAMPLES = 10   # ~5 minutes at the default 30-tick/~2s-tick sampling rate
 
     def __init__(self, client: DerivClient, settings):
         self.client = client
         self.settings = settings
         self.rolling = RollingVolatility(settings.vol_window_ticks)
         self._tick_count = 0
+        self._samples_since_recompute = 0
         self._today: date | None = None
         self._threshold: float | None = None
 
@@ -63,16 +85,17 @@ class VolatilityTracker:
         its rolling window from live ticks from scratch, which only delays
         when it starts evaluating signals, not whether it starts at all.
 
-        This does NOT backfill `vol_samples` (the trailing-day history used
-        for the percentile threshold) -- doing that properly needs paginating
-        Deriv's `ticks_history` back `vol_trailing_days` days, which depends
-        on this account's actual per-request count cap and rate limits that
-        this environment has no way to verify against the live API. Until
-        that backfill is added, a brand-new deployment accumulates its own
-        trailing history over `vol_trailing_days` of uptime (see
+        This does NOT backfill `vol_samples` (the trailing-window history
+        used for the percentile threshold) -- doing that properly needs
+        paginating Deriv's `ticks_history` back `vol_trailing_days` days,
+        which depends on this account's actual per-request count cap and
+        rate limits that this environment has no way to verify against the
+        live API. Until that backfill is added, a brand-new deployment
+        accumulates its own trailing history from live ticks (see
         `current_threshold()`, which returns None -- and so fires no
-        signals -- until enough samples exist). That is a deliberate
-        fail-safe, not an oversight: trading on a fabricated or partial
+        signals -- until MIN_SAMPLES_FOR_THRESHOLD samples exist, roughly
+        3-4 hours from a cold start with the defaults). That is a deliberate
+        fail-safe, not an oversight: trading on a fabricated or too-thin
         threshold would silently not be the strategy that was backtested.
         """
         try:
@@ -98,7 +121,6 @@ class VolatilityTracker:
             self._today = today
         elif today != self._today:
             self._today = today
-            self._threshold = None  # force a recompute on the new day's first eligible tick
             await prune_old_vol_samples(self.settings.market_symbol, self.settings.vol_trailing_days)
         if current_vol is None:
             return None
@@ -107,18 +129,20 @@ class VolatilityTracker:
             async with session() as db:
                 db.add(VolSample(symbol=self.settings.market_symbol, day=today, epoch=epoch, vol=current_vol))
                 await db.commit()
-        if self._threshold is None:
-            await self._recompute_threshold(today)
+            self._samples_since_recompute += 1
+        if self._threshold is None or self._samples_since_recompute >= self.RECOMPUTE_EVERY_N_SAMPLES:
+            await self._recompute_threshold(epoch)
+            self._samples_since_recompute = 0
         return current_vol
 
-    async def _recompute_threshold(self, today: date):
-        cutoff = today - timedelta(days=self.settings.vol_trailing_days)
+    async def _recompute_threshold(self, current_epoch: int):
+        cutoff_epoch = current_epoch - self.settings.vol_trailing_days * 86400
         async with session() as db:
             rows = (await db.execute(
                 select(VolSample.vol).where(
                     VolSample.symbol == self.settings.market_symbol,
-                    VolSample.day >= cutoff,
-                    VolSample.day < today,
+                    VolSample.epoch >= cutoff_epoch,
+                    VolSample.epoch <= current_epoch,
                 )
             )).scalars().all()
         if len(rows) < self.MIN_SAMPLES_FOR_THRESHOLD:
@@ -144,6 +168,8 @@ class BotEngine:
         self._task: asyncio.Task | None = None
         self._settlement_tasks: set[asyncio.Task] = set()
         self._settling_contract_ids: set[str] = set()
+        self._background_tasks: set[asyncio.Task] = set()
+        self._pending_reconnect = False
 
     async def log_event(self, level: str, event_type: str, message: str):
         async with session() as db:
@@ -169,6 +195,8 @@ class BotEngine:
                 pass
         self._task = None
         for task in list(self._settlement_tasks):
+            task.cancel()
+        for task in list(self._background_tasks):
             task.cancel()
         await self.client.close()
 
@@ -229,8 +257,21 @@ class BotEngine:
         return task
 
     async def tick_loop(self):
-        async for tick in self.client.subscribe_ticks(self.settings.market_symbol):
-            if not self.running:
+        tick_stream = self.client.subscribe_ticks(self.settings.market_symbol)
+        while self.running:
+            if self._pending_reconnect:
+                self._pending_reconnect = False
+                raise RuntimeError("Reconnect requested (PnL-track mode switch)")
+            try:
+                tick = await asyncio.wait_for(tick_stream.__anext__(), timeout=5.0)
+            except asyncio.TimeoutError:
+                # Nothing arrived in the last 5s -- normal when a mode
+                # switch's client.close() just tore down the connection (see
+                # _apply_mode_switch): the loop above re-checks
+                # _pending_reconnect on the very next iteration instead of
+                # hanging forever on a queue nothing feeds anymore.
+                continue
+            except StopAsyncIteration:
                 return
             # See the equivalent comment in the previous candle-based version
             # of this loop (still applies verbatim): the public tick stream
@@ -336,12 +377,17 @@ class BotEngine:
             contract_id = str(buy.get("contract_id", ""))
             if not contract_id:
                 raise RuntimeError(f"Buy response did not contain contract_id: {buy_response}")
+            # Read once per trade (not cached) so a track switch that just
+            # happened in settle() for the previous trade is picked up
+            # immediately, matching "the next trade should switch" wording.
+            pnl_state = await load_pnl_track_state()
             async with session() as db:
                 db.add(Trade(
                     signal_id=signal_id, contract_id=contract_id, symbol=self.settings.market_symbol,
                     mode=self.client.current_mode or self.settings.bot_mode, direction=direction,
                     stake=self.settings.stake, payout=float(prop.get("payout", 0) or 0),
                     status="OPEN", entry_spot=spot, barrier=barrier_str,
+                    pnl_track=pnl_state.track,
                 ))
                 await db.commit()
             self._start_settlement_task(contract_id)
@@ -366,12 +412,15 @@ class BotEngine:
                     if poc.get("is_sold") or poc.get("status") in ("won", "lost"):
                         profit = float(poc.get("profit", 0) or 0)
                         status = "WON" if profit > 0 else "LOST"
+                        was_live_mode = False
                         async with session() as db:
                             row = (await db.execute(select(Trade).where(Trade.contract_id == contract_id))).scalar_one_or_none()
                             if row:
                                 row.profit = profit
                                 row.status = status
+                                was_live_mode = (row.mode == "live")
                                 await db.commit()
+                        await self._advance_pnl_track(profit, was_live_mode)
                         return
                 except asyncio.CancelledError:
                     raise
@@ -390,3 +439,55 @@ class BotEngine:
             # a stale entry that would block a legitimate future resume.
             self.trade_in_flight = False
             self._settling_contract_ids.discard(contract_id)
+
+    async def _advance_pnl_track(self, profit: float, was_live_mode: bool):
+        """Runs the main/sub PnL-track state machine (pnl_tracker.py) against
+        one just-settled trade's outcome, persists the result, and -- if it
+        calls for a mode switch -- applies it. See pnl_tracker.py's module
+        docstring for the exact rule."""
+        state = await load_pnl_track_state()
+        new_state, mode_switch = apply_trade_outcome(
+            state, profit, was_live_mode,
+            profit_target=self.settings.pnl_track_profit_target,
+            loss_streak_limit=self.settings.pnl_track_loss_streak_limit,
+        )
+        await save_pnl_track_state(new_state)
+        if new_state.track != state.track:
+            await self.log_event(
+                "info", "pnl_track_switch",
+                f"PnL track switched {state.track} -> {new_state.track}"
+                + (f" (mode -> {mode_switch})" if mode_switch else ""),
+            )
+        if mode_switch:
+            # Spawned as an independent task (not awaited here) so this
+            # method -- called from inside settle(), itself one of
+            # self._settlement_tasks -- never calls anything that could
+            # cancel its own task from within itself. See
+            # _apply_mode_switch's docstring for why it forces a reconnect
+            # via client.close() rather than self.stop()/self.start() for
+            # the same reason.
+            task = asyncio.create_task(self._apply_mode_switch(mode_switch), name=f"pnl-track-mode-switch-{mode_switch}")
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+
+    async def _apply_mode_switch(self, mode: str):
+        """Persists the new BOT_MODE override, then forces a reconnect --
+        setting _pending_reconnect (picked up within 5s by tick_loop's
+        timeout-based poll, see there) and closing the client so the stale
+        connection isn't left dangling. Deliberately does NOT call
+        self.stop()/self.start(): this runs from settle() -> 
+        _advance_pnl_track() -> here, i.e. from inside one of
+        self._settlement_tasks, and stop() cancels every task in that set --
+        including, in that call chain, the very settlement task this call
+        originated from. Signaling run()'s existing reconnect loop instead
+        (same path a dropped connection already takes) sidesteps that
+        entirely.
+        """
+        try:
+            await set_bot_mode_override(mode)
+            await self.log_event("info", "pnl_track_mode_switch", f"Auto-switching bot mode to {mode}")
+            self._pending_reconnect = True
+            await self.client.close()
+        except Exception as exc:
+            log.exception("Failed to apply PnL-track mode switch to %s", mode)
+            await self.log_event("error", "pnl_track_mode_switch_failed", str(exc))

@@ -22,7 +22,21 @@ At the live quoted payout for R_25 barrier 0.30 ($3.00 back per $1 staked → br
 ### What to verify before trading this live
 
 - **Tick-duration Higher/Lower contracts for this account/symbol are not yet confirmed.** This account's own `contracts_for` check (2026-07-24) found an "intraday" (15s–1d) duration tier for R_25's `higherlower` category, but that check pre-dates this bot's move to tick-duration contracts (2026-07-29) and did not specifically confirm a `duration_unit: "t"` tier. Run `/api/diagnostics/contracts-for` after connecting and check the response before enabling `AUTO_TRADE=true` in live mode. If tick duration isn't offered, `proposal()` will fail loudly (a `DerivAPIError`) rather than silently substituting a different duration.
-- **The 90-day trailing volatility history is not backfilled from Deriv on first deploy** (see `engine.py`'s `VolatilityTracker.bootstrap()` docstring for why — it needs paginating `ticks_history` in a way that depends on this account's actual rate limits, which this project's development environment had no way to verify against the live API). A brand-new deployment accumulates its own trailing history over `VOL_TRAILING_DAYS` of uptime and **will not fire any signals until then** (`current_vol_threshold` in `/api/status` stays `null`) — this is a deliberate fail-safe, not a bug.
+- **The trailing volatility history is not backfilled from Deriv on first deploy** (see `engine.py`'s `VolatilityTracker.bootstrap()` docstring for why — it needs paginating `ticks_history` in a way that depends on this account's actual rate limits, which this project's development environment had no way to verify against the live API). A brand-new deployment accumulates its own trailing history from live ticks and **won't fire any signals until `MIN_SAMPLES_FOR_THRESHOLD` (200) samples exist** — roughly 3–4 hours of uptime from a cold start with the default settings (`current_vol_threshold` in `/api/status` stays `null` until then). This is a deliberate fail-safe, not a bug. (An earlier version of this recomputed the threshold once per UTC day and excluded the current day entirely, which meant zero signals for the *entire* first calendar day after any fresh deploy — that's fixed now: the threshold updates continuously from an absolute trailing time window, so already-accumulated same-day samples count immediately.)
+
+## Main/sub PnL-track risk-management overlay
+
+Sits on top of the strategy above — it doesn't change when a signal fires, only which PnL bucket a trade is recorded against, and (live accounts only) whether that trade is actually placed live or diverted to demo. Two tracks, **MAIN** and **SUB**:
+
+1. Trades are recorded against **MAIN** until MAIN's PnL (accumulated since it was last entered) reaches `PNL_TRACK_PROFIT_TARGET` (default +$10). The next trade then switches to **SUB**. On a **live** account, this also switches the bot to demo mode; on a demo account it's a pure bookkeeping split (already in demo either way).
+2. Trades stay on **SUB** until a loss streak of `PNL_TRACK_LOSS_STREAK_LIMIT` (default 5) happens. The next trade after that switches back to **MAIN** — and, if this account was auto-switched to demo in step 1, back to live.
+3. Repeats indefinitely. A win on SUB resets its loss streak without switching anything; losses while accumulating toward the target on MAIN don't switch anything either (MAIN's only exit condition is the profit target, SUB's only exit condition is the loss streak).
+
+The dashboard shows both **Main PnL** and **Sub PnL** as all-time (not daily) cumulative totals, plus the current track and progress toward its exit condition. Each trade's `pnl_track` is fixed at the moment it opens (visible on the Trades page) and never changes retroactively.
+
+**Mechanics worth knowing:** the live→demo (or demo→live) switch is applied by persisting the mode change and forcing the engine to reconnect — picked up within about 5 seconds by the same connection-health check that already handles a dropped connection (see `engine.py`'s `tick_loop`/`_apply_mode_switch`), not instantaneously. If the account was manually set to demo through the Settings-page toggle (not by this feature), returning from SUB to MAIN will **not** force it to live — it only restores the mode this feature itself changed away from.
+
+This is a risk-management overlay, not a fix for the strategy's edge: switching where PnL is recorded, or switching accounts, doesn't change the per-trade expected value documented above. It changes the shape of exposure (when real capital is at risk), not the sign of the average outcome.
 
 ## Configuration
 
@@ -43,6 +57,8 @@ Set via `.env` locally, or Fly secrets / `fly.toml` `[env]` in production.
 | `VOL_WINDOW_TICKS` | `100` | Rolling window (in ticks) for the realized-volatility estimate |
 | `VOL_TRAILING_DAYS` | `90` | How many preceding days feed the percentile threshold |
 | `VOL_TARGET_PERCENTILE` | `90.0` | Signal fires when current volatility is at/above this percentile of its trailing history |
+| `PNL_TRACK_PROFIT_TARGET` | `10.0` | MAIN → SUB once MAIN's PnL since entering it reaches this (see "Main/sub PnL-track" below) |
+| `PNL_TRACK_LOSS_STREAK_LIMIT` | `5` | SUB → MAIN once this many consecutive losses happen on SUB |
 | `DATABASE_URL` | `sqlite+aiosqlite:///./data/bot.db` | SQLite by default; any Postgres-compatible URL also works |
 
 ## Local run
@@ -77,8 +93,9 @@ Health check: `curl https://YOUR_APP.fly.dev/health`.
 
 ## Dashboard
 
-- **Dashboard** — bot status, current signal, today's PnL/win-rate/wins/losses, a ring showing current rolling volatility relative to the trailing-percentile threshold.
-- **Signals** / **Trades** — history with color-coded status badges (qualified/executed/error, won/lost/pending), including the volatility reading and threshold each signal fired on.
+- **Dashboard** — bot status, current signal, the main/sub PnL-track card (current track, all-time PnL for each, progress toward the next switch), today's PnL/win-rate/wins/losses, a ring showing current rolling volatility relative to the trailing-percentile threshold.
+- **Trades** — history with color-coded status badges (won/lost/pending) and which PnL track each trade was recorded against.
+- **Signals** — history with color-coded status badges (qualified/executed/error), including the volatility reading and threshold each signal fired on.
 - **P&L** — cumulative PnL chart and daily breakdown.
 - **Settings** — Demo/Live toggle (saves automatically, restarts the bot to apply), the fixed barrier/direction/volatility-filter settings, and two diagnostics tools: a copyable activity/error summary (`/api/diagnostics`), and a live query of Deriv's own contract specs for this symbol (`/api/diagnostics/contracts-for`).
 
@@ -86,7 +103,8 @@ Health check: `curl https://YOUR_APP.fly.dev/health`.
 
 - `backend/app/deriv.py` — Deriv API client: separate public (market data) and trade (authenticated) WebSockets, PAT + OTP auth, structured error handling, reconnect/backoff, tick-duration proposals, and raw tick-history fetching for volatility bootstrap.
 - `backend/app/strategy.py` — `RollingVolatility` (incremental rolling std of tick deltas) and `VolatilityTimingStrategy` (pure, stateless decision function: given a current volatility reading and threshold, fire or don't).
-- `backend/app/engine.py` — `VolatilityTracker` (owns the rolling window, the persisted trailing-day sample history, and the daily percentile threshold) plus `BotEngine` (tick loop, signal → execution → settlement lifecycle, non-overlapping-trade enforcement, connection health monitoring, resume-open-trades-after-restart).
+- `backend/app/pnl_tracker.py` — `apply_trade_outcome`, the pure, stateless main/sub PnL-track state machine (see "Main/sub PnL-track" above).
+- `backend/app/engine.py` — `VolatilityTracker` (owns the rolling window, the persisted trailing-window sample history, and the continuously-updated percentile threshold) plus `BotEngine` (tick loop, signal → execution → settlement lifecycle, non-overlapping-trade enforcement, connection health monitoring, resume-open-trades-after-restart, the PnL-track-driven demo/live mode switch).
 - `backend/app/api.py` / `main.py` — FastAPI app, dashboard API, static asset serving (cache-busted by build version so a redeploy can't leave a browser on stale JS/CSS).
 - `backend/app/db.py` — SQLAlchemy models (`Signal`, `Trade`, `BotEvent`, `RuntimeSetting`, `VolSample`) with lightweight additive migrations for existing databases.
 - `frontend/` — vanilla HTML/CSS/JS dashboard, no build step, served directly by FastAPI.

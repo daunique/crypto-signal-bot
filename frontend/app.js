@@ -131,6 +131,20 @@ async function renderDashboard() {
       </div>
     </div>
 
+    <div class="card">
+      <h2>PnL Track <span class="chip">${esc((s.pnl_track.current || "main").toUpperCase())}</span></h2>
+      <div class="stat-grid">
+        <div class="stat"><div class="stat-label">Main PnL (all-time)</div><div class="stat-value ${pnlClass(s.pnl_track.main_pnl_alltime)}">${Number(s.pnl_track.main_pnl_alltime).toFixed(2)}</div></div>
+        <div class="stat"><div class="stat-label">Sub PnL (all-time)</div><div class="stat-value ${pnlClass(s.pnl_track.sub_pnl_alltime)}">${Number(s.pnl_track.sub_pnl_alltime).toFixed(2)}</div></div>
+      </div>
+      <p class="muted" style="margin-top:12px">
+        ${s.pnl_track.current === "main"
+          ? `On MAIN, ${s.pnl_track.delta_since_entering.toFixed(2)} / ${Number(s.pnl_track.profit_target).toFixed(2)} toward switching to SUB.`
+          : `On SUB, loss streak ${s.pnl_track.consec_losses} / ${s.pnl_track.loss_streak_limit} toward switching back to MAIN.`}
+        ${s.pnl_track.auto_demo_active ? ` This account auto-switched to <strong>demo</strong> when it entered SUB and will return to live once it switches back.` : ""}
+      </p>
+    </div>
+
     <div class="stat-grid">
       <div class="stat"><div class="stat-label">Today's PnL</div><div class="stat-value ${pnlClass(t.pnl)}">${Number(t.pnl).toFixed(2)}</div></div>
       <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-value">${t.win_rate}%</div></div>
@@ -166,7 +180,7 @@ async function renderTrades() {
   app.innerHTML = `<div class="card">
     <h2>Trades</h2>
     ${rows.length ? `<div class="table-wrap"><table><thead><tr>
-      <th>Time</th><th>Mode</th><th>Direction</th><th class="num">Barrier</th><th class="num">Stake</th><th class="num">Profit</th><th>Status</th>
+      <th>Time</th><th>Mode</th><th>Direction</th><th class="num">Barrier</th><th class="num">Stake</th><th class="num">Profit</th><th>Track</th><th>Status</th>
     </tr></thead><tbody>
     ${rows.map(x => `<tr>
       <td class="time">${esc(x.created_at)}</td>
@@ -175,6 +189,7 @@ async function renderTrades() {
       <td class="num">${esc(x.barrier || "-")}</td>
       <td class="num">${Number(x.stake).toFixed(2)}</td>
       <td class="num ${pnlClass(x.profit)}">${x.profit != null ? Number(x.profit).toFixed(2) : "-"}</td>
+      <td>${esc((x.pnl_track || "main").toUpperCase())}</td>
       <td>${tradeBadge(x.status)}</td>
     </tr>`).join("")}
     </tbody></table></div>` : `<div class="empty-state">No trades yet.</div>`}
@@ -275,6 +290,20 @@ async function renderSettings() {
           <div class="settings-row-desc">Fires when rolling volatility (last ${s.vol_window_ticks} ticks) is at or above this percentile of its trailing ${s.vol_trailing_days}-day history. Set via VOL_TARGET_PERCENTILE.</div>
         </div>
         <span class="chip">top ${(100 - s.vol_target_percentile).toFixed(0)}%</span>
+      </div>
+      <div class="settings-row">
+        <div>
+          <div class="settings-row-label">PnL-track profit target</div>
+          <div class="settings-row-desc">MAIN switches to SUB once MAIN's PnL (since last entering it) reaches this. Live accounts also auto-switch to demo when this happens. Set via PNL_TRACK_PROFIT_TARGET.</div>
+        </div>
+        <span class="chip">+${Number(s.pnl_track.profit_target).toFixed(2)}</span>
+      </div>
+      <div class="settings-row">
+        <div>
+          <div class="settings-row-label">PnL-track loss-streak limit</div>
+          <div class="settings-row-desc">SUB switches back to MAIN once this many consecutive losses happen on SUB. Live accounts also auto-switch back to live at that point. Set via PNL_TRACK_LOSS_STREAK_LIMIT.</div>
+        </div>
+        <span class="chip">${s.pnl_track.loss_streak_limit}</span>
       </div>
     </div>
     <div class="card">

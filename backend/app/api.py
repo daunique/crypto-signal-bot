@@ -4,7 +4,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from sqlalchemy import select, func
 from .config import get_settings, BUILD_VERSION
-from .db import session, Signal, Trade, BotEvent, get_effective_bot_mode, set_bot_mode_override
+from .db import session, Signal, Trade, BotEvent, get_effective_bot_mode, set_bot_mode_override, load_pnl_track_state, get_track_pnl_totals
 from .engine import BotEngine
 
 router = APIRouter()
@@ -25,6 +25,8 @@ async def status():
         pending = (await db.execute(select(func.count(Trade.id)).where(Trade.created_at >= start, Trade.created_at < end, Trade.status.in_(["PENDING", "OPEN"])))).scalar_one()
         pnl = (await db.execute(select(func.coalesce(func.sum(Trade.profit), 0.0)).where(Trade.created_at >= start, Trade.created_at < end))).scalar_one() or 0.0
         trades = wins + losses
+        pnl_track_state = await load_pnl_track_state()
+        track_totals = await get_track_pnl_totals()
         return {
             "bot_status": engine.status, "mode": mode, "symbol": settings.market_symbol,
             "contract_duration_ticks": settings.contract_duration_ticks, "auto_trade": settings.auto_trade,
@@ -33,6 +35,16 @@ async def status():
             "vol_target_percentile": settings.vol_target_percentile,
             "current_vol_threshold": engine.vol_tracker.current_threshold(),
             "current_signal": engine.current_signal, "last_error": engine.last_error,
+            "pnl_track": {
+                "current": pnl_track_state.track,
+                "delta_since_entering": round(pnl_track_state.delta, 2),
+                "consec_losses": pnl_track_state.consec_losses,
+                "auto_demo_active": pnl_track_state.auto_demo_active,
+                "profit_target": settings.pnl_track_profit_target,
+                "loss_streak_limit": settings.pnl_track_loss_streak_limit,
+                "main_pnl_alltime": round(track_totals["main"], 2),
+                "sub_pnl_alltime": round(track_totals["sub"], 2),
+            },
             "today": {"signals": int(signal_count or 0), "trades": int(trades), "pending": int(pending or 0),
                       "wins": int(wins or 0), "losses": int(losses or 0),
                       "win_rate": round((wins / trades * 100), 2) if trades else 0,
@@ -60,7 +72,8 @@ async def trades(limit: int = 100):
         return [{"id": x.id, "created_at": x.created_at, "contract_id": x.contract_id,
                  "symbol": x.symbol, "mode": x.mode, "direction": x.direction,
                  "stake": x.stake, "payout": x.payout, "profit": x.profit,
-                 "status": x.status, "entry_spot": x.entry_spot, "barrier": x.barrier} for x in rows]
+                 "status": x.status, "entry_spot": x.entry_spot, "barrier": x.barrier,
+                 "pnl_track": x.pnl_track} for x in rows]
 
 
 @router.get("/api/pnl-history")
@@ -115,6 +128,8 @@ async def diagnostics():
         events = (await db.execute(select(BotEvent).order_by(BotEvent.created_at.desc()).limit(25))).scalars().all()
         recent_signals = (await db.execute(select(Signal).order_by(Signal.created_at.desc()).limit(10))).scalars().all()
         recent_trades = (await db.execute(select(Trade).order_by(Trade.created_at.desc()).limit(10))).scalars().all()
+    pnl_track_state = await load_pnl_track_state()
+    track_totals = await get_track_pnl_totals()
     return {
         "generated_at": datetime.now(timezone.utc),
         "build_version": BUILD_VERSION,
@@ -129,6 +144,14 @@ async def diagnostics():
         "vol_trailing_days": settings.vol_trailing_days,
         "vol_target_percentile": settings.vol_target_percentile,
         "current_vol_threshold": engine.vol_tracker.current_threshold(),
+        "pnl_track_current": pnl_track_state.track,
+        "pnl_track_delta_since_entering": round(pnl_track_state.delta, 2),
+        "pnl_track_consec_losses": pnl_track_state.consec_losses,
+        "pnl_track_auto_demo_active": pnl_track_state.auto_demo_active,
+        "pnl_track_profit_target": settings.pnl_track_profit_target,
+        "pnl_track_loss_streak_limit": settings.pnl_track_loss_streak_limit,
+        "main_pnl_alltime": round(track_totals["main"], 2),
+        "sub_pnl_alltime": round(track_totals["sub"], 2),
         "last_error": engine.last_error,
         "current_signal": engine.current_signal,
         "recent_events": [
@@ -143,7 +166,8 @@ async def diagnostics():
         ],
         "recent_trades": [
             {"created_at": t.created_at, "direction": t.direction, "status": t.status, "barrier": t.barrier,
-             "stake": t.stake, "profit": t.profit, "contract_id": t.contract_id}
+             "stake": t.stake, "profit": t.profit, "contract_id": t.contract_id, "mode": t.mode,
+             "pnl_track": t.pnl_track}
             for t in recent_trades
         ],
     }

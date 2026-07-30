@@ -1,9 +1,10 @@
 import logging
 from datetime import datetime, timezone, date
-from sqlalchemy import String, Float, Integer, DateTime, Text, Date, inspect, text, delete
+from sqlalchemy import String, Float, Integer, DateTime, Text, Date, inspect, text, delete, select, func
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from .config import get_settings
+from .pnl_tracker import PnLTrackState
 
 log = logging.getLogger(__name__)
 settings = get_settings()
@@ -57,6 +58,11 @@ class Trade(Base):
     status: Mapped[str] = mapped_column(String(32), default="PENDING")
     entry_spot: Mapped[float | None] = mapped_column(Float, nullable=True)
     barrier: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Which PnL bucket this trade was recorded against, set at the moment
+    # the trade opened -- see pnl_tracker.py. "main" for any trade not
+    # using the main/sub overlay (kept nullable so pre-existing rows from
+    # before this feature don't need backfilling).
+    pnl_track: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
 class BotEvent(Base):
@@ -160,6 +166,52 @@ async def init_db():
         await _add_column_if_missing(conn, "signals", "current_vol", "FLOAT")
         await _add_column_if_missing(conn, "signals", "vol_threshold", "FLOAT")
         await _add_column_if_missing(conn, "trades", "barrier", "VARCHAR(16)")
+        await _add_column_if_missing(conn, "trades", "pnl_track", "VARCHAR(16)")
+
+
+_PNL_TRACK_KEYS = ("pnl_track", "pnl_track_delta", "pnl_track_consec_losses", "pnl_track_auto_demo")
+
+
+async def load_pnl_track_state():
+    """Loads the persisted main/sub PnL-track state (see pnl_tracker.py),
+    defaulting to a fresh "main" state if this is the first time it's been
+    read (e.g. right after this feature is first deployed)."""
+    async with session() as db:
+        rows = {}
+        for key in _PNL_TRACK_KEYS:
+            row = await db.get(RuntimeSetting, key)
+            rows[key] = row.value if row else None
+    return PnLTrackState(
+        track=rows["pnl_track"] or "main",
+        delta=float(rows["pnl_track_delta"]) if rows["pnl_track_delta"] is not None else 0.0,
+        consec_losses=int(rows["pnl_track_consec_losses"]) if rows["pnl_track_consec_losses"] is not None else 0,
+        auto_demo_active=(rows["pnl_track_auto_demo"] == "true"),
+    )
+
+
+async def save_pnl_track_state(state) -> None:
+    await set_runtime_setting("pnl_track", state.track)
+    await set_runtime_setting("pnl_track_delta", repr(state.delta))
+    await set_runtime_setting("pnl_track_consec_losses", str(state.consec_losses))
+    await set_runtime_setting("pnl_track_auto_demo", "true" if state.auto_demo_active else "false")
+
+
+async def get_track_pnl_totals() -> dict:
+    """All-time (not daily) PnL summed per track, from settled trades only --
+    this is a lifetime/cumulative view by design, since the $-profit target
+    that moves a trade between tracks is an absolute dollar amount, not a
+    daily one."""
+    async with session() as db:
+        rows = (await db.execute(
+            select(Trade.pnl_track, func.sum(Trade.profit))
+            .where(Trade.status.in_(("WON", "LOST")))
+            .group_by(Trade.pnl_track)
+        )).all()
+    totals = {"main": 0.0, "sub": 0.0}
+    for track, total in rows:
+        if track in totals and total is not None:
+            totals[track] = float(total)
+    return totals
 
 
 async def _add_column_if_missing(conn, table: str, column: str, ddl_type: str):

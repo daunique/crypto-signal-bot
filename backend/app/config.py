@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Kept here (rather than main.py) so api.py can import it too without a
 # main.py <-> api.py circular import (main.py imports the router from api.py).
-BUILD_VERSION = "2026-07-29-v25-volatility-timing-strategy-1"
+BUILD_VERSION = "2026-07-30-main-sub-pnl-track-1"
 
 
 class Settings(BaseSettings):
@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     # direction.
     vol_target_percentile: float = 90.0
 
+    # --- Main/sub PnL-track risk-management overlay (see pnl_tracker.py) ---
+    # This sits on top of the strategy above; it doesn't change when a
+    # signal fires, only which PnL bucket a trade is recorded against, and
+    # (live accounts only) whether that trade is actually placed live or
+    # diverted to demo.
+    pnl_track_profit_target: float = 10.0
+    pnl_track_loss_streak_limit: int = 5
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",
@@ -85,6 +93,10 @@ class Settings(BaseSettings):
             raise ValueError("VOL_TRAILING_DAYS must be greater than zero")
         if not (0 < self.vol_target_percentile < 100):
             raise ValueError("VOL_TARGET_PERCENTILE must be between 0 and 100 (exclusive)")
+        if self.pnl_track_profit_target <= 0:
+            raise ValueError("PNL_TRACK_PROFIT_TARGET must be greater than zero")
+        if self.pnl_track_loss_streak_limit <= 0:
+            raise ValueError("PNL_TRACK_LOSS_STREAK_LIMIT must be greater than zero")
 
 
 @lru_cache

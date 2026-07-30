@@ -15,6 +15,8 @@ primary_region = "ams"
   VOL_WINDOW_TICKS = "100"
   VOL_TRAILING_DAYS = "90"
   VOL_TARGET_PERCENTILE = "90.0"
+  PNL_TRACK_PROFIT_TARGET = "10.0"
+  PNL_TRACK_LOSS_STREAK_LIMIT = "5"
 
 [http_service]
   internal_port = 8080
